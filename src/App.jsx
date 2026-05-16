@@ -193,9 +193,10 @@ function Card({ p, go }) {
 }
 
 // ─── Navbar ───────────────────────────────────────────────────────────────────
-function Nav({ r, go, openCart, user, logout }) {
+function Nav({ r, go, openCart, user, logout, onLogout }) {
   const { cnt } = useCart();
   const mob = useMob();
+  const { prods: navProds } = useProds();
   const [open, setOpen] = useState(false);
   const links = [["#home","الرئيسية"],["#products","المنتجات"],["#about","عن نوّرة"],["#contact","تواصلي معنا"],["#shipping","الشحن والإرجاع"]];
   return (
@@ -207,7 +208,7 @@ function Nav({ r, go, openCart, user, logout }) {
             <ul style={{ display: "flex", gap: 20, listStyle: "none", margin: 0, padding: 0 }}>
               {links.map(([h, l]) => <li key={h}><span onClick={() => go(h)} style={{ cursor: "pointer", color: r === h ? C.go : C.dk, fontSize: 13, fontFamily: "Tajawal,sans-serif" }}>{l}</span></li>)}
             </ul>
-            <SearchBar go={go} allProds={(prods && prods.length) ? prods : PRODS} />
+            <SearchBar go={go} allProds={(navProds && navProds.length) ? navProds : PRODS} />
           </div>
         )}
         <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
@@ -1206,13 +1207,13 @@ function AppInner() {
       if (!user || user.role !== "admin") { go("#login"); return null; }
       return <AdminDash go={go} />;
     }
-    if (pid) return <ProdDetail id={pid} go={go} allProds={prods||PRODS} />;
+    if (pid) return <ProdDetail id={pid} go={go} allProds={(prods&&prods.length)?prods:PRODS} />;
     switch (route) {
-      case "#products": return <Products go={go} allProds={prods||PRODS} />;
+      case "#products": return <Products go={go} allProds={(prods&&prods.length)?prods:PRODS} />;
       case "#about":    return <About go={go} />;
       case "#contact":  return <Contact />;
       case "#shipping": return <Shipping />;
-      default:          return <Home go={go} allProds={prods||PRODS} />;
+      default:          return <Home go={go} allProds={(prods&&prods.length)?prods:PRODS} />;
     }
   };
 
