@@ -871,7 +871,9 @@ function Reviews({ productId }) {
 }
 
 // ─── Pages ────────────────────────────────────────────────────────────────────
-function Home({ go, prods }) {
+function Home({ go, prods, allProds }) {
+  const { prods: _p } = useProds();
+  const homProds = allProds || prods || _p || PRODS;
   const mob = useMob();
   const px = mob ? "16px" : "56px";
   return (
@@ -913,7 +915,7 @@ function Home({ go, prods }) {
           <h2 style={{ fontFamily: "Georgia,serif", fontSize: mob ? 24 : 32, fontWeight: 300, color: C.dk }}>منتجاتنا المختارة</h2>
         </div>
         <div style={{ display: "grid", gridTemplateColumns: mob ? "1fr" : "repeat(3,1fr)", gap: mob ? 12 : 16, maxWidth: 1050, margin: "0 auto" }}>
-          {(allProds && allProds.length ? allProds : PRODS).slice(0, 3).map(p => <Card key={p.id} p={p} go={go} />)}
+          {homProds.slice(0, 3).map(p => <Card key={p.id} p={p} go={go} />)}
         </div>
         <div style={{ textAlign: "center", marginTop: 22 }}>
           <Btn onClick={() => go("#products")} style={{ background: "none", border: `1px solid ${C.dk}`, color: C.dk, padding: mob ? "10px 22px" : "12px 28px", fontSize: 12, letterSpacing: 2 }}>عرض كل المنتجات</Btn>
@@ -930,6 +932,8 @@ function Home({ go, prods }) {
 }
 
 function Products({ go, allProds }) {
+  const { prods: _p } = useProds();
+  allProds = allProds || _p || PRODS;
   const mob = useMob();
   const [fil, setFil] = useState("الكل");
   const [srt, setSrt] = useState("d");
@@ -963,6 +967,8 @@ function Products({ go, allProds }) {
 }
 
 function ProdDetail({ id, go, allProds }) {
+  const { prods: _p } = useProds();
+  allProds = allProds || _p || PRODS;
   const { add } = useCart();
   const { show } = useToast();
   const mob = useMob();
