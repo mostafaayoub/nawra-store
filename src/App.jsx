@@ -207,7 +207,7 @@ function Nav({ r, go, openCart, user, logout }) {
             <ul style={{ display: "flex", gap: 20, listStyle: "none", margin: 0, padding: 0 }}>
               {links.map(([h, l]) => <li key={h}><span onClick={() => go(h)} style={{ cursor: "pointer", color: r === h ? C.go : C.dk, fontSize: 13, fontFamily: "Tajawal,sans-serif" }}>{l}</span></li>)}
             </ul>
-            <SearchBar go={go} allProds={prods||PRODS} />
+            <SearchBar go={go} allProds={(prods && prods.length) ? prods : PRODS} />
           </div>
         )}
         <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
@@ -912,7 +912,7 @@ function Home({ go, prods }) {
           <h2 style={{ fontFamily: "Georgia,serif", fontSize: mob ? 24 : 32, fontWeight: 300, color: C.dk }}>منتجاتنا المختارة</h2>
         </div>
         <div style={{ display: "grid", gridTemplateColumns: mob ? "1fr" : "repeat(3,1fr)", gap: mob ? 12 : 16, maxWidth: 1050, margin: "0 auto" }}>
-          {(allProds || PRODS).slice(0, 3).map(p => <Card key={p.id} p={p} go={go} />)}
+          {(allProds && allProds.length ? allProds : PRODS).slice(0, 3).map(p => <Card key={p.id} p={p} go={go} />)}
         </div>
         <div style={{ textAlign: "center", marginTop: 22 }}>
           <Btn onClick={() => go("#products")} style={{ background: "none", border: `1px solid ${C.dk}`, color: C.dk, padding: mob ? "10px 22px" : "12px 28px", fontSize: 12, letterSpacing: 2 }}>عرض كل المنتجات</Btn>
@@ -932,7 +932,7 @@ function Products({ go, allProds }) {
   const mob = useMob();
   const [fil, setFil] = useState("الكل");
   const [srt, setSrt] = useState("d");
-  const prodsData = allProds || PRODS;
+  const prodsData = (allProds && allProds.length) ? allProds : PRODS;
   const brands = ["الكل", ...[...new Set(prodsData.map(p => p.brand))]];
   let list = fil === "الكل" ? prodsData : prodsData.filter(p => p.brand === fil);
   if (srt === "a") list = [...list].sort((a, b) => a.price - b.price);
@@ -967,7 +967,7 @@ function ProdDetail({ id, go, allProds }) {
   const mob = useMob();
   const [qty, setQty] = useState(1);
   const [tab, setTab] = useState("d");
-  const prodsData = allProds || PRODS;
+  const prodsData = (allProds && allProds.length) ? allProds : PRODS;
   const p = prodsData.find(x => x.id === id);
   if (!p) return <div style={{ padding: 60, textAlign: "center", direction: "rtl" }}>المنتج غير موجود</div>;
   const px = mob ? "16px" : "56px";
@@ -1206,13 +1206,13 @@ function AppInner() {
       if (!user || user.role !== "admin") { go("#login"); return null; }
       return <AdminDash go={go} />;
     }
-    if (pid) { const p = prods.find(x => x.id === pid); return <ProdDetail id={pid} go={go} allProds={prods} />; }
+    if (pid) return <ProdDetail id={pid} go={go} allProds={prods||PRODS} />;
     switch (route) {
-      case "#products": return <Products go={go} allProds={prods} />;
+      case "#products": return <Products go={go} allProds={prods||PRODS} />;
       case "#about":    return <About go={go} />;
       case "#contact":  return <Contact />;
       case "#shipping": return <Shipping />;
-      default:          return <Home go={go} allProds={prods} />;
+      default:          return <Home go={go} allProds={prods||PRODS} />;
     }
   };
 
