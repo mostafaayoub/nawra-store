@@ -18,20 +18,21 @@ function AuthProvider({ children }) {
       setUser(admin); return { ok: true };
     }
     const users = JSON.parse(localStorage.getItem("nawra_users") || "[]");
-    const found = users.find(x => x.username === u && x.password === p);
+    const found = users.find(x => x.email === u && x.password === p);
     if (found) {
-      const u2 = { name: found.name, role: "user", username: found.username };
+      const u2 = { name: found.name, role: "user", email: found.email };
       localStorage.setItem("nawra_user", JSON.stringify(u2));
       setUser(u2); return { ok: true };
     }
-    return { ok: false, err: "اسم المستخدم أو كلمة المرور غلط" };
+    return { ok: false, err: "البريد الإلكتروني أو كلمة المرور غلط" };
   };
-  const register = (name, username, p) => {
+  const register = (name, email, p) => {
     const users = JSON.parse(localStorage.getItem("nawra_users") || "[]");
-    if (users.find(x => x.username === username)) return { ok: false, err: "اسم المستخدم موجود بالفعل" };
-    users.push({ name, username, password: p });
+    if (users.find(x => x.email === email)) return { ok: false, err: "البريد الإلكتروني مسجل بالفعل" };
+    const registeredAt = new Date().toLocaleDateString("ar-EG");
+    users.push({ name, email, password: p, registeredAt });
     localStorage.setItem("nawra_users", JSON.stringify(users));
-    const u2 = { name, role: "user", username };
+    const u2 = { name, role: "user", email };
     localStorage.setItem("nawra_user", JSON.stringify(u2));
     setUser(u2); return { ok: true };
   };
@@ -214,8 +215,9 @@ function Nav({ r, go, openCart, user, logout, onLogout }) {
         <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
           {user ? (
             <div style={{display:"flex",alignItems:"center",gap:8}}>
-              {!mob && <span style={{fontSize:12,color:C.mu,fontFamily:"Tajawal,sans-serif"}}>أهلاً، {user.name}</span>}
+              {!mob && <span style={{fontSize:12,color:C.mu,fontFamily:"Tajawal,sans-serif"}}>أهلاً، {user.name} 👋</span>}
               {user.role==="admin" && <Btn onClick={()=>go("#admin")} style={{background:C.go,color:"white",padding:"5px 10px",fontSize:11,letterSpacing:1}}>Admin</Btn>}
+              {user.role==="user" && !mob && <Btn onClick={()=>go("#myorders")} style={{background:"none",border:`1px solid ${C.dk}`,color:C.dk,padding:"5px 10px",fontSize:11,fontFamily:"Tajawal,sans-serif"}}>طلباتي</Btn>}
               <Btn onClick={onLogout} style={{background:"none",border:`1px solid rgba(0,0,0,.15)`,color:C.mu,padding:"5px 10px",fontSize:11,fontFamily:"Tajawal,sans-serif"}}>خروج</Btn>
             </div>
           ) : (
@@ -229,7 +231,9 @@ function Nav({ r, go, openCart, user, logout, onLogout }) {
       </nav>
       {mob && open && (
         <div style={{ background: C.wh, borderBottom: `1px solid rgba(0,0,0,.07)`, padding: "6px 20px 14px", direction: "rtl", position: "sticky", top: 60, zIndex: 199 }}>
+          {user && <div style={{ padding: "10px 0", borderBottom: "1px solid rgba(0,0,0,.05)", fontSize: 14, color: C.go, fontFamily: "Tajawal,sans-serif" }}>أهلاً، {user.name} 👋</div>}
           {links.map(([h, l]) => <span key={h} onClick={() => { go(h); setOpen(false); }} style={{ display: "block", cursor: "pointer", color: r === h ? C.go : C.dk, fontSize: 15, fontFamily: "Tajawal,sans-serif", padding: "10px 0", borderBottom: "1px solid rgba(0,0,0,.05)" }}>{l}</span>)}
+          {user && user.role === "user" && <span onClick={() => { go("#myorders"); setOpen(false); }} style={{ display: "block", cursor: "pointer", color: r === "#myorders" ? C.go : C.dk, fontSize: 15, fontFamily: "Tajawal,sans-serif", padding: "10px 0", borderBottom: "1px solid rgba(0,0,0,.05)" }}>طلباتي 📦</span>}
         </div>
       )}
     </>
@@ -239,6 +243,7 @@ function Nav({ r, go, openCart, user, logout, onLogout }) {
 // ─── Cart Sidebar ─────────────────────────────────────────────────────────────
 function CartSide({ open, close, go }) {
   const { cart, rem, upd, tot, ship, clr } = useCart();
+  const { user } = useAuth();
   const mob = useMob();
   const [step, setStep] = useState(0); // 0=cart 1=checkout 2=done
   const [f, setF] = useState({ n: "", p: "", city: "", addr: "" });
@@ -261,6 +266,7 @@ function CartSide({ open, close, go }) {
     const order = {
       id: Date.now(), date: new Date().toLocaleDateString("ar-EG"),
       name: f.n, phone: f.p, city: f.city, address: f.addr,
+      userEmail: user?.email || null,
       items: cart.map(i=>({name:i.name, qty:i.qty, price:i.price})),
       total: tot + ship, status: "جديد"
     };
@@ -339,7 +345,7 @@ function CartSide({ open, close, go }) {
                 {ship > 0 && <div style={{ fontSize: 11, color: C.mu, marginBottom: 6, fontFamily: "Tajawal,sans-serif" }}>+ {ship} جنيه شحن | أضيفي {500 - tot} للشحن المجاني</div>}
                 {ship === 0 && <div style={{ fontSize: 11, color: "#2E6B3E", marginBottom: 6, fontFamily: "Tajawal,sans-serif" }}>✓ شحن مجاني</div>}
                 <div style={{ background: C.bl, padding: "8px 11px", fontSize: 11, color: C.mu, marginBottom: 10, fontFamily: "Tajawal,sans-serif" }}>💰 كاش عند الاستلام فقط</div>
-                <Btn onClick={() => setStep(1)} style={{ width: "100%", background: C.dk, color: C.cr, padding: 13, fontSize: 13, letterSpacing: 1, marginBottom: 7 }}>إتمام الطلب</Btn>
+                <Btn onClick={() => { if (!user) { close(); go("#login"); } else setStep(1); }} style={{ width: "100%", background: C.dk, color: C.cr, padding: 13, fontSize: 13, letterSpacing: 1, marginBottom: 7 }}>إتمام الطلب</Btn>
                 <Btn onClick={close} style={{ width: "100%", background: "transparent", color: C.mu, border: "1px solid rgba(0,0,0,.1)", padding: 11, fontSize: 12 }}>← متابعة التسوق</Btn>
               </div>
             )}
@@ -355,7 +361,7 @@ function LoginPage({ go }) {
   const { login, register } = useAuth();
   const mob = useMob();
   const [tab, setTab] = useState("login");
-  const [f, setF] = useState({ name:"", username:"", pass:"", pass2:"" });
+  const [f, setF] = useState({ name:"", email:"", pass:"", pass2:"" });
   const [err, setErr] = useState("");
   const [loading, setLoading] = useState(false);
 
@@ -364,12 +370,13 @@ function LoginPage({ go }) {
     setTimeout(() => {
       setLoading(false);
       if (tab === "login") {
-        const r = login(f.username, f.pass);
+        const r = login(f.email, f.pass);
         if (r.ok) go("#home"); else setErr(r.err);
       } else {
-        if (!f.name || !f.username || !f.pass) return setErr("من فضلك اكمل البيانات");
+        if (!f.name || !f.email || !f.pass) return setErr("من فضلك اكمل البيانات");
+        if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(f.email)) return setErr("البريد الإلكتروني غير صحيح");
         if (f.pass !== f.pass2) return setErr("كلمة المرور مش متطابقة");
-        const r = register(f.name, f.username, f.pass);
+        const r = register(f.name, f.email, f.pass);
         if (r.ok) go("#home"); else setErr(r.err);
       }
     }, 400);
@@ -396,7 +403,7 @@ function LoginPage({ go }) {
           ))}
         </div>
         {tab==="register" && inp("name","الاسم الكامل","اسمك")}
-        {inp("username","اسم المستخدم","username")}
+        {inp("email","البريد الإلكتروني","example@email.com","email")}
         {inp("pass","كلمة المرور","••••••••","password")}
         {tab==="register" && inp("pass2","تأكيد كلمة المرور","••••••••","password")}
         {err && <div style={{background:"#FEE2E2",color:"#DC2626",padding:"9px 12px",marginBottom:14,fontSize:12,fontFamily:"Tajawal,sans-serif",borderRight:"3px solid #DC2626"}}>{err}</div>}
@@ -472,7 +479,8 @@ function AdminDash({ go }) {
     </div>
   );
 
-  const tabs = [["overview","📊 نظرة عامة"],["products","📦 المنتجات"],["orders","🧾 الطلبات"]];
+  const allRegisteredUsers = (() => { try { return JSON.parse(localStorage.getItem("nawra_users") || "[]"); } catch { return []; } })();
+  const tabs = [["overview","📊 نظرة عامة"],["products","📦 المنتجات"],["orders","🧾 الطلبات"],["customers","👥 العملاء"]];
 
   return (
     <div style={{direction:"rtl",minHeight:"80vh",background:"#F8F6F3"}}>
@@ -648,6 +656,56 @@ function AdminDash({ go }) {
                 </div>
               </div>
             ))}
+          </div>
+        )}
+
+        {/* CUSTOMERS */}
+        {tab==="customers" && (
+          <div>
+            <h3 style={{fontFamily:"Georgia,serif",fontSize:18,fontWeight:400,color:C.dk,marginBottom:16}}>العملاء المسجلون ({allRegisteredUsers.length})</h3>
+            {allRegisteredUsers.length===0 ? (
+              <div style={{background:C.wh,padding:"40px",textAlign:"center",color:C.mu,fontFamily:"Tajawal,sans-serif",boxShadow:"0 2px 8px rgba(0,0,0,.06)"}}>
+                <div style={{fontSize:40,marginBottom:12}}>👥</div>
+                <p>مفيش عملاء مسجلين لحد دلوقتي</p>
+              </div>
+            ) : (
+              <div style={{background:C.wh,boxShadow:"0 2px 8px rgba(0,0,0,.06)",overflowX:"auto"}}>
+                <table style={{width:"100%",borderCollapse:"collapse",direction:"rtl",fontFamily:"Tajawal,sans-serif"}}>
+                  <thead>
+                    <tr style={{background:C.bl,borderBottom:`2px solid rgba(184,150,62,.2)`}}>
+                      {["#","الاسم","البريد الإلكتروني","تاريخ التسجيل","عدد الطلبات","إجمالي الإنفاق"].map(h=>(
+                        <th key={h} style={{padding:mob?"10px 10px":"12px 16px",textAlign:"right",fontSize:11,letterSpacing:1,color:C.mu,fontWeight:500}}>{h}</th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {allRegisteredUsers.map((u,i)=>{
+                      const userOrders = orderList.filter(o=>o.userEmail===u.email);
+                      const totalSpent = userOrders.reduce((s,o)=>s+(o.total||0),0);
+                      return (
+                        <tr key={u.email} style={{borderBottom:"1px solid rgba(0,0,0,.06)",background:i%2===0?C.wh:C.cr}}>
+                          <td style={{padding:mob?"10px 10px":"12px 16px",fontSize:12,color:C.mu}}>{i+1}</td>
+                          <td style={{padding:mob?"10px 10px":"12px 16px"}}>
+                            <div style={{display:"flex",alignItems:"center",gap:8}}>
+                              <div style={{width:32,height:32,borderRadius:"50%",background:C.bl,display:"flex",alignItems:"center",justifyContent:"center",fontSize:14,color:C.go,fontWeight:600,flexShrink:0}}>{u.name[0]}</div>
+                              <span style={{fontSize:14,color:C.dk}}>{u.name}</span>
+                            </div>
+                          </td>
+                          <td style={{padding:mob?"10px 10px":"12px 16px",fontSize:13,color:C.mu}}>{u.email}</td>
+                          <td style={{padding:mob?"10px 10px":"12px 16px",fontSize:12,color:C.mu}}>{u.registeredAt||"—"}</td>
+                          <td style={{padding:mob?"10px 10px":"12px 16px",textAlign:"center"}}>
+                            <span style={{background:userOrders.length>0?"#D1FAE5":"#F3F4F6",color:userOrders.length>0?"#065F46":"#6B7280",fontSize:12,padding:"2px 10px",borderRadius:10}}>{userOrders.length}</span>
+                          </td>
+                          <td style={{padding:mob?"10px 10px":"12px 16px"}}>
+                            <span style={{fontFamily:"Georgia,serif",fontSize:15,color:C.dk}}>{totalSpent.toLocaleString()} <span style={{fontSize:11,color:C.mu,fontFamily:"sans-serif"}}>جنيه</span></span>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            )}
           </div>
         )}
       </div>
@@ -873,11 +931,17 @@ function Reviews({ productId }) {
 // ─── Pages ────────────────────────────────────────────────────────────────────
 function Home({ go, prods, allProds }) {
   const { prods: _p } = useProds();
+  const { user } = useAuth();
   const homProds = allProds || prods || _p || PRODS;
   const mob = useMob();
   const px = mob ? "16px" : "56px";
   return (
     <div style={{ direction: "rtl" }}>
+      {user && user.role === "user" && (
+        <div style={{ background: C.go, color: "#fff", textAlign: "center", padding: "9px 16px", fontSize: mob ? 12 : 14, fontFamily: "Tajawal,sans-serif", letterSpacing: 0.5 }}>
+          أهلاً بك مجدداً، <strong>{user.name}</strong>! 🌸 &nbsp;—&nbsp; <span onClick={() => go("#myorders")} style={{ cursor: "pointer", textDecoration: "underline" }}>اعرضي طلباتك</span>
+        </div>
+      )}
       <div style={{ background: C.dk, color: C.bl, textAlign: "center", padding: "8px", fontSize: mob ? 11 : 13, letterSpacing: 1, fontFamily: "Tajawal,sans-serif" }}>شحن مجاني فوق 500 جنيه &nbsp;✦&nbsp; كاش عند الاستلام</div>
       <section style={{ background: `linear-gradient(135deg,${C.bl},${C.cr},#EDE3DC)`, display: "flex", alignItems: "center", justifyContent: "center", textAlign: "center", padding: mob ? "44px 20px" : "72px 40px", minHeight: mob ? "55vh" : "78vh" }}>
         <div>
@@ -1184,6 +1248,63 @@ function Footer({ go }) {
 }
 
 // ─── App ──────────────────────────────────────────────────────────────────────
+// ─── My Orders Page ───────────────────────────────────────────────────────────
+function MyOrders({ go }) {
+  const { user } = useAuth();
+  const mob = useMob();
+  const px = mob ? "16px" : "56px";
+
+  if (!user) { go("#login"); return null; }
+
+  const allOrders = (() => { try { return JSON.parse(localStorage.getItem("nawra_orders") || "[]"); } catch { return []; } })();
+  const orders = allOrders.filter(o => o.userEmail === user.email);
+
+  const statusColor = (s) => s === "مكتمل" ? { bg:"#D1FAE5", c:"#065F46" } : s === "ملغي" ? { bg:"#FEE2E2", c:"#DC2626" } : { bg:"#FEF3C7", c:"#92400E" };
+
+  return (
+    <div style={{ direction: "rtl", minHeight: "80vh", background: C.cr }}>
+      <div style={{ background: C.bl, padding: mob ? "28px 20px" : "40px 56px", textAlign: "center" }}>
+        <h1 style={{ fontFamily: "Georgia,serif", fontSize: mob ? 24 : 34, fontWeight: 300, color: C.dk }}>طلباتي 📦</h1>
+        <p style={{ color: C.mu, marginTop: 8, fontFamily: "Tajawal,sans-serif", fontSize: 13 }}>أهلاً، <strong>{user.name}</strong> — سجل مشترياتك</p>
+      </div>
+      <div style={{ maxWidth: 800, margin: "0 auto", padding: `24px ${px}` }}>
+        {orders.length === 0 ? (
+          <div style={{ background: C.wh, padding: "48px 24px", textAlign: "center", boxShadow: "0 2px 8px rgba(0,0,0,.06)" }}>
+            <div style={{ fontSize: 48, marginBottom: 14 }}>🛍️</div>
+            <p style={{ fontFamily: "Georgia,serif", fontSize: 20, fontWeight: 300, color: C.dk, marginBottom: 10 }}>مفيش طلبات لحد دلوقتي</p>
+            <p style={{ color: C.mu, fontFamily: "Tajawal,sans-serif", fontSize: 13, marginBottom: 22 }}>ابدئي التسوق وهتلاقي طلباتك هنا</p>
+            <Btn onClick={() => go("#products")} style={{ background: C.dk, color: C.cr, padding: "12px 28px", fontSize: 13, letterSpacing: 1 }}>تسوقي الآن</Btn>
+          </div>
+        ) : orders.map(o => {
+          const sc = statusColor(o.status);
+          return (
+            <div key={o.id} style={{ background: C.wh, padding: mob ? "16px" : "20px", marginBottom: 12, boxShadow: "0 2px 8px rgba(0,0,0,.06)" }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", flexWrap: "wrap", gap: 8, marginBottom: 10 }}>
+                <div>
+                  <div style={{ fontSize: 12, color: C.mu, fontFamily: "Tajawal,sans-serif" }}>رقم الطلب: <span style={{ color: C.dk, fontWeight: 500 }}>#{o.id}</span></div>
+                  <div style={{ fontSize: 12, color: C.mu, fontFamily: "Tajawal,sans-serif", marginTop: 3 }}>{o.date} | {o.city}</div>
+                </div>
+                <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                  <span style={{ fontSize: 11, padding: "3px 12px", background: sc.bg, color: sc.c, fontFamily: "Tajawal,sans-serif", borderRadius: 10 }}>{o.status}</span>
+                  <span style={{ fontFamily: "Georgia,serif", fontSize: 17, color: C.dk }}>{o.total} جنيه</span>
+                </div>
+              </div>
+              <div style={{ borderTop: "1px solid rgba(0,0,0,.06)", paddingTop: 10 }}>
+                {(o.items || []).map((item, i) => (
+                  <div key={i} style={{ display: "flex", justifyContent: "space-between", fontSize: 13, color: C.dk, fontFamily: "Tajawal,sans-serif", marginBottom: 4 }}>
+                    <span>{item.name} × {item.qty}</span>
+                    <span>{item.price * item.qty} جنيه</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
 export default function App() {
   return (
     <AuthProvider>
@@ -1219,6 +1340,7 @@ function AppInner() {
       case "#about":    return <About go={go} />;
       case "#contact":  return <Contact />;
       case "#shipping": return <Shipping />;
+      case "#myorders": return <MyOrders go={go} />;
       default:          return <Home go={go} allProds={(prods&&prods.length)?prods:PRODS} />;
     }
   };
