@@ -203,7 +203,7 @@ function Nav({ r, go, openCart, user, logout, onLogout }) {
   return (
     <>
       <nav style={{ background: C.wh, borderBottom: `1px solid rgba(184,150,62,.15)`, padding: mob ? "10px 16px" : "10px 48px", display: "flex", alignItems: "center", justifyContent: "space-between", position: "sticky", top: 0, zIndex: 200, direction: "rtl" }}>
-        <div style={{ cursor: "pointer", fontFamily: "Georgia,serif", fontSize: mob ? 20 : 24, letterSpacing: 6, color: C.dk }} onClick={() => { go("#home"); setOpen(false); }}><img src={LogoSVG} alt="نوّرة" style={{height: mob ? 46 : 58, display:"block", objectFit:"contain"}} /></div>
+        <div style={{ cursor: "pointer", fontFamily: "Georgia,serif", fontSize: mob ? 20 : 24, letterSpacing: 6, color: C.dk }} onClick={() => { go("#home"); setOpen(false); }}><img src={LogoSVG} alt="نوّرة" style={{height: mob ? 56 : 72, display:"block", objectFit:"contain"}} /></div>
         {!mob && (
           <div style={{display:"flex",alignItems:"center",gap:24}}>
             <ul style={{ display: "flex", gap: 20, listStyle: "none", margin: 0, padding: 0 }}>
@@ -946,7 +946,7 @@ function Home({ go, prods, allProds }) {
       <section style={{ background: `linear-gradient(135deg,${C.bl},${C.cr},#EDE3DC)`, display: "flex", alignItems: "center", justifyContent: "center", textAlign: "center", padding: mob ? "44px 20px" : "72px 40px", minHeight: mob ? "55vh" : "78vh" }}>
         <div>
           <div style={{ fontFamily: "Georgia,serif", display:"none"}}>x</div>
-          <img src={LogoSVG} alt="نوّرة" style={{height: mob ? 110 : 140, display:"block", margin: mob ? "0 auto 16px" : "0 auto 20px"}} />
+          <img src={LogoSVG} alt="نوّرة" style={{height: mob ? 140 : 180, display:"block", margin:"0 auto 20px", objectFit:"contain"}} />
           <h1 style={{ fontFamily: "Georgia,serif", fontSize: mob ? "clamp(26px,8vw,38px)" : "clamp(36px,5vw,58px)", fontWeight: 300, color: C.dk, lineHeight: 1.2, marginBottom: 14 }}>جمالك يبدأ من <em style={{ color: C.ro }}>هنا</em></h1>
           <p style={{ fontSize: mob ? 13 : 15, color: C.mu, lineHeight: 1.8, marginBottom: 28, fontFamily: "Tajawal,sans-serif", fontWeight: 300 }}>منتجات عناية مختارة من أفضل البراندات العالمية<br />توصيل سريع لكل محافظات مصر</p>
           <div style={{ display: "flex", gap: 10, justifyContent: "center", flexWrap: "wrap" }}>
@@ -1114,7 +1114,7 @@ function About({ go }) {
   return (
     <div style={{ direction: "rtl" }}>
       <div style={{ background: C.bl, padding: mob ? "34px 20px" : "60px 56px", textAlign: "center" }}>
-        <div style={{ fontFamily: "Georgia,serif", fontSize: mob ? 28 : 44, letterSpacing: 8, color: C.dk, marginBottom: 8 }}><img src={LogoSVG} alt="نوّرة" style={{height: mob ? 46 : 58, display:"block", objectFit:"contain"}} /></div>
+        <div style={{ fontFamily: "Georgia,serif", fontSize: mob ? 28 : 44, letterSpacing: 8, color: C.dk, marginBottom: 8 }}><img src={LogoSVG} alt="نوّرة" style={{height: mob ? 120 : 150, display:"block", margin:"0 auto 16px", objectFit:"contain"}} /></div>
         <h1 style={{ fontFamily: "Georgia,serif", fontSize: mob ? 22 : 36, fontWeight: 300, color: C.dk, marginBottom: 10 }}>قصة نوّرة</h1>
         <p style={{ fontSize: mob ? 13 : 15, color: C.mu, maxWidth: 440, margin: "0 auto", lineHeight: 1.9, fontFamily: "Tajawal,sans-serif" }}>ولدنا من حبّ البشرة الصحية والجمال الحقيقي</p>
       </div>
@@ -1225,7 +1225,7 @@ function Footer({ go }) {
       <div style={{ padding: mob ? "26px 18px" : "36px 56px", display: "grid", gridTemplateColumns: mob ? "1fr 1fr" : "2fr 1fr 1fr 1fr", gap: mob ? "18px" : "36px", maxWidth: 1050, margin: "0 auto" }}>
         <div style={{ gridColumn: mob ? "1 / -1" : undefined }}>
           <div style={{ fontFamily: "Georgia,serif", display:"none"}}>x</div>
-          <img src={LogoSVG} alt="نوّرة" style={{height: mob ? 52 : 64, marginBottom: 10, filter: "brightness(0) invert(1) opacity(0.8)"}} />
+          <img src={LogoSVG} alt="نوّرة" style={{height: mob ? 64 : 80, marginBottom:12, filter:"brightness(0) invert(1) opacity(0.85)"}} />
           <p style={{ fontSize: 11, opacity: .5, lineHeight: 1.8, fontFamily: "Tajawal,sans-serif", fontWeight: 300, maxWidth: 200 }}>منتجات عناية مختارة لبشرة صحية ومتألقة.</p>
         </div>
         {[{t:"تصفحي",l:[["#home","الرئيسية"],["#products","المنتجات"],["#about","عن نوّرة"]]},
