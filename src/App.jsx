@@ -252,7 +252,7 @@ const PRODS = [
     useAr:"ادلكيه على بشرة رطبة ثم اشطفيه بماء فاتر.", useEn:"Massage onto damp skin then rinse with lukewarm water.",
     price:320, badgeAr:"الأكثر مبيعاً", badgeEn:"Best Seller", stars:5,
     bg:"linear-gradient(135deg,#E8F4F8,#C8E6F0)",
-    img:"https://images.unsplash.com/photo-1556228578-8c89e6adf883?w=400", icon:"🧴", stock:10
+    img:"https://images.unsplash.com/photo-1556228578-8c89e6adf883?w=400&q=80", icon:"🧴", stock:10
   },
   {
     id:2, brand:"THE ORDINARY",
@@ -262,7 +262,7 @@ const PRODS = [
     useAr:"بعد الغسول وقبل المرطب. مرتين يومياً.", useEn:"Apply after cleanser and before moisturizer. Twice daily.",
     price:280, badgeAr:"ترند TikTok", badgeEn:"TikTok Viral", stars:5,
     bg:"linear-gradient(135deg,#F0EBE3,#D4C4B0)",
-    img:"https://images.unsplash.com/photo-1620916566398-39f1143ab7be?w=400", icon:"💧", stock:10
+    img:"https://images.unsplash.com/photo-1620916566398-39f1143ab7be?w=400&q=80", icon:"💧", stock:10
   },
   {
     id:3, brand:"LA ROCHE-POSAY",
@@ -272,7 +272,7 @@ const PRODS = [
     useAr:"كآخر خطوة صباحاً قبل الخروج بـ 15 دقيقة.", useEn:"Apply as the last morning step 15 minutes before sun exposure.",
     price:450, badgeAr:"جديد", badgeEn:"New", stars:4,
     bg:"linear-gradient(135deg,#FFF8E8,#F0D89A)",
-    img:"https://images.unsplash.com/photo-1598440947619-2c35fc9aa908?w=400", icon:"☀️", stock:10
+    img:"https://images.unsplash.com/photo-1598440947619-2c35fc9aa908?w=400&q=80", icon:"☀️", stock:10
   },
   {
     id:4, brand:"CERAVE",
@@ -282,7 +282,7 @@ const PRODS = [
     useAr:"بعد الاستحمام على بشرة رطبة.", useEn:"Apply after shower on damp skin.",
     price:380, badgeAr:null, badgeEn:null, stars:5,
     bg:"linear-gradient(135deg,#EEF5F0,#C8DFC8)",
-    img:"https://images.unsplash.com/photo-1571781926291-c477ebfd024b?w=400", icon:"✨", stock:10
+    img:"https://images.unsplash.com/photo-1571781926291-c477ebfd024b?w=400&q=80", icon:"✨", stock:10
   },
   {
     id:5, brand:"THE ORDINARY",
@@ -292,7 +292,7 @@ const PRODS = [
     useAr:"مساءً فقط. قطرة على الوجه النظيف.", useEn:"Evening only. A few drops on clean dry skin.",
     price:260, badgeAr:null, badgeEn:null, stars:4,
     bg:"linear-gradient(135deg,#FFF4E0,#FFD98A)",
-    img:"https://images.unsplash.com/photo-1596755389378-c31d21fd1273?w=400", icon:"🍋", stock:10
+    img:"https://images.unsplash.com/photo-1596755389378-c31d21fd1273?w=400&q=80", icon:"🍋", stock:10
   },
   {
     id:6, brand:"BIODERMA",
@@ -302,7 +302,7 @@ const PRODS = [
     useAr:"بللي قطنة وامسحي برفق.", useEn:"Soak a cotton pad and wipe gently.",
     price:340, badgeAr:"كلاسيك", badgeEn:"Classic", stars:5,
     bg:"linear-gradient(135deg,#F5E8F0,#E0B8D0)",
-    img:"https://images.unsplash.com/photo-1629198688000-71f23e745b6e?w=400", icon:"🌸", stock:10
+    img:"https://images.unsplash.com/photo-1629198688000-71f23e745b6e?w=400&q=80", icon:"🌸", stock:10
   },
   {
     id:7, brand:"NEUTROGENA",
@@ -312,7 +312,7 @@ const PRODS = [
     useAr:"على بشرة مبللة وادلكي برفق ثم اشطفي.", useEn:"Lather on damp skin, massage gently, then rinse.",
     price:220, badgeAr:null, badgeEn:null, stars:4,
     bg:"linear-gradient(135deg,#E8F0F5,#B8D4E8)",
-    img:"https://images.unsplash.com/photo-1556228453-efd6c1ff04f6?w=400", icon:"🫧", stock:10
+    img:"https://images.unsplash.com/photo-1556228453-efd6c1ff04f6?w=400&q=80", icon:"🫧", stock:10
   },
   {
     id:8, brand:"GARNIER",
@@ -322,7 +322,7 @@ const PRODS = [
     useAr:"على الوجه النظيف صباحاً ومساءً.", useEn:"Apply on clean face morning and evening.",
     price:190, badgeAr:"قيمة ممتازة", badgeEn:"Best Value", stars:4,
     bg:"linear-gradient(135deg,#E8F5E8,#B8DFB8)",
-    img:"https://images.unsplash.com/photo-1570194065650-d99fb4d8ef6b?w=400", icon:"💚", stock:10
+    img:"https://images.unsplash.com/photo-1570194065650-d99fb4d8ef6b?w=400&q=80", icon:"💚", stock:10
   },
   {
     id:9, brand:"NIVEA",
@@ -332,7 +332,7 @@ const PRODS = [
     useAr:"كآخر خطوة مساءً على بشرة نظيفة.", useEn:"As the last evening step on clean face.",
     price:250, badgeAr:null, badgeEn:null, stars:4,
     bg:"linear-gradient(135deg,#E8EAF5,#B8BEE0)",
-    img:"https://images.unsplash.com/photo-1590439471364-192aa70c0b53?w=400", icon:"🌙", stock:10
+    img:"https://images.unsplash.com/photo-1590439471364-192aa70c0b53?w=400&q=80", icon:"🌙", stock:10
   },
 ];
 
@@ -404,7 +404,6 @@ function Card({ p, go }) {
   const { t, lang } = useLang();
   const mob = useMob();
   const [hov, setHov] = useState(false);
-  const [imgErr, setImgErr] = useState(false);
   const name = lang === "ar" ? (p.nameAr || p.name) : (p.nameEn || p.nameAr || p.name);
   const desc = lang === "ar" ? (p.descAr || p.desc) : (p.descEn || p.descAr || p.desc);
   const badge = lang === "ar" ? p.badgeAr : (p.badgeEn || p.badgeAr);
@@ -423,21 +422,7 @@ function Card({ p, go }) {
         display: "flex", alignItems: "center", justifyContent: "center"
       }}>
         {/* Product image */}
-        {p.img && !imgErr ? (
-          <img
-            src={p.img} alt={name}
-            onError={() => setImgErr(true)}
-            style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }}
-          />
-        ) : (
-          <div style={{
-            width: "100%", height: "100%", background: p.bg, display: "flex", alignItems: "center", justifyContent: "center", flexDirection: "column", gap: 6,
-            backgroundImage: "repeating-linear-gradient(45deg,transparent,transparent 9px,rgba(196,149,106,.055) 9px,rgba(196,149,106,.055) 10px)"
-          }}>
-            <span style={{ fontSize: mob ? 40 : 48 }}>{p.icon}</span>
-            <span style={{ fontFamily: C.fe, fontSize: 9, letterSpacing: "0.22em", color: C.go, textTransform: "uppercase" }}>{p.brand}</span>
-          </div>
-        )}
+        <img src={p.img} alt={name} style={{width:"100%", height:"100%", objectFit:"cover"}} />
         {/* Badges */}
         {badge && <span style={{ position: "absolute", top: 10, right: 10, background: C.dk, color: C.cr, fontSize: 9, padding: "3px 9px", letterSpacing: "0.08em", fontFamily: C.fb, zIndex: 2 }}>{badge}</span>}
         {p.stock <= 3 && p.stock > 0 && <span style={{ position: "absolute", top: 10, left: 10, background: "#EF4444", color: "white", fontSize: 9, padding: "3px 8px", fontFamily: C.fb, zIndex: 2 }}>{t("stockLow")} {p.stock} {t("stockLowUnit")}</span>}
@@ -498,7 +483,7 @@ function Nav({ r, go, openCart, user, onLogout }) {
         height: 74, display: "flex", alignItems: "center", justifyContent: "space-between",
         position: "sticky", top: 0, zIndex: 200, direction: dir
       }}>
-        <div style={{ cursor: "pointer" }} onClick={() => { go("#home"); setOpen(false); }}><img src={LogoImg} alt="نوّرَة" style={{height:60, width:"auto", display:"block"}} /></div>
+        <div style={{ cursor: "pointer" }} onClick={() => { go("#home"); setOpen(false); }}><img src={LogoImg} alt="نوّرَة" style={{height:60, width:"auto", display:"block", mixBlendMode:"multiply"}} /></div>
         {!mob && (
           <div style={{display:"flex",alignItems:"center",gap:24}}>
             <ul style={{ display: "flex", gap: 22, listStyle: "none", margin: 0, padding: 0 }}>
@@ -697,7 +682,7 @@ function LoginPage({ go }) {
     <div style={{direction:dir,minHeight:"80vh",display:"flex",alignItems:"center",justifyContent:"center",background:`linear-gradient(135deg,${C.cr2},${C.cr})`}}>
       <div style={{background:C.wh,padding:mob?"28px 24px":"44px 40px",width:mob?"92%":undefined,maxWidth:420,boxShadow:"0 8px 48px rgba(42,31,14,.08)"}}>
         <div style={{textAlign:"center",marginBottom:28}}>
-          <img src={LogoImg} alt="نوّرَة" style={{height:80,display:"block",margin:"0 auto 14px"}}/>
+          <img src={LogoImg} alt="نوّرَة" style={{height:80,display:"block",margin:"0 auto 14px",mixBlendMode:"multiply"}}/>
         </div>
         <div style={{display:"flex",borderBottom:"1px solid rgba(196,149,106,.18)",marginBottom:24}}>
           {[["login",t("loginTab")],["register",t("registerTab")]].map(([k,l])=>(
@@ -1332,7 +1317,7 @@ function Home({ go, allProds }) {
             {/* Logo centered */}
             <img src={LogoImg} alt="نوّرَة" style={{
               height: 160, width: "auto", display: "block", margin: "0 auto",
-              position: "relative", zIndex: 2
+              position: "relative", zIndex: 2, mixBlendMode: "multiply"
             }} />
             {/* Corner ornaments */}
             {[[16,16],[16,"auto"],[null,16],["auto","auto"]].map(([t2,b2],i)=>(
@@ -1552,7 +1537,7 @@ function About({ go }) {
       <div style={{ background: "linear-gradient(145deg,#F5E9D8,#EDD8BC)", padding: mob ? "44px 20px" : "72px 52px", textAlign: "center", position: "relative", overflow: "hidden" }}>
         <div style={{ position: "absolute", inset: 0, background: "radial-gradient(ellipse 60% 80% at 50% 60%,rgba(255,255,255,.3) 0%,transparent 70%)" }} />
         <div style={{ position: "relative", zIndex: 1 }}>
-          <img src={LogoImg} alt="نوّرَة" style={{height:120, width:"auto", display:"block", margin:"0 auto 20px"}} />
+          <img src={LogoImg} alt="نوّرَة" style={{height:120, width:"auto", display:"block", margin:"0 auto 20px", mixBlendMode:"multiply"}} />
           <div style={{ fontFamily: C.fe, fontSize: 11, letterSpacing: "0.26em", color: C.go, textTransform: "uppercase", fontStyle: "italic", marginBottom: 12 }}>Our Story</div>
           <h1 style={{ fontFamily: C.fa, fontSize: mob ? 28 : 44, fontWeight: 600, color: C.dk, marginBottom: 12 }}>{t("aboutTitle")}</h1>
           <div style={{ width: 48, height: 1, background: C.go, margin: "0 auto 14px" }} />
@@ -1666,7 +1651,7 @@ function Footer({ go }) {
     <footer style={{ background: C.dk2, color: C.cr, direction: dir }}>
       <div style={{ padding: mob ? "36px 20px 28px" : "52px 52px 40px", display: "grid", gridTemplateColumns: mob ? "1fr 1fr" : "1.5fr 1fr 1fr 1fr", gap: mob ? "24px" : "48px", maxWidth: 1100, margin: "0 auto" }}>
         <div style={{ gridColumn: mob ? "1 / -1" : undefined }}>
-          <img src={LogoImg} alt="نوّرَة" style={{height:70, width:"auto", marginBottom:14, opacity:0.85}} />
+          <img src={LogoImg} alt="نوّرَة" style={{height:70, width:"auto", marginBottom:14, opacity:0.85, mixBlendMode:"screen"}} />
           <p style={{ fontFamily: C.fb, fontSize: 12.5, color: "rgba(251,247,244,.38)", lineHeight: 1.75, maxWidth: 200 }}>{t("footerTagline")}</p>
         </div>
         {t("footerCols").map(col => (
