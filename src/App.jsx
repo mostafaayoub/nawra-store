@@ -1,6 +1,154 @@
 import { useState, useEffect, createContext, useContext } from "react";
 import LogoSVG from "/nawra-logo-animated.svg";
 
+// ─── Translations ─────────────────────────────────────────────────────────────
+const TR = {
+  ar: {
+    navHome:"الرئيسية", navProducts:"المنتجات", navAbout:"عن نوّرَة", navContact:"تواصلي معنا", navShipping:"الشحن والإرجاع",
+    navGreeting:"أهلاً،", navMyOrders:"طلباتي", navLogout:"خروج", navLogin:"دخول",
+    topBanner:"شحن مجاني فوق 500 جنيه ✦ كاش عند الاستلام",
+    welcomeBack:"أهلاً بك مجدداً،", welcomeViewOrders:"اعرضي طلباتك",
+    heroTitle:"جمالك يبدأ من", heroTitleEm:"هنا",
+    heroSub:"منتجات عناية مختارة من أفضل البراندات العالمية", heroSub2:"توصيل سريع لكل محافظات مصر",
+    heroShopNow:"تسوّقي الآن", heroAboutUs:"تعرفي علينا",
+    feat1:"توصيل سريع", feat1d:"2-4 أيام", feat2:"كاش عند الاستلام", feat2d:"ادفعي لما يوصلك",
+    feat3:"منتجات أصلية", feat3d:"موصى بها جلدياً", feat4:"إرجاع مجاني", feat4d:"خلال 14 يوم",
+    homeBestSellersTag:"الأكثر مبيعاً", homeBestSellersTitle:"منتجاتنا المختارة",
+    homeViewAll:"عرض كل المنتجات", homeCtaTitle:"ابدئي روتينك المثالي",
+    homeCtaSub:"من أفضل البراندات بأسعار تنافسية", homeCtaBtn:"تسوقي الآن",
+    addToCart:"+ أضيفي للعربة", addedToCart:"تمت الإضافة للعربة 🛍️",
+    stockLow:"آخر", stockLowUnit:"قطع", stockOut:"نفد",
+    prodsTitle:"جميع المنتجات", prodsSub:"روتينك المثالي يبدأ من هنا",
+    prodsFilterAll:"الكل", prodsSortDefault:"الترتيب", prodsSortAsc:"الأقل سعراً", prodsSortDesc:"الأعلى سعراً",
+    prodNotFound:"المنتج غير موجود", prodHome:"الرئيسية", prodProds:"المنتجات",
+    prodAvail:"متاح —", prodInStock:"قطعة في المخزون",
+    prodLowStock:"آخر", prodLowStockSuffix:"قطع فقط!", prodOutStock:"نفد المخزون",
+    prodAddToCart:"أضيفي للعربة 🛍️", prodDetailsTab:"تفاصيل المنتج", prodUseTab:"طريقة الاستخدام",
+    prodShipping:"شحن 2-4 أيام", prodCash:"كاش عند الاستلام", prodReturn:"إرجاع 14 يوم",
+    prodRelated:"قد يعجبكِ أيضاً", egp:"جنيه",
+    cartTitle:"عربتي 🛍️", checkoutTitle:"إتمام الطلب", cartEmpty:"عربتك فاضية", cartShopNow:"تسوقي الآن",
+    cartTotal:"الإجمالي", cartShipAdd:"للشحن المجاني", cartShipFree:"✓ شحن مجاني",
+    cartCashOnly:"💰 كاش عند الاستلام فقط", cartCheckout:"إتمام الطلب", cartContinue:"← متابعة التسوق",
+    checkoutCashLabel:"💰 كاش عند الاستلام",
+    checkoutName:"الاسم", checkoutNamePh:"اسمك", checkoutPhone:"رقم الموبايل", checkoutPhonePh:"01xxxxxxxxx",
+    checkoutAddr:"العنوان", checkoutAddrPh:"الشارع والمبنى", checkoutGov:"المحافظة", checkoutGovPh:"اختاري",
+    checkoutBack:"← رجوع", checkoutConfirm:"تأكيد الطلب ✓",
+    orderSuccess:"تم استلام طلبك!", orderSuccessSub:"شكراً لثقتك في نوّرَة 💕",
+    orderSuccessNote:"هيتواصل معاكي فريقنا خلال 24 ساعة.", orderCash:"كاش عند الاستلام",
+    orderContinue:"متابعة التسوق", orderAlert:"من فضلك اكملي البيانات",
+    loginTab:"تسجيل الدخول", registerTab:"حساب جديد",
+    loginFullName:"الاسم الكامل", loginFullNamePh:"اسمك",
+    loginEmail:"البريد الإلكتروني", loginEmailPh:"example@email.com",
+    loginPass:"كلمة المرور", loginPassPh:"••••••••", loginConfirmPass:"تأكيد كلمة المرور",
+    loginLoading:"جاري التحقق...", loginBtn:"دخول", registerBtn:"إنشاء الحساب",
+    loginErrFields:"من فضلك اكمل البيانات", loginErrEmail:"البريد الإلكتروني غير صحيح", loginErrPass:"كلمة المرور مش متطابقة",
+    myOrdersTitle:"طلباتي 📦", myOrdersSub:"سجل مشترياتك", myOrdersHello:"أهلاً،",
+    myOrdersEmpty:"مفيش طلبات لحد دلوقتي", myOrdersEmptySub:"ابدئي التسوق وهتلاقي طلباتك هنا",
+    myOrdersShop:"تسوقي الآن", myOrdersNum:"رقم الطلب:",
+    aboutTitle:"قصة نوّرَة", aboutSub:"ولدنا من حبّ البشرة الصحية والجمال الحقيقي",
+    aboutSect:[{t:"لماذا نوّرَة؟",x:"نوّرَة هو الاسم العربي للإشراقة والنور — وهذا ما نسعى لتقديمه. بشرة مشرقة وصحية تعكس جمالك الحقيقي."},{t:"فلسفتنا",x:"نختار كل منتج بعناية من براندات عالمية موثوقة وموصى بها من أطباء الجلدية. العناية الفعّالة بأسعار مناسبة."},{t:"وعدنا لك",x:"كل منتج في نوّرَة أصلي 100% من مصادر موثوقة. توصيل سريع لكل محافظات مصر مع ضمان الجودة."}],
+    aboutCtaQ:"جاهزة تبدئي روتينك؟", aboutCtaBtn:"اكتشفي المنتجات",
+    contactTitle:"تواصلي معنا", contactSub:"سعيدون بمساعدتك",
+    contactInfoTitle:"معلومات التواصل",
+    contactInfo:[["📱","واتساب","01xxxxxxxx"],["📧","البريد","info@nawra.eg"],["📍","العنوان","القاهرة، مصر"],["🕐","أوقات العمل","السبت-الخميس: 10ص-10م"]],
+    contactFormTitle:"أرسلي رسالة",
+    contactFields:[["n","الاسم","اسمك"],["e","البريد","email@example.com"],["p","الموبايل","01xxxxxxxxx"]],
+    contactMsgLabel:"الرسالة", contactMsgPh:"كيف يمكننا مساعدتك؟", contactSendBtn:"إرسال الرسالة",
+    contactSentTitle:"تم الإرسال!", contactSentMsg:"هنرد عليكِ قريباً.", contactNewBtn:"رسالة جديدة",
+    shippingTitle:"الشحن والإرجاع", shippingSub:"كل اللي محتاجة تعرفيه",
+    shippingSects:[{t:"الشحن",i:["نوصل لكل مصر خلال 2-4 أيام","شحن مجاني فوق 500 جنيه","50 جنيه للطلبات الأقل","عبر Bosta / J&T"]},{t:"الإرجاع",i:["خلال 14 يوم من الاستلام","المنتج بحالته الأصلية","مجاني لو المنتج معيب","يُستثنى المنتجات المفتوحة"]},{t:"الدفع",i:["كاش عند الاستلام فقط","مفيش بطاقة مطلوبة","ادفعي لما الطلب يوصلك"]},{t:"التواصل",i:["واتساب: 01xxxxxxxx","info@nawra.eg","السبت-الخميس: 10ص-10م"]}],
+    footerTagline:"منتجات عناية مختارة لبشرة صحية ومتألقة.",
+    footerCols:[{t:"تصفحي",l:[["#home","الرئيسية"],["#products","المنتجات"],["#about","عن نوّرَة"]]},{t:"خدمة العملاء",l:[["#contact","تواصلي"],["#shipping","الشحن والإرجاع"]]},{t:"تابعينا",l:[["#","Instagram"],["#","TikTok"],["#","Facebook"]]}],
+    footerCopyright:"© 2025 NAWRA SKINCARE — نوّرَة للعناية بالبشرة",
+    reviewsTitle:"آراء العملاء", reviewsEmpty:"كوني أول من تقيّم هذا المنتج ✨",
+    reviewsFormTitle:"أضيفي تقييمك", reviewsNameLabel:"الاسم", reviewsNamePh:"اسمك",
+    reviewsRatingLabel:"التقييم", reviewsCommentLabel:"رأيك في المنتج",
+    reviewsCommentPh:"شاركي تجربتك مع المنتج...", reviewsSubmit:"إرسال التقييم",
+    reviewsThanks:"✓ شكراً لتقييمك!", reviewsRatings:"تقييم", reviewsDefault:"عميلة",
+    searchPh:"ابحثي عن منتج...", searchViewAll:"عرض كل النتائج ←",
+    waHello:"👋 أهلاً!\nمحتاجة مساعدة في اختيار المنتج؟", waStart:"ابدئي المحادثة",
+    waMsg:"مرحباً، أريد الاستفسار عن منتج من نوّرَة 💕",
+  },
+  en: {
+    navHome:"Home", navProducts:"Products", navAbout:"About Nawra", navContact:"Contact", navShipping:"Shipping & Returns",
+    navGreeting:"Hello,", navMyOrders:"My Orders", navLogout:"Logout", navLogin:"Login",
+    topBanner:"Free shipping over 500 EGP ✦ Cash on Delivery",
+    welcomeBack:"Welcome back,", welcomeViewOrders:"View your orders",
+    heroTitle:"Your Beauty Starts", heroTitleEm:"Here",
+    heroSub:"Curated skincare from the world's best brands", heroSub2:"Fast delivery across all of Egypt",
+    heroShopNow:"Shop Now", heroAboutUs:"About Us",
+    feat1:"Fast Delivery", feat1d:"2-4 days", feat2:"Cash on Delivery", feat2d:"Pay on arrival",
+    feat3:"Authentic Products", feat3d:"Dermatologist approved", feat4:"Free Returns", feat4d:"Within 14 days",
+    homeBestSellersTag:"BEST SELLERS", homeBestSellersTitle:"Our Curated Products",
+    homeViewAll:"View All Products", homeCtaTitle:"Start Your Perfect Routine",
+    homeCtaSub:"From the best brands at competitive prices", homeCtaBtn:"Shop Now",
+    addToCart:"+ Add to Cart", addedToCart:"Added to cart 🛍️",
+    stockLow:"Last", stockLowUnit:"left", stockOut:"Out",
+    prodsTitle:"All Products", prodsSub:"Your perfect routine starts here",
+    prodsFilterAll:"All", prodsSortDefault:"Sort", prodsSortAsc:"Price: Low to High", prodsSortDesc:"Price: High to Low",
+    prodNotFound:"Product not found", prodHome:"Home", prodProds:"Products",
+    prodAvail:"In stock —", prodInStock:"pieces available",
+    prodLowStock:"Last", prodLowStockSuffix:"pieces only!", prodOutStock:"Out of Stock",
+    prodAddToCart:"Add to Cart 🛍️", prodDetailsTab:"Product Details", prodUseTab:"How to Use",
+    prodShipping:"Shipping 2-4 days", prodCash:"Cash on Delivery", prodReturn:"14-day Returns",
+    prodRelated:"You Might Also Like", egp:"EGP",
+    cartTitle:"My Cart 🛍️", checkoutTitle:"Checkout", cartEmpty:"Your cart is empty", cartShopNow:"Shop Now",
+    cartTotal:"Total", cartShipAdd:"for free shipping", cartShipFree:"✓ Free Shipping",
+    cartCashOnly:"💰 Cash on Delivery only", cartCheckout:"Checkout", cartContinue:"← Continue Shopping",
+    checkoutCashLabel:"💰 Cash on Delivery",
+    checkoutName:"Name", checkoutNamePh:"Your name", checkoutPhone:"Phone", checkoutPhonePh:"01xxxxxxxxx",
+    checkoutAddr:"Address", checkoutAddrPh:"Street and building", checkoutGov:"Governorate", checkoutGovPh:"Select",
+    checkoutBack:"← Back", checkoutConfirm:"Confirm Order ✓",
+    orderSuccess:"Order Received!", orderSuccessSub:"Thank you for trusting Nawra 💕",
+    orderSuccessNote:"Our team will contact you within 24 hours.", orderCash:"Cash on Delivery",
+    orderContinue:"Continue Shopping", orderAlert:"Please complete all fields",
+    loginTab:"Sign In", registerTab:"New Account",
+    loginFullName:"Full Name", loginFullNamePh:"Your name",
+    loginEmail:"Email Address", loginEmailPh:"example@email.com",
+    loginPass:"Password", loginPassPh:"••••••••", loginConfirmPass:"Confirm Password",
+    loginLoading:"Verifying...", loginBtn:"Sign In", registerBtn:"Create Account",
+    loginErrFields:"Please fill in all fields", loginErrEmail:"Invalid email address", loginErrPass:"Passwords do not match",
+    myOrdersTitle:"My Orders 📦", myOrdersSub:"Your purchase history", myOrdersHello:"Hello,",
+    myOrdersEmpty:"No orders yet", myOrdersEmptySub:"Start shopping and your orders will appear here",
+    myOrdersShop:"Shop Now", myOrdersNum:"Order #:",
+    aboutTitle:"The Nawra Story", aboutSub:"Born from a love of healthy skin and true beauty",
+    aboutSect:[{t:"Why Nawra?",x:"Nawra is the Arabic word for radiance and light — and that is what we strive to deliver. Glowing, healthy skin that reflects your true beauty."},{t:"Our Philosophy",x:"We carefully select every product from trusted global brands recommended by dermatologists. Effective skincare at accessible prices."},{t:"Our Promise",x:"Every product at Nawra is 100% authentic from verified sources. Fast delivery to all of Egypt with a quality guarantee."}],
+    aboutCtaQ:"Ready to start your routine?", aboutCtaBtn:"Discover Products",
+    contactTitle:"Contact Us", contactSub:"Happy to help you",
+    contactInfoTitle:"Contact Information",
+    contactInfo:[["📱","WhatsApp","01xxxxxxxx"],["📧","Email","info@nawra.eg"],["📍","Address","Cairo, Egypt"],["🕐","Working Hours","Sat–Thu: 10am–10pm"]],
+    contactFormTitle:"Send a Message",
+    contactFields:[["n","Name","Your name"],["e","Email","email@example.com"],["p","Phone","01xxxxxxxxx"]],
+    contactMsgLabel:"Message", contactMsgPh:"How can we help you?", contactSendBtn:"Send Message",
+    contactSentTitle:"Sent!", contactSentMsg:"We'll get back to you soon.", contactNewBtn:"New Message",
+    shippingTitle:"Shipping & Returns", shippingSub:"Everything you need to know",
+    shippingSects:[{t:"Shipping",i:["Delivery across Egypt in 2-4 days","Free shipping over 500 EGP","50 EGP for smaller orders","Via Bosta / J&T"]},{t:"Returns",i:["Within 14 days of receipt","Product in original condition","Free if item is defective","Opened products excluded"]},{t:"Payment",i:["Cash on Delivery only","No card required","Pay when your order arrives"]},{t:"Contact",i:["WhatsApp: 01xxxxxxxx","info@nawra.eg","Sat–Thu: 10am–10pm"]}],
+    footerTagline:"Curated skincare for healthy, glowing skin.",
+    footerCols:[{t:"Browse",l:[["#home","Home"],["#products","Products"],["#about","About Nawra"]]},{t:"Customer Service",l:[["#contact","Contact"],["#shipping","Shipping & Returns"]]},{t:"Follow Us",l:[["#","Instagram"],["#","TikTok"],["#","Facebook"]]}],
+    footerCopyright:"© 2025 NAWRA SKINCARE",
+    reviewsTitle:"Customer Reviews", reviewsEmpty:"Be the first to review this product ✨",
+    reviewsFormTitle:"Add Your Review", reviewsNameLabel:"Name", reviewsNamePh:"Your name",
+    reviewsRatingLabel:"Rating", reviewsCommentLabel:"Your Review",
+    reviewsCommentPh:"Share your experience with this product...", reviewsSubmit:"Submit Review",
+    reviewsThanks:"✓ Thank you for your review!", reviewsRatings:"reviews", reviewsDefault:"Customer",
+    searchPh:"Search for a product...", searchViewAll:"View all results →",
+    waHello:"👋 Hello!\nNeed help choosing a product?", waStart:"Start a chat",
+    waMsg:"Hello, I'd like to inquire about a product from Nawra 💕",
+  }
+};
+
+// ─── Language Context ─────────────────────────────────────────────────────────
+const LangCtx = createContext(null);
+const useLang = () => useContext(LangCtx);
+function LangProvider({ children }) {
+  const [lang, setLangState] = useState(() => localStorage.getItem("nawra_lang") || "ar");
+  const setLang = (l) => { setLangState(l); localStorage.setItem("nawra_lang", l); };
+  useEffect(() => { document.documentElement.dir = lang === "ar" ? "rtl" : "ltr"; document.documentElement.lang = lang; }, [lang]);
+  const t = (key) => TR[lang]?.[key] ?? TR.ar?.[key] ?? key;
+  const dir = lang === "ar" ? "rtl" : "ltr";
+  return <LangCtx.Provider value={{ lang, setLang, t, dir }}>{children}</LangCtx.Provider>;
+}
+
 // ─── Auth ─────────────────────────────────────────────────────────────────────
 const ADMIN_USER = "nawra_admin";
 const ADMIN_PASS = "Nawra@2025";
@@ -165,6 +313,7 @@ function ToastProvider({ children }) {
 function Card({ p, go }) {
   const { add } = useCart();
   const { show } = useToast();
+  const { t } = useLang();
   const mob = useMob();
   const [hov, setHov] = useState(false);
   return (
@@ -172,12 +321,12 @@ function Card({ p, go }) {
       style={{ background: C.wh, overflow: "hidden", boxShadow: hov ? "0 6px 20px rgba(0,0,0,.1)" : "0 2px 6px rgba(0,0,0,.06)", transition: "all .3s", transform: hov && !mob ? "translateY(-3px)" : "none" }}>
       <div onClick={() => go(`#product-${p.id}`)} style={{ height: mob ? 170 : 230, background: p.bg, display: "flex", alignItems: "center", justifyContent: "center", flexDirection: "column", gap: 6, position: "relative", cursor: "pointer" }}>
         {p.badge && <span style={{ position: "absolute", top: 8, right: 8, background: C.dk, color: C.cr, fontSize: 9, padding: "3px 8px", letterSpacing: 1 }}>{p.badge}</span>}
-        {p.stock <= 3 && p.stock > 0 && <span style={{ position: "absolute", top: 8, left: 8, background: "#EF4444", color: "white", fontSize: 9, padding: "3px 8px" }}>آخر {p.stock} قطع</span>}
-        {p.stock === 0 && <span style={{ position: "absolute", top: 8, left: 8, background: "#6B7280", color: "white", fontSize: 9, padding: "3px 8px" }}>نفد</span>}
+        {p.stock <= 3 && p.stock > 0 && <span style={{ position: "absolute", top: 8, left: 8, background: "#EF4444", color: "white", fontSize: 9, padding: "3px 8px" }}>{t("stockLow")} {p.stock} {t("stockLowUnit")}</span>}
+        {p.stock === 0 && <span style={{ position: "absolute", top: 8, left: 8, background: "#6B7280", color: "white", fontSize: 9, padding: "3px 8px" }}>{t("stockOut")}</span>}
         <span style={{ fontSize: mob ? 40 : 48 }}>{p.icon}</span>
         <span style={{ fontSize: 9, letterSpacing: 2, color: "#5C4A2A", fontWeight: 600 }}>{p.brand}</span>
         <div style={{ position: "absolute", bottom: 0, left: 0, right: 0, background: "rgba(42,31,14,.88)", padding: "8px 10px", opacity: mob || hov ? 1 : 0, transition: "opacity .25s" }}>
-          <Btn onClick={e => { e.stopPropagation(); add(p); show("تمت الإضافة للعربة 🛍️"); }} style={{ width: "100%", background: C.go, color: "#fff", padding: "6px 0", fontSize: 12 }}>+ أضيفي للعربة</Btn>
+          <Btn onClick={e => { e.stopPropagation(); add(p); show(t("addedToCart")); }} style={{ width: "100%", background: C.go, color: "#fff", padding: "6px 0", fontSize: 12 }}>{t("addToCart")}</Btn>
         </div>
       </div>
       <div style={{ padding: mob ? "10px" : "14px", cursor: "pointer" }} onClick={() => go(`#product-${p.id}`)}>
@@ -185,7 +334,7 @@ function Card({ p, go }) {
         <div style={{ fontFamily: "Georgia,serif", fontSize: mob ? 14 : 16, color: C.dk, marginBottom: 4, lineHeight: 1.3 }}>{p.name}</div>
         <div style={{ fontSize: 11, color: C.mu, lineHeight: 1.5, marginBottom: 8, overflow: "hidden", display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical" }}>{p.desc}</div>
         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-          <span style={{ fontFamily: "Georgia,serif", fontSize: mob ? 16 : 18, color: C.dk }}>{p.price} <span style={{ fontSize: 11, color: C.mu, fontFamily: "sans-serif" }}>جنيه</span></span>
+          <span style={{ fontFamily: "Georgia,serif", fontSize: mob ? 16 : 18, color: C.dk }}>{p.price} <span style={{ fontSize: 11, color: C.mu, fontFamily: "sans-serif" }}>{t("egp")}</span></span>
           <Stars n={p.stars} />
         </div>
       </div>
@@ -194,16 +343,26 @@ function Card({ p, go }) {
 }
 
 // ─── Navbar ───────────────────────────────────────────────────────────────────
-function Nav({ r, go, openCart, user, logout, onLogout }) {
+function Nav({ r, go, openCart, user, onLogout }) {
   const { cnt } = useCart();
   const mob = useMob();
   const { prods: navProds } = useProds();
+  const { t, lang, setLang, dir } = useLang();
   const [open, setOpen] = useState(false);
-  const links = [["#home","الرئيسية"],["#products","المنتجات"],["#about","عن نوّرة"],["#contact","تواصلي معنا"],["#shipping","الشحن والإرجاع"]];
+  const links = [["#home",t("navHome")],["#products",t("navProducts")],["#about",t("navAbout")],["#contact",t("navContact")],["#shipping",t("navShipping")]];
+  const LangToggle = () => (
+    <div style={{display:"flex",alignItems:"center",gap:2,border:`1px solid rgba(0,0,0,.12)`,borderRadius:2,overflow:"hidden",fontSize:11,fontFamily:"Tajawal,sans-serif"}}>
+      {["ar","en"].map(l=>(
+        <button key={l} onClick={()=>setLang(l)} style={{padding:"4px 8px",background:lang===l?C.go:"none",color:lang===l?"#fff":C.mu,border:"none",cursor:"pointer",fontFamily:"Tajawal,sans-serif",fontSize:11,fontWeight:lang===l?600:400,letterSpacing:.5}}>
+          {l.toUpperCase()}
+        </button>
+      ))}
+    </div>
+  );
   return (
     <>
-      <nav style={{ background: C.wh, borderBottom: `1px solid rgba(184,150,62,.15)`, padding: mob ? "10px 16px" : "10px 48px", display: "flex", alignItems: "center", justifyContent: "space-between", position: "sticky", top: 0, zIndex: 200, direction: "rtl" }}>
-        <div style={{ cursor: "pointer", fontFamily: "Georgia,serif", fontSize: mob ? 20 : 24, letterSpacing: 6, color: C.dk }} onClick={() => { go("#home"); setOpen(false); }}><img src={LogoSVG} alt="نوّرة" style={{height: mob ? 70 : 90, width:"auto", display:"block"}} /></div>
+      <nav style={{ background: C.wh, borderBottom: `1px solid rgba(184,150,62,.15)`, padding: mob ? "10px 16px" : "10px 48px", display: "flex", alignItems: "center", justifyContent: "space-between", position: "sticky", top: 0, zIndex: 200, direction: dir }}>
+        <div style={{ cursor: "pointer" }} onClick={() => { go("#home"); setOpen(false); }}><img src={LogoSVG} alt="نوّرَة" style={{height: mob ? 70 : 90, width:"auto", display:"block"}} /></div>
         {!mob && (
           <div style={{display:"flex",alignItems:"center",gap:24}}>
             <ul style={{ display: "flex", gap: 20, listStyle: "none", margin: 0, padding: 0 }}>
@@ -212,16 +371,17 @@ function Nav({ r, go, openCart, user, logout, onLogout }) {
             <SearchBar go={go} allProds={(navProds && navProds.length) ? navProds : PRODS} />
           </div>
         )}
-        <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
+        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+          <LangToggle />
           {user ? (
             <div style={{display:"flex",alignItems:"center",gap:8}}>
-              {!mob && <span style={{fontSize:12,color:C.mu,fontFamily:"Tajawal,sans-serif"}}>أهلاً، {user.name} 👋</span>}
+              {!mob && <span style={{fontSize:12,color:C.mu,fontFamily:"Tajawal,sans-serif"}}>{t("navGreeting")} {user.name} 👋</span>}
               {user.role==="admin" && <Btn onClick={()=>go("#admin")} style={{background:C.go,color:"white",padding:"5px 10px",fontSize:11,letterSpacing:1}}>Admin</Btn>}
-              {user.role==="user" && !mob && <Btn onClick={()=>go("#myorders")} style={{background:"none",border:`1px solid ${C.dk}`,color:C.dk,padding:"5px 10px",fontSize:11,fontFamily:"Tajawal,sans-serif"}}>طلباتي</Btn>}
-              <Btn onClick={onLogout} style={{background:"none",border:`1px solid rgba(0,0,0,.15)`,color:C.mu,padding:"5px 10px",fontSize:11,fontFamily:"Tajawal,sans-serif"}}>خروج</Btn>
+              {user.role==="user" && !mob && <Btn onClick={()=>go("#myorders")} style={{background:"none",border:`1px solid ${C.dk}`,color:C.dk,padding:"5px 10px",fontSize:11,fontFamily:"Tajawal,sans-serif"}}>{t("navMyOrders")}</Btn>}
+              <Btn onClick={onLogout} style={{background:"none",border:`1px solid rgba(0,0,0,.15)`,color:C.mu,padding:"5px 10px",fontSize:11,fontFamily:"Tajawal,sans-serif"}}>{t("navLogout")}</Btn>
             </div>
           ) : (
-            <Btn onClick={()=>go("#login")} style={{background:"none",border:`1px solid ${C.dk}`,color:C.dk,padding:"6px 12px",fontSize:12,fontFamily:"Tajawal,sans-serif"}}>دخول</Btn>
+            <Btn onClick={()=>go("#login")} style={{background:"none",border:`1px solid ${C.dk}`,color:C.dk,padding:"6px 12px",fontSize:12,fontFamily:"Tajawal,sans-serif"}}>{t("navLogin")}</Btn>
           )}
           <Btn onClick={openCart} style={{ background: "none", fontSize: 20, position: "relative", color: C.dk, padding: 0 }}>
             🛍️{cnt > 0 && <span style={{ position: "absolute", top: -5, left: -5, background: C.go, color: "#fff", fontSize: 9, width: 15, height: 15, borderRadius: "50%", display: "flex", alignItems: "center", justifyContent: "center" }}>{cnt}</span>}
@@ -230,10 +390,10 @@ function Nav({ r, go, openCart, user, logout, onLogout }) {
         </div>
       </nav>
       {mob && open && (
-        <div style={{ background: C.wh, borderBottom: `1px solid rgba(0,0,0,.07)`, padding: "6px 20px 14px", direction: "rtl", position: "sticky", top: 60, zIndex: 199 }}>
-          {user && <div style={{ padding: "10px 0", borderBottom: "1px solid rgba(0,0,0,.05)", fontSize: 14, color: C.go, fontFamily: "Tajawal,sans-serif" }}>أهلاً، {user.name} 👋</div>}
+        <div style={{ background: C.wh, borderBottom: `1px solid rgba(0,0,0,.07)`, padding: "6px 20px 14px", direction: dir, position: "sticky", top: 60, zIndex: 199 }}>
+          {user && <div style={{ padding: "10px 0", borderBottom: "1px solid rgba(0,0,0,.05)", fontSize: 14, color: C.go, fontFamily: "Tajawal,sans-serif" }}>{t("navGreeting")} {user.name} 👋</div>}
           {links.map(([h, l]) => <span key={h} onClick={() => { go(h); setOpen(false); }} style={{ display: "block", cursor: "pointer", color: r === h ? C.go : C.dk, fontSize: 15, fontFamily: "Tajawal,sans-serif", padding: "10px 0", borderBottom: "1px solid rgba(0,0,0,.05)" }}>{l}</span>)}
-          {user && user.role === "user" && <span onClick={() => { go("#myorders"); setOpen(false); }} style={{ display: "block", cursor: "pointer", color: r === "#myorders" ? C.go : C.dk, fontSize: 15, fontFamily: "Tajawal,sans-serif", padding: "10px 0", borderBottom: "1px solid rgba(0,0,0,.05)" }}>طلباتي 📦</span>}
+          {user && user.role === "user" && <span onClick={() => { go("#myorders"); setOpen(false); }} style={{ display: "block", cursor: "pointer", color: r === "#myorders" ? C.go : C.dk, fontSize: 15, fontFamily: "Tajawal,sans-serif", padding: "10px 0", borderBottom: "1px solid rgba(0,0,0,.05)" }}>{t("navMyOrders")} 📦</span>}
         </div>
       )}
     </>
@@ -244,25 +404,25 @@ function Nav({ r, go, openCart, user, logout, onLogout }) {
 function CartSide({ open, close, go }) {
   const { cart, rem, upd, tot, ship, clr } = useCart();
   const { user } = useAuth();
+  const { t, dir } = useLang();
   const mob = useMob();
-  const [step, setStep] = useState(0); // 0=cart 1=checkout 2=done
+  const [step, setStep] = useState(0);
   const [f, setF] = useState({ n: "", p: "", city: "", addr: "" });
   const W = mob ? "100vw" : "390px";
 
   if (step === 2) return (
     <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.6)", zIndex: 400, display: "flex", alignItems: "center", justifyContent: "center", padding: 16 }}>
-      <div style={{ background: C.wh, padding: "36px 24px", textAlign: "center", maxWidth: 360, width: "100%", direction: "rtl" }}>
+      <div style={{ background: C.wh, padding: "36px 24px", textAlign: "center", maxWidth: 360, width: "100%", direction: dir }}>
         <div style={{ fontSize: 44, marginBottom: 12 }}>🎉</div>
-        <h3 style={{ fontFamily: "Georgia,serif", fontSize: 22, fontWeight: 300, marginBottom: 10, color: C.dk }}>تم استلام طلبك!</h3>
-        <p style={{ color: C.mu, lineHeight: 1.7, marginBottom: 22, fontSize: 13, fontFamily: "Tajawal,sans-serif" }}>شكراً لثقتك في نوّرة 💕<br />هيتواصل معاكي فريقنا خلال 24 ساعة.<br />الدفع <strong>كاش عند الاستلام</strong>.</p>
-        <Btn onClick={() => { setStep(0); close(); }} style={{ width: "100%", padding: 13, background: C.dk, color: C.cr, fontSize: 13, letterSpacing: 1 }}>متابعة التسوق</Btn>
+        <h3 style={{ fontFamily: "Georgia,serif", fontSize: 22, fontWeight: 300, marginBottom: 10, color: C.dk }}>{t("orderSuccess")}</h3>
+        <p style={{ color: C.mu, lineHeight: 1.7, marginBottom: 22, fontSize: 13, fontFamily: "Tajawal,sans-serif" }}>{t("orderSuccessSub")}<br />{t("orderSuccessNote")}<br />{t("orderCash")}.</p>
+        <Btn onClick={() => { setStep(0); close(); }} style={{ width: "100%", padding: 13, background: C.dk, color: C.cr, fontSize: 13, letterSpacing: 1 }}>{t("orderContinue")}</Btn>
       </div>
     </div>
   );
 
   const submit = () => {
-    if (!f.n || !f.p || !f.city || !f.addr) { alert("من فضلك اكملي البيانات"); return; }
-    // Save order to localStorage
+    if (!f.n || !f.p || !f.city || !f.addr) { alert(t("orderAlert")); return; }
     const order = {
       id: Date.now(), date: new Date().toLocaleDateString("ar-EG"),
       name: f.n, phone: f.p, city: f.city, address: f.addr,
@@ -286,29 +446,30 @@ function CartSide({ open, close, go }) {
   return (
     <>
       <div onClick={close} style={{ display: open ? "block" : "none", position: "fixed", inset: 0, background: "rgba(0,0,0,.5)", zIndex: 300 }} />
-      <div style={{ position: "fixed", top: 0, left: open ? 0 : `-${W}`, width: W, height: "100vh", background: C.wh, zIndex: 301, transition: "left .35s", display: "flex", flexDirection: "column", direction: "rtl", overflowX: "hidden" }}>
+      <div style={{ position: "fixed", top: 0, left: open ? 0 : `-${W}`, width: W, height: "100vh", background: C.wh, zIndex: 301, transition: "left .35s", display: "flex", flexDirection: "column", direction: dir, overflowX: "hidden" }}>
         <div style={{ padding: "15px 18px", borderBottom: `1px solid rgba(184,150,62,.15)`, display: "flex", alignItems: "center", justifyContent: "space-between", flexShrink: 0 }}>
-          <span style={{ fontFamily: "Georgia,serif", fontSize: 19, color: C.dk }}>{step === 1 ? "إتمام الطلب" : "عربتي 🛍️"}</span>
+          <span style={{ fontFamily: "Georgia,serif", fontSize: 19, color: C.dk }}>{step === 1 ? t("checkoutTitle") : t("cartTitle")}</span>
           <Btn onClick={() => { close(); setStep(0); }} style={{ background: "none", fontSize: 20, color: C.mu, padding: 0 }}>✕</Btn>
         </div>
-
         {step === 1 ? (
           <div style={{ flex: 1, overflowY: "auto", padding: "14px 18px" }}>
-            <div style={{ background: C.bl, padding: "9px 12px", marginBottom: 13, borderRight: `3px solid ${C.go}`, fontSize: 12, color: C.mu, fontFamily: "Tajawal,sans-serif" }}>💰 <b>كاش عند الاستلام</b></div>
-            {fld("n", "الاسم", "اسمك")}{fld("p", "رقم الموبايل", "01xxxxxxxxx")}{fld("addr", "العنوان", "الشارع والمبنى")}
+            <div style={{ background: C.bl, padding: "9px 12px", marginBottom: 13, borderRight: dir==="rtl"?`3px solid ${C.go}`:undefined, borderLeft: dir==="ltr"?`3px solid ${C.go}`:undefined, fontSize: 12, color: C.mu, fontFamily: "Tajawal,sans-serif" }}><b>{t("checkoutCashLabel")}</b></div>
+            {fld("n", t("checkoutName"), t("checkoutNamePh"))}
+            {fld("p", t("checkoutPhone"), t("checkoutPhonePh"))}
+            {fld("addr", t("checkoutAddr"), t("checkoutAddrPh"))}
             <div style={{ marginBottom: 11 }}>
-              <label style={{ display: "block", fontSize: 10, letterSpacing: 2, color: C.mu, marginBottom: 5, fontFamily: "Tajawal,sans-serif" }}>المحافظة</label>
+              <label style={{ display: "block", fontSize: 10, letterSpacing: 2, color: C.mu, marginBottom: 5, fontFamily: "Tajawal,sans-serif" }}>{t("checkoutGov")}</label>
               <select value={f.city} onChange={e => setF({ ...f, city: e.target.value })} style={{ width: "100%", padding: "10px 11px", border: "1px solid rgba(0,0,0,.12)", background: C.cr, fontFamily: "Tajawal,sans-serif", fontSize: 13, outline: "none" }}>
-                <option value="">اختاري</option>{GOVS.map(g => <option key={g}>{g}</option>)}
+                <option value="">{t("checkoutGovPh")}</option>{GOVS.map(g => <option key={g}>{g}</option>)}
               </select>
             </div>
             <div style={{ borderTop: "1px solid rgba(0,0,0,.08)", paddingTop: 12, marginBottom: 14 }}>
-              {cart.map(i => <div key={i.id} style={{ display: "flex", justifyContent: "space-between", fontSize: 12, marginBottom: 5, color: C.dk, fontFamily: "Tajawal,sans-serif" }}><span>{i.name} × {i.qty}</span><span>{i.price * i.qty} جنيه</span></div>)}
-              <div style={{ display: "flex", justifyContent: "space-between", fontFamily: "Georgia,serif", fontSize: 16, borderTop: "1px solid rgba(0,0,0,.08)", paddingTop: 9, marginTop: 6 }}><span>الإجمالي</span><span>{tot + ship} جنيه</span></div>
+              {cart.map(i => <div key={i.id} style={{ display: "flex", justifyContent: "space-between", fontSize: 12, marginBottom: 5, color: C.dk, fontFamily: "Tajawal,sans-serif" }}><span>{i.name} × {i.qty}</span><span>{i.price * i.qty} {t("egp")}</span></div>)}
+              <div style={{ display: "flex", justifyContent: "space-between", fontFamily: "Georgia,serif", fontSize: 16, borderTop: "1px solid rgba(0,0,0,.08)", paddingTop: 9, marginTop: 6 }}><span>{t("cartTotal")}</span><span>{tot + ship} {t("egp")}</span></div>
             </div>
             <div style={{ display: "flex", gap: 8 }}>
-              <Btn onClick={() => setStep(0)} style={{ padding: "12px 14px", background: "none", border: "1px solid rgba(0,0,0,.15)", color: C.mu, fontSize: 12, whiteSpace: "nowrap" }}>← رجوع</Btn>
-              <Btn onClick={submit} style={{ flex: 1, background: C.dk, color: C.cr, padding: 12, fontSize: 13, letterSpacing: 1 }}>تأكيد الطلب ✓</Btn>
+              <Btn onClick={() => setStep(0)} style={{ padding: "12px 14px", background: "none", border: "1px solid rgba(0,0,0,.15)", color: C.mu, fontSize: 12, whiteSpace: "nowrap" }}>{t("checkoutBack")}</Btn>
+              <Btn onClick={submit} style={{ flex: 1, background: C.dk, color: C.cr, padding: 12, fontSize: 13, letterSpacing: 1 }}>{t("checkoutConfirm")}</Btn>
             </div>
           </div>
         ) : (
@@ -317,15 +478,15 @@ function CartSide({ open, close, go }) {
               {!cart.length ? (
                 <div style={{ textAlign: "center", padding: "44px 16px", color: C.mu }}>
                   <div style={{ fontSize: 40, marginBottom: 12 }}>🛍️</div>
-                  <p style={{ fontFamily: "Georgia,serif", fontSize: 17, fontWeight: 300, marginBottom: 18 }}>عربتك فاضية</p>
-                  <Btn onClick={() => { close(); go("#products"); }} style={{ background: C.dk, color: C.cr, padding: "11px 22px", fontSize: 12 }}>تسوقي الآن</Btn>
+                  <p style={{ fontFamily: "Georgia,serif", fontSize: 17, fontWeight: 300, marginBottom: 18 }}>{t("cartEmpty")}</p>
+                  <Btn onClick={() => { close(); go("#products"); }} style={{ background: C.dk, color: C.cr, padding: "11px 22px", fontSize: 12 }}>{t("cartShopNow")}</Btn>
                 </div>
               ) : cart.map(i => (
                 <div key={i.id} style={{ display: "flex", gap: 10, padding: "12px 0", borderBottom: "1px solid rgba(0,0,0,.06)", alignItems: "center" }}>
                   <div style={{ width: 56, height: 56, background: i.bg, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0, borderRadius: 3 }}><span style={{ fontSize: 22 }}>{i.icon}</span></div>
                   <div style={{ flex: 1, minWidth: 0 }}>
                     <div style={{ fontFamily: "Georgia,serif", fontSize: 13, color: C.dk, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{i.name}</div>
-                    <div style={{ fontSize: 13, color: C.dk, fontWeight: 500, fontFamily: "Tajawal,sans-serif", marginTop: 2 }}>{i.price * i.qty} جنيه</div>
+                    <div style={{ fontSize: 13, color: C.dk, fontWeight: 500, fontFamily: "Tajawal,sans-serif", marginTop: 2 }}>{i.price * i.qty} {t("egp")}</div>
                     <div style={{ display: "flex", alignItems: "center", gap: 7, marginTop: 5 }}>
                       <Btn onClick={() => upd(i.id, i.qty - 1)} style={{ width: 25, height: 25, border: `1px solid ${C.dk}`, background: "none", fontSize: 14, display: "flex", alignItems: "center", justifyContent: "center", padding: 0 }}>−</Btn>
                       <span style={{ fontSize: 13, minWidth: 16, textAlign: "center" }}>{i.qty}</span>
@@ -339,14 +500,14 @@ function CartSide({ open, close, go }) {
             {cart.length > 0 && (
               <div style={{ padding: "13px 18px", borderTop: `1px solid rgba(184,150,62,.15)`, flexShrink: 0 }}>
                 <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
-                  <span style={{ fontSize: 11, color: C.mu, fontFamily: "Tajawal,sans-serif" }}>الإجمالي</span>
-                  <span style={{ fontFamily: "Georgia,serif", fontSize: 18, color: C.dk }}>{tot} جنيه</span>
+                  <span style={{ fontSize: 11, color: C.mu, fontFamily: "Tajawal,sans-serif" }}>{t("cartTotal")}</span>
+                  <span style={{ fontFamily: "Georgia,serif", fontSize: 18, color: C.dk }}>{tot} {t("egp")}</span>
                 </div>
-                {ship > 0 && <div style={{ fontSize: 11, color: C.mu, marginBottom: 6, fontFamily: "Tajawal,sans-serif" }}>+ {ship} جنيه شحن | أضيفي {500 - tot} للشحن المجاني</div>}
-                {ship === 0 && <div style={{ fontSize: 11, color: "#2E6B3E", marginBottom: 6, fontFamily: "Tajawal,sans-serif" }}>✓ شحن مجاني</div>}
-                <div style={{ background: C.bl, padding: "8px 11px", fontSize: 11, color: C.mu, marginBottom: 10, fontFamily: "Tajawal,sans-serif" }}>💰 كاش عند الاستلام فقط</div>
-                <Btn onClick={() => { if (!user) { close(); go("#login"); } else setStep(1); }} style={{ width: "100%", background: C.dk, color: C.cr, padding: 13, fontSize: 13, letterSpacing: 1, marginBottom: 7 }}>إتمام الطلب</Btn>
-                <Btn onClick={close} style={{ width: "100%", background: "transparent", color: C.mu, border: "1px solid rgba(0,0,0,.1)", padding: 11, fontSize: 12 }}>← متابعة التسوق</Btn>
+                {ship > 0 && <div style={{ fontSize: 11, color: C.mu, marginBottom: 6, fontFamily: "Tajawal,sans-serif" }}>+ {ship} {t("egp")} | {500 - tot} {t("cartShipAdd")}</div>}
+                {ship === 0 && <div style={{ fontSize: 11, color: "#2E6B3E", marginBottom: 6, fontFamily: "Tajawal,sans-serif" }}>{t("cartShipFree")}</div>}
+                <div style={{ background: C.bl, padding: "8px 11px", fontSize: 11, color: C.mu, marginBottom: 10, fontFamily: "Tajawal,sans-serif" }}>{t("cartCashOnly")}</div>
+                <Btn onClick={() => { if (!user) { close(); go("#login"); } else setStep(1); }} style={{ width: "100%", background: C.dk, color: C.cr, padding: 13, fontSize: 13, letterSpacing: 1, marginBottom: 7 }}>{t("cartCheckout")}</Btn>
+                <Btn onClick={close} style={{ width: "100%", background: "transparent", color: C.mu, border: "1px solid rgba(0,0,0,.1)", padding: 11, fontSize: 12 }}>{t("cartContinue")}</Btn>
               </div>
             )}
           </>
@@ -359,6 +520,7 @@ function CartSide({ open, close, go }) {
 // ─── Login Page ───────────────────────────────────────────────────────────────
 function LoginPage({ go }) {
   const { login, register } = useAuth();
+  const { t, dir } = useLang();
   const mob = useMob();
   const [tab, setTab] = useState("login");
   const [f, setF] = useState({ name:"", email:"", pass:"", pass2:"" });
@@ -373,9 +535,9 @@ function LoginPage({ go }) {
         const r = login(f.email, f.pass);
         if (r.ok) go("#home"); else setErr(r.err);
       } else {
-        if (!f.name || !f.email || !f.pass) return setErr("من فضلك اكمل البيانات");
-        if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(f.email)) return setErr("البريد الإلكتروني غير صحيح");
-        if (f.pass !== f.pass2) return setErr("كلمة المرور مش متطابقة");
+        if (!f.name || !f.email || !f.pass) return setErr(t("loginErrFields"));
+        if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(f.email)) return setErr(t("loginErrEmail"));
+        if (f.pass !== f.pass2) return setErr(t("loginErrPass"));
         const r = register(f.name, f.email, f.pass);
         if (r.ok) go("#home"); else setErr(r.err);
       }
@@ -392,24 +554,24 @@ function LoginPage({ go }) {
   );
 
   return (
-    <div style={{direction:"rtl",minHeight:"80vh",display:"flex",alignItems:"center",justifyContent:"center",background:`linear-gradient(135deg,${C.bl},${C.cr})`}}>
+    <div style={{direction:dir,minHeight:"80vh",display:"flex",alignItems:"center",justifyContent:"center",background:`linear-gradient(135deg,${C.bl},${C.cr})`}}>
       <div style={{background:C.wh,padding:mob?"28px 20px":"44px",width:mob?"92%":"420px",boxShadow:"0 8px 40px rgba(0,0,0,.10)"}}>
         <div style={{textAlign:"center",marginBottom:28}}>
-          <img src={LogoSVG} alt="نوّرة" style={{height:80,display:"block",margin:"0 auto 14px"}}/>
+          <img src={LogoSVG} alt="نوّرَة" style={{height:80,display:"block",margin:"0 auto 14px"}}/>
         </div>
         <div style={{display:"flex",borderBottom:"1px solid rgba(0,0,0,.1)",marginBottom:24}}>
-          {[["login","تسجيل الدخول"],["register","حساب جديد"]].map(([k,l])=>(
+          {[["login",t("loginTab")],["register",t("registerTab")]].map(([k,l])=>(
             <button key={k} onClick={()=>{setTab(k);setErr("");}} style={{flex:1,padding:"11px 0",background:"none",border:"none",borderBottom:tab===k?`2px solid ${C.dk}`:"2px solid transparent",cursor:"pointer",fontFamily:"Tajawal,sans-serif",fontSize:14,color:tab===k?C.dk:C.mu,fontWeight:tab===k?500:300}}>{l}</button>
           ))}
         </div>
-        {tab==="register" && inp("name","الاسم الكامل","اسمك")}
-        {inp("email","البريد الإلكتروني","example@email.com","email")}
-        {inp("pass","كلمة المرور","••••••••","password")}
-        {tab==="register" && inp("pass2","تأكيد كلمة المرور","••••••••","password")}
-        {err && <div style={{background:"#FEE2E2",color:"#DC2626",padding:"9px 12px",marginBottom:14,fontSize:12,fontFamily:"Tajawal,sans-serif",borderRight:"3px solid #DC2626"}}>{err}</div>}
+        {tab==="register" && inp("name",t("loginFullName"),t("loginFullNamePh"))}
+        {inp("email",t("loginEmail"),t("loginEmailPh"),"email")}
+        {inp("pass",t("loginPass"),t("loginPassPh"),"password")}
+        {tab==="register" && inp("pass2",t("loginConfirmPass"),t("loginPassPh"),"password")}
+        {err && <div style={{background:"#FEE2E2",color:"#DC2626",padding:"9px 12px",marginBottom:14,fontSize:12,fontFamily:"Tajawal,sans-serif",borderRight:dir==="rtl"?"3px solid #DC2626":undefined,borderLeft:dir==="ltr"?"3px solid #DC2626":undefined}}>{err}</div>}
         <button onClick={submit} disabled={loading}
           style={{width:"100%",background:loading?C.mu:C.dk,color:C.cr,border:"none",padding:14,cursor:loading?"not-allowed":"pointer",fontFamily:"Tajawal,sans-serif",fontSize:14,letterSpacing:1,transition:"background .2s"}}>
-          {loading?"جاري التحقق...":tab==="login"?"دخول":"إنشاء الحساب"}
+          {loading?t("loginLoading"):tab==="login"?t("loginBtn"):t("registerBtn")}
         </button>
       </div>
     </div>
@@ -717,7 +879,9 @@ function AdminDash({ go }) {
 function WAFloat() {
   const [show, setShow] = useState(false);
   const WA_NUM = "201000000000"; // ← غير الرقم ده لرقمك
-  const msg = encodeURIComponent("مرحباً، أريد الاستفسار عن منتج من نوّرة 💕");
+  const { t } = useLang();
+  const msg = encodeURIComponent(t("waMsg"));
+  const waLines = t("waHello").split("\n");
   return (
     <div style={{position:"fixed",bottom:24,left:24,zIndex:500,direction:"ltr"}}>
       {show && (
@@ -725,13 +889,13 @@ function WAFloat() {
           boxShadow:"0 4px 20px rgba(0,0,0,.15)",maxWidth:220,direction:"rtl",
           animation:"fadeIn .2s ease"}}>
           <div style={{fontSize:13,color:"#2A1F0E",fontFamily:"Tajawal,sans-serif",marginBottom:10,lineHeight:1.6}}>
-            👋 أهلاً!<br/>محتاجة مساعدة في اختيار المنتج؟
+            {waLines[0]}<br/>{waLines[1]}
           </div>
           <a href={`https://wa.me/${WA_NUM}?text=${msg}`} target="_blank" rel="noreferrer"
             style={{display:"block",background:"#25D366",color:"white",padding:"9px 14px",
               borderRadius:8,textDecoration:"none",fontSize:13,fontFamily:"Tajawal,sans-serif",
               textAlign:"center",fontWeight:500}}>
-            ابدئي المحادثة
+            {t("waStart")}
           </a>
         </div>
       )}
@@ -756,6 +920,7 @@ function WAFloat() {
 
 // ─── Search ───────────────────────────────────────────────────────────────────
 function SearchBar({ go, allProds }) {
+  const { t } = useLang();
   const [q, setQ] = useState("");
   const [open, setOpen] = useState(false);
   const mob = useMob();
@@ -777,7 +942,7 @@ function SearchBar({ go, allProds }) {
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#9C7E6A" strokeWidth="2"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
         <input value={q} onChange={e=>{setQ(e.target.value);setOpen(true);}}
           onFocus={()=>setOpen(true)}
-          placeholder="ابحثي عن منتج..."
+          placeholder={t("searchPh")}
           style={{border:"none",background:"none",outline:"none",fontFamily:"Tajawal,sans-serif",
             fontSize:13,color:"#2A1F0E",width:mob?120:180,direction:"rtl"}}/>
         {q && <button onClick={()=>{setQ("");setOpen(false);}} style={{background:"none",border:"none",cursor:"pointer",color:"#9C7E6A",fontSize:14,padding:0}}>✕</button>}
@@ -802,7 +967,7 @@ function SearchBar({ go, allProds }) {
           <div onClick={()=>{go("#products");setQ("");setOpen(false);}}
             style={{padding:"9px 14px",textAlign:"center",fontSize:12,color:"#B8963E",
               cursor:"pointer",fontFamily:"Tajawal,sans-serif",borderTop:"1px solid rgba(0,0,0,.05)"}}>
-            عرض كل النتائج ←
+            {t("searchViewAll")}
           </div>
         </div>
       )}
@@ -815,6 +980,7 @@ function SearchBar({ go, allProds }) {
 function Reviews({ productId }) {
   const REVIEWS_KEY = `nawra_reviews_${productId}`;
   const { user } = useAuth();
+  const { t } = useLang();
   const mob = useMob();
   const [reviews, setReviews] = useState(() => {
     try { return JSON.parse(localStorage.getItem(REVIEWS_KEY)) || []; } catch { return []; }
@@ -828,7 +994,7 @@ function Reviews({ productId }) {
     if (!form.comment.trim()) return;
     const newR = {
       id: Date.now(),
-      name: user?.name || form.name || "عميلة",
+      name: user?.name || form.name || t("reviewsDefault"),
       rating: form.rating,
       comment: form.comment,
       date: new Date().toLocaleDateString("ar-EG")
@@ -846,13 +1012,13 @@ function Reviews({ productId }) {
       <div style={{borderTop:"1px solid rgba(0,0,0,.08)",paddingTop:28}}>
         <div style={{display:"flex",alignItems:"center",gap:16,marginBottom:24,flexWrap:"wrap"}}>
           <h3 style={{fontFamily:"Georgia,serif",fontSize:mob?18:22,fontWeight:400,color:"#2A1F0E",margin:0}}>
-            آراء العملاء
+            {t("reviewsTitle")}
           </h3>
           {avg && (
             <div style={{display:"flex",alignItems:"center",gap:8}}>
               <span style={{fontFamily:"Georgia,serif",fontSize:24,color:"#2A1F0E"}}>{avg}</span>
               <span style={{color:"#B8963E",fontSize:16}}>{Array(5).fill(0).map((_,i)=>i<Math.round(avg)?"★":"☆").join("")}</span>
-              <span style={{fontSize:12,color:"#9C7E6A",fontFamily:"Tajawal,sans-serif"}}>({reviews.length} تقييم)</span>
+              <span style={{fontSize:12,color:"#9C7E6A",fontFamily:"Tajawal,sans-serif"}}>({reviews.length} {t("reviewsRatings")})</span>
             </div>
           )}
         </div>
@@ -861,7 +1027,7 @@ function Reviews({ productId }) {
         <div style={{marginBottom:28}}>
           {reviews.length===0 ? (
             <p style={{color:"#9C7E6A",fontFamily:"Tajawal,sans-serif",fontSize:13,padding:"20px 0"}}>
-              كوني أول من تقيّم هذا المنتج ✨
+              {t("reviewsEmpty")}
             </p>
           ) : reviews.map(r=>(
             <div key={r.id} style={{padding:"14px 0",borderBottom:"1px solid rgba(0,0,0,.06)"}}>
@@ -885,21 +1051,21 @@ function Reviews({ productId }) {
         {/* Add review form */}
         <div style={{background:"#F5EBE8",padding:mob?"16px":"20px"}}>
           <h4 style={{fontFamily:"Georgia,serif",fontSize:16,fontWeight:400,color:"#2A1F0E",marginBottom:14}}>
-            أضيفي تقييمك
+            {t("reviewsFormTitle")}
           </h4>
           {submitted ? (
-            <div style={{color:"#10B981",fontFamily:"Tajawal,sans-serif",fontSize:14,padding:"10px 0"}}>✓ شكراً لتقييمك!</div>
+            <div style={{color:"#10B981",fontFamily:"Tajawal,sans-serif",fontSize:14,padding:"10px 0"}}>{t("reviewsThanks")}</div>
           ) : (
             <>
               {!user && (
                 <div style={{marginBottom:12}}>
-                  <label style={{display:"block",fontSize:10,letterSpacing:2,color:"#9C7E6A",marginBottom:5,fontFamily:"Tajawal,sans-serif"}}>الاسم</label>
-                  <input value={form.name} onChange={e=>setForm({...form,name:e.target.value})} placeholder="اسمك"
+                  <label style={{display:"block",fontSize:10,letterSpacing:2,color:"#9C7E6A",marginBottom:5,fontFamily:"Tajawal,sans-serif"}}>{t("reviewsNameLabel")}</label>
+                  <input value={form.name} onChange={e=>setForm({...form,name:e.target.value})} placeholder={t("reviewsNamePh")}
                     style={{width:"100%",padding:"9px 11px",border:"1px solid rgba(0,0,0,.12)",background:"white",fontFamily:"Tajawal,sans-serif",fontSize:13,outline:"none",boxSizing:"border-box"}}/>
                 </div>
               )}
               <div style={{marginBottom:12}}>
-                <label style={{display:"block",fontSize:10,letterSpacing:2,color:"#9C7E6A",marginBottom:8,fontFamily:"Tajawal,sans-serif"}}>التقييم</label>
+                <label style={{display:"block",fontSize:10,letterSpacing:2,color:"#9C7E6A",marginBottom:8,fontFamily:"Tajawal,sans-serif"}}>{t("reviewsRatingLabel")}</label>
                 <div style={{display:"flex",gap:6}}>
                   {[1,2,3,4,5].map(n=>(
                     <button key={n} onClick={()=>setForm({...form,rating:n})}
@@ -910,15 +1076,15 @@ function Reviews({ productId }) {
                 </div>
               </div>
               <div style={{marginBottom:12}}>
-                <label style={{display:"block",fontSize:10,letterSpacing:2,color:"#9C7E6A",marginBottom:5,fontFamily:"Tajawal,sans-serif"}}>رأيك في المنتج</label>
+                <label style={{display:"block",fontSize:10,letterSpacing:2,color:"#9C7E6A",marginBottom:5,fontFamily:"Tajawal,sans-serif"}}>{t("reviewsCommentLabel")}</label>
                 <textarea value={form.comment} onChange={e=>setForm({...form,comment:e.target.value})}
-                  rows={3} placeholder="شاركي تجربتك مع المنتج..."
+                  rows={3} placeholder={t("reviewsCommentPh")}
                   style={{width:"100%",padding:"9px 11px",border:"1px solid rgba(0,0,0,.12)",background:"white",fontFamily:"Tajawal,sans-serif",fontSize:13,outline:"none",resize:"vertical",boxSizing:"border-box"}}/>
               </div>
               <button onClick={submit}
                 style={{background:"#2A1F0E",color:"#FBF7F4",border:"none",padding:"11px 24px",
                   cursor:"pointer",fontFamily:"Tajawal,sans-serif",fontSize:13,letterSpacing:1}}>
-                إرسال التقييم
+                {t("reviewsSubmit")}
               </button>
             </>
           )}
@@ -929,45 +1095,46 @@ function Reviews({ productId }) {
 }
 
 // ─── Pages ────────────────────────────────────────────────────────────────────
-function Home({ go, prods, allProds }) {
+function Home({ go, allProds }) {
   const { prods: _p } = useProds();
   const { user } = useAuth();
-  const homProds = allProds || prods || _p || PRODS;
+  const { t, dir } = useLang();
+  const homProds = allProds || _p || PRODS;
   const mob = useMob();
   const px = mob ? "16px" : "56px";
+  const feats = [["🚚",t("feat1"),t("feat1d")],["💳",t("feat2"),t("feat2d")],["✅",t("feat3"),t("feat3d")],["↩️",t("feat4"),t("feat4d")]];
   return (
-    <div style={{ direction: "rtl" }}>
+    <div style={{ direction: dir }}>
       {user && user.role === "user" && (
-        <div style={{ background: C.go, color: "#fff", textAlign: "center", padding: "9px 16px", fontSize: mob ? 12 : 14, fontFamily: "Tajawal,sans-serif", letterSpacing: 0.5 }}>
-          أهلاً بك مجدداً، <strong>{user.name}</strong>! 🌸 &nbsp;—&nbsp; <span onClick={() => go("#myorders")} style={{ cursor: "pointer", textDecoration: "underline" }}>اعرضي طلباتك</span>
+        <div style={{ background: C.go, color: "#fff", textAlign: "center", padding: "9px 16px", fontSize: mob ? 12 : 14, fontFamily: "Tajawal,sans-serif" }}>
+          {t("welcomeBack")} <strong>{user.name}</strong>! 🌸 &nbsp;—&nbsp; <span onClick={() => go("#myorders")} style={{ cursor: "pointer", textDecoration: "underline" }}>{t("welcomeViewOrders")}</span>
         </div>
       )}
-      <div style={{ background: C.dk, color: C.bl, textAlign: "center", padding: "8px", fontSize: mob ? 11 : 13, letterSpacing: 1, fontFamily: "Tajawal,sans-serif" }}>شحن مجاني فوق 500 جنيه &nbsp;✦&nbsp; كاش عند الاستلام</div>
+      <div style={{ background: C.dk, color: C.bl, textAlign: "center", padding: "8px", fontSize: mob ? 11 : 13, letterSpacing: 1, fontFamily: "Tajawal,sans-serif" }}>{t("topBanner")}</div>
       <section style={{ background: `linear-gradient(135deg,${C.bl},${C.cr},#EDE3DC)`, display: "flex", alignItems: "center", justifyContent: "center", textAlign: "center", padding: mob ? "44px 20px" : "72px 40px", minHeight: mob ? "55vh" : "78vh" }}>
         <div>
-          <div style={{ fontFamily: "Georgia,serif", display:"none"}}>x</div>
-          <img src={LogoSVG} alt="نوّرة" style={{height: mob ? 180 : 240, width:"auto", display:"block", margin:"0 auto 24px"}} />
-          <h1 style={{ fontFamily: "Georgia,serif", fontSize: mob ? "clamp(26px,8vw,38px)" : "clamp(36px,5vw,58px)", fontWeight: 300, color: C.dk, lineHeight: 1.2, marginBottom: 14 }}>جمالك يبدأ من <em style={{ color: C.ro }}>هنا</em></h1>
-          <p style={{ fontSize: mob ? 13 : 15, color: C.mu, lineHeight: 1.8, marginBottom: 28, fontFamily: "Tajawal,sans-serif", fontWeight: 300 }}>منتجات عناية مختارة من أفضل البراندات العالمية<br />توصيل سريع لكل محافظات مصر</p>
+          <img src={LogoSVG} alt="نوّرَة" style={{height: mob ? 180 : 240, width:"auto", display:"block", margin:"0 auto 24px"}} />
+          <h1 style={{ fontFamily: "Georgia,serif", fontSize: mob ? "clamp(26px,8vw,38px)" : "clamp(36px,5vw,58px)", fontWeight: 300, color: C.dk, lineHeight: 1.2, marginBottom: 14 }}>{t("heroTitle")} <em style={{ color: C.ro }}>{t("heroTitleEm")}</em></h1>
+          <p style={{ fontSize: mob ? 13 : 15, color: C.mu, lineHeight: 1.8, marginBottom: 28, fontFamily: "Tajawal,sans-serif", fontWeight: 300 }}>{t("heroSub")}<br />{t("heroSub2")}</p>
           <div style={{ display: "flex", gap: 10, justifyContent: "center", flexWrap: "wrap" }}>
-            <Btn onClick={() => go("#products")} style={{ background: C.dk, color: C.cr, padding: mob ? "11px 22px" : "13px 30px", fontSize: 12, letterSpacing: 2 }}>تسوّقي الآن</Btn>
-            <Btn onClick={() => go("#about")} style={{ background: "transparent", color: C.dk, padding: mob ? "11px 22px" : "13px 30px", border: `1px solid ${C.dk}`, fontSize: 12, letterSpacing: 2 }}>تعرفي علينا</Btn>
+            <Btn onClick={() => go("#products")} style={{ background: C.dk, color: C.cr, padding: mob ? "11px 22px" : "13px 30px", fontSize: 12, letterSpacing: 2 }}>{t("heroShopNow")}</Btn>
+            <Btn onClick={() => go("#about")} style={{ background: "transparent", color: C.dk, padding: mob ? "11px 22px" : "13px 30px", border: `1px solid ${C.dk}`, fontSize: 12, letterSpacing: 2 }}>{t("heroAboutUs")}</Btn>
           </div>
         </div>
       </section>
       <div style={{ background: C.dk, padding: "11px 0", overflow: "hidden", whiteSpace: "nowrap" }}>
         <div style={{ display: "inline-block", animation: "mq 22s linear infinite" }}>
-          {["CERAVE","✦","THE ORDINARY","✦","LA ROCHE-POSAY","✦","NEUTROGENA","✦","GARNIER","✦","BIODERMA","✦","CERAVE","✦","THE ORDINARY","✦","LA ROCHE-POSAY","✦","NEUTROGENA","✦","GARNIER","✦","BIODERMA","✦"].map((t, i) => (
-            <span key={i} style={{ color: t === "✦" ? C.go : C.bl, fontSize: 10, letterSpacing: 3, padding: "0 16px", fontFamily: "Tajawal,sans-serif" }}>{t}</span>
+          {["CERAVE","✦","THE ORDINARY","✦","LA ROCHE-POSAY","✦","NEUTROGENA","✦","GARNIER","✦","BIODERMA","✦","CERAVE","✦","THE ORDINARY","✦","LA ROCHE-POSAY","✦","NEUTROGENA","✦","GARNIER","✦","BIODERMA","✦"].map((s, i) => (
+            <span key={i} style={{ color: s === "✦" ? C.go : C.bl, fontSize: 10, letterSpacing: 3, padding: "0 16px", fontFamily: "Tajawal,sans-serif" }}>{s}</span>
           ))}
         </div>
       </div>
       <section style={{ background: C.wh, padding: mob ? "22px 16px" : "32px 56px" }}>
         <div style={{ display: "grid", gridTemplateColumns: mob ? "1fr 1fr" : "repeat(4,1fr)", gap: mob ? 12 : 22, maxWidth: 1050, margin: "0 auto", textAlign: "center" }}>
-          {[["🚚","توصيل سريع","2-4 أيام"],["💳","كاش عند الاستلام","ادفعي لما يوصلك"],["✅","منتجات أصلية","موصى بها جلدياً"],["↩️","إرجاع مجاني","خلال 14 يوم"]].map(([ic, t, d]) => (
-            <div key={t}>
+          {feats.map(([ic, lbl, d]) => (
+            <div key={lbl}>
               <div style={{ fontSize: mob ? 20 : 24, color: C.go, marginBottom: 6 }}>{ic}</div>
-              <div style={{ fontFamily: "Georgia,serif", fontSize: mob ? 13 : 14, color: C.dk, marginBottom: 3 }}>{t}</div>
+              <div style={{ fontFamily: "Georgia,serif", fontSize: mob ? 13 : 14, color: C.dk, marginBottom: 3 }}>{lbl}</div>
               <div style={{ fontSize: mob ? 10 : 11, color: C.mu, fontFamily: "Tajawal,sans-serif" }}>{d}</div>
             </div>
           ))}
@@ -975,20 +1142,20 @@ function Home({ go, prods, allProds }) {
       </section>
       <section style={{ padding: `32px ${px}`, background: C.cr }}>
         <div style={{ textAlign: "center", marginBottom: 22 }}>
-          <div style={{ fontSize: 9, letterSpacing: 3, color: C.go, marginBottom: 7, fontFamily: "Tajawal,sans-serif" }}>الأكثر مبيعاً</div>
-          <h2 style={{ fontFamily: "Georgia,serif", fontSize: mob ? 24 : 32, fontWeight: 300, color: C.dk }}>منتجاتنا المختارة</h2>
+          <div style={{ fontSize: 9, letterSpacing: 3, color: C.go, marginBottom: 7, fontFamily: "Tajawal,sans-serif" }}>{t("homeBestSellersTag")}</div>
+          <h2 style={{ fontFamily: "Georgia,serif", fontSize: mob ? 24 : 32, fontWeight: 300, color: C.dk }}>{t("homeBestSellersTitle")}</h2>
         </div>
         <div style={{ display: "grid", gridTemplateColumns: mob ? "1fr" : "repeat(3,1fr)", gap: mob ? 12 : 16, maxWidth: 1050, margin: "0 auto" }}>
           {homProds.slice(0, 3).map(p => <Card key={p.id} p={p} go={go} />)}
         </div>
         <div style={{ textAlign: "center", marginTop: 22 }}>
-          <Btn onClick={() => go("#products")} style={{ background: "none", border: `1px solid ${C.dk}`, color: C.dk, padding: mob ? "10px 22px" : "12px 28px", fontSize: 12, letterSpacing: 2 }}>عرض كل المنتجات</Btn>
+          <Btn onClick={() => go("#products")} style={{ background: "none", border: `1px solid ${C.dk}`, color: C.dk, padding: mob ? "10px 22px" : "12px 28px", fontSize: 12, letterSpacing: 2 }}>{t("homeViewAll")}</Btn>
         </div>
       </section>
       <section style={{ background: C.dk, padding: mob ? "34px 20px" : "48px 40px", textAlign: "center", color: C.bl }}>
-        <h2 style={{ fontFamily: "Georgia,serif", fontSize: mob ? 22 : 30, fontWeight: 300, marginBottom: 10 }}>ابدئي روتينك المثالي</h2>
-        <p style={{ fontSize: mob ? 12 : 14, opacity: .7, marginBottom: 22, fontFamily: "Tajawal,sans-serif" }}>من أفضل البراندات بأسعار تنافسية</p>
-        <Btn onClick={() => go("#products")} style={{ background: C.go, color: "#fff", padding: mob ? "11px 26px" : "13px 40px", fontSize: 12, letterSpacing: 2 }}>تسوقي الآن</Btn>
+        <h2 style={{ fontFamily: "Georgia,serif", fontSize: mob ? 22 : 30, fontWeight: 300, marginBottom: 10 }}>{t("homeCtaTitle")}</h2>
+        <p style={{ fontSize: mob ? 12 : 14, opacity: .7, marginBottom: 22, fontFamily: "Tajawal,sans-serif" }}>{t("homeCtaSub")}</p>
+        <Btn onClick={() => go("#products")} style={{ background: C.go, color: "#fff", padding: mob ? "11px 26px" : "13px 40px", fontSize: 12, letterSpacing: 2 }}>{t("homeCtaBtn")}</Btn>
       </section>
       <style>{`@keyframes mq{from{transform:translateX(0)}to{transform:translateX(-50%)}}`}</style>
     </div>
@@ -998,26 +1165,28 @@ function Home({ go, prods, allProds }) {
 function Products({ go, allProds }) {
   const { prods: _p } = useProds();
   allProds = allProds || _p || PRODS;
+  const { t, dir } = useLang();
   const mob = useMob();
-  const [fil, setFil] = useState("الكل");
+  const [fil, setFil] = useState("__all__");
   const [srt, setSrt] = useState("d");
   const prodsData = (allProds && allProds.length) ? allProds : PRODS;
-  const brands = ["الكل", ...[...new Set(prodsData.map(p => p.brand))]];
-  let list = fil === "الكل" ? prodsData : prodsData.filter(p => p.brand === fil);
+  const brandKeys = [...new Set(prodsData.map(p => p.brand))];
+  let list = fil === "__all__" ? prodsData : prodsData.filter(p => p.brand === fil);
   if (srt === "a") list = [...list].sort((a, b) => a.price - b.price);
   if (srt === "z") list = [...list].sort((a, b) => b.price - a.price);
   const px = mob ? "16px" : "56px";
   return (
-    <div style={{ direction: "rtl", minHeight: "80vh" }}>
+    <div style={{ direction: dir, minHeight: "80vh" }}>
       <div style={{ background: C.bl, padding: mob ? "26px 20px" : "40px 56px", textAlign: "center" }}>
-        <h1 style={{ fontFamily: "Georgia,serif", fontSize: mob ? 26 : 36, fontWeight: 300, color: C.dk }}>جميع المنتجات</h1>
-        <p style={{ color: C.mu, marginTop: 8, fontFamily: "Tajawal,sans-serif", fontSize: 13 }}>روتينك المثالي يبدأ من هنا</p>
+        <h1 style={{ fontFamily: "Georgia,serif", fontSize: mob ? 26 : 36, fontWeight: 300, color: C.dk }}>{t("prodsTitle")}</h1>
+        <p style={{ color: C.mu, marginTop: 8, fontFamily: "Tajawal,sans-serif", fontSize: 13 }}>{t("prodsSub")}</p>
       </div>
-      <div style={{ background: C.wh, padding: mob ? "10px 16px" : "12px 56px", borderBottom: "1px solid rgba(0,0,0,.07)", direction: "rtl" }}>
+      <div style={{ background: C.wh, padding: mob ? "10px 16px" : "12px 56px", borderBottom: "1px solid rgba(0,0,0,.07)" }}>
         <div style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center" }}>
-          {brands.map(b => <Btn key={b} onClick={() => setFil(b)} style={{ padding: "5px 11px", border: `1px solid ${fil === b ? C.dk : "rgba(0,0,0,.12)"}`, background: fil === b ? C.dk : C.wh, color: fil === b ? C.cr : C.dk, fontSize: mob ? 10 : 12, whiteSpace: "nowrap" }}>{b}</Btn>)}
-          <select value={srt} onChange={e => setSrt(e.target.value)} style={{ padding: "5px 9px", border: "1px solid rgba(0,0,0,.12)", background: C.cr, fontFamily: "Tajawal,sans-serif", fontSize: mob ? 10 : 12, outline: "none", marginRight: "auto" }}>
-            <option value="d">الترتيب</option><option value="a">الأقل سعراً</option><option value="z">الأعلى سعراً</option>
+          <Btn onClick={() => setFil("__all__")} style={{ padding: "5px 11px", border: `1px solid ${fil === "__all__" ? C.dk : "rgba(0,0,0,.12)"}`, background: fil === "__all__" ? C.dk : C.wh, color: fil === "__all__" ? C.cr : C.dk, fontSize: mob ? 10 : 12, whiteSpace: "nowrap" }}>{t("prodsFilterAll")}</Btn>
+          {brandKeys.map(b => <Btn key={b} onClick={() => setFil(b)} style={{ padding: "5px 11px", border: `1px solid ${fil === b ? C.dk : "rgba(0,0,0,.12)"}`, background: fil === b ? C.dk : C.wh, color: fil === b ? C.cr : C.dk, fontSize: mob ? 10 : 12, whiteSpace: "nowrap" }}>{b}</Btn>)}
+          <select value={srt} onChange={e => setSrt(e.target.value)} style={{ padding: "5px 9px", border: "1px solid rgba(0,0,0,.12)", background: C.cr, fontFamily: "Tajawal,sans-serif", fontSize: mob ? 10 : 12, outline: "none", marginInlineStart: "auto" }}>
+            <option value="d">{t("prodsSortDefault")}</option><option value="a">{t("prodsSortAsc")}</option><option value="z">{t("prodsSortDesc")}</option>
           </select>
         </div>
       </div>
@@ -1040,13 +1209,14 @@ function ProdDetail({ id, go, allProds }) {
   const [tab, setTab] = useState("d");
   const prodsData = (allProds && allProds.length) ? allProds : PRODS;
   const p = prodsData.find(x => x.id === id);
-  if (!p) return <div style={{ padding: 60, textAlign: "center", direction: "rtl" }}>المنتج غير موجود</div>;
+  const { t, dir } = useLang();
+  if (!p) return <div style={{ padding: 60, textAlign: "center" }}>{t("prodNotFound")}</div>;
   const px = mob ? "16px" : "56px";
   const rel = prodsData.filter(x => x.id !== p.id).slice(0, mob ? 2 : 3);
   return (
-    <div style={{ direction: "rtl", minHeight: "80vh" }}>
+    <div style={{ direction: dir, minHeight: "80vh" }}>
       <div style={{ padding: `10px ${px}`, background: C.wh, borderBottom: "1px solid rgba(0,0,0,.06)", fontSize: 11, color: C.mu, fontFamily: "Tajawal,sans-serif" }}>
-        <span onClick={() => go("#home")} style={{ cursor: "pointer" }}>الرئيسية</span>{" > "}<span onClick={() => go("#products")} style={{ cursor: "pointer" }}>المنتجات</span>{" > "}{p.name}
+        <span onClick={() => go("#home")} style={{ cursor: "pointer" }}>{t("prodHome")}</span>{" > "}<span onClick={() => go("#products")} style={{ cursor: "pointer" }}>{t("prodProds")}</span>{" > "}{p.name}
       </div>
       <div style={{ padding: `${mob ? "20px" : "40px"} ${px}`, display: mob ? "block" : "grid", gridTemplateColumns: "1fr 1fr", gap: 40, maxWidth: 1050, margin: "0 auto" }}>
         <div style={{ background: p.bg, height: mob ? 220 : 380, display: "flex", alignItems: "center", justifyContent: "center", flexDirection: "column", gap: 10, marginBottom: mob ? 18 : 0 }}>
@@ -1062,28 +1232,28 @@ function ProdDetail({ id, go, allProds }) {
               <>
                 <span style={{ width: 8, height: 8, borderRadius: "50%", background: p.stock <= 3 ? "#EF4444" : "#10B981", display: "inline-block" }}/>
                 <span style={{ fontSize: 12, color: p.stock <= 3 ? "#EF4444" : "#10B981", fontFamily: "Tajawal,sans-serif" }}>
-                  {p.stock <= 3 ? `آخر ${p.stock} قطع فقط!` : `متاح — ${p.stock} قطعة في المخزون`}
+                  {p.stock <= 3 ? `${t("prodLowStock")} ${p.stock} ${t("prodLowStockSuffix")}` : `${t("prodAvail")} ${p.stock} ${t("prodInStock")}`}
                 </span>
               </>
             ) : (
               <>
                 <span style={{ width: 8, height: 8, borderRadius: "50%", background: "#6B7280", display: "inline-block" }}/>
-                <span style={{ fontSize: 12, color: "#6B7280", fontFamily: "Tajawal,sans-serif" }}>نفد المخزون</span>
+                <span style={{ fontSize: 12, color: "#6B7280", fontFamily: "Tajawal,sans-serif" }}>{t("prodOutStock")}</span>
               </>
             )}
           </div>
           <p style={{ fontSize: mob ? 13 : 14, color: C.mu, lineHeight: 1.8, marginBottom: 16, fontFamily: "Tajawal,sans-serif" }}>{p.desc}</p>
-          <div style={{ fontFamily: "Georgia,serif", fontSize: mob ? 24 : 30, color: C.dk, marginBottom: 18 }}>{p.price} <span style={{ fontSize: 12, color: C.mu, fontFamily: "sans-serif" }}>جنيه</span></div>
+          <div style={{ fontFamily: "Georgia,serif", fontSize: mob ? 24 : 30, color: C.dk, marginBottom: 18 }}>{p.price} <span style={{ fontSize: 12, color: C.mu, fontFamily: "sans-serif" }}>{t("egp")}</span></div>
           <div style={{ display: "flex", alignItems: "center", gap: 11, marginBottom: 16 }}>
             <Btn onClick={() => setQty(Math.max(1, qty - 1))} style={{ width: 34, height: 34, border: `1px solid ${C.dk}`, background: "none", fontSize: 17, display: "flex", alignItems: "center", justifyContent: "center", padding: 0 }}>−</Btn>
             <span style={{ fontSize: 16, minWidth: 22, textAlign: "center" }}>{qty}</span>
             <Btn onClick={() => setQty(qty + 1)} style={{ width: 34, height: 34, border: `1px solid ${C.dk}`, background: "none", fontSize: 17, display: "flex", alignItems: "center", justifyContent: "center", padding: 0 }}>+</Btn>
           </div>
-          <Btn onClick={() => { for (let i = 0; i < qty; i++) add(p); show(`تمت إضافة ${qty > 1 ? qty + ' قطع' : ''} ${p.name} للعربة 🛍️`); }} style={{ width: "100%", background: C.dk, color: C.cr, padding: 13, fontSize: 13, letterSpacing: 1, marginBottom: 10 }}>أضيفي للعربة 🛍️</Btn>
+          <Btn onClick={() => { for (let i = 0; i < qty; i++) add(p); show(t("addedToCart")); }} style={{ width: "100%", background: C.dk, color: C.cr, padding: 13, fontSize: 13, letterSpacing: 1, marginBottom: 10 }}>{t("prodAddToCart")}</Btn>
           <div style={{ display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: 6 }}>
-            {[["🚚","شحن 2-4 أيام"],["💰","كاش عند الاستلام"],["↩️","إرجاع 14 يوم"]].map(([ic, t]) => (
-              <div key={t} style={{ background: C.cr, padding: "8px 5px", textAlign: "center", fontSize: 10, color: C.mu, fontFamily: "Tajawal,sans-serif" }}>
-                <div style={{ fontSize: 16, marginBottom: 3 }}>{ic}</div>{t}
+            {[["🚚",t("prodShipping")],["💰",t("prodCash")],["↩️",t("prodReturn")]].map(([ic, lbl]) => (
+              <div key={lbl} style={{ background: C.cr, padding: "8px 5px", textAlign: "center", fontSize: 10, color: C.mu, fontFamily: "Tajawal,sans-serif" }}>
+                <div style={{ fontSize: 16, marginBottom: 3 }}>{ic}</div>{lbl}
               </div>
             ))}
           </div>
@@ -1091,7 +1261,7 @@ function ProdDetail({ id, go, allProds }) {
       </div>
       <div style={{ maxWidth: 1050, margin: "0 auto", padding: `0 ${px} 32px` }}>
         <div style={{ display: "flex", borderBottom: "1px solid rgba(0,0,0,.1)", marginBottom: 16 }}>
-          {[["d","تفاصيل المنتج"],["u","طريقة الاستخدام"]].map(([k, l]) => (
+          {[["d",t("prodDetailsTab")],["u",t("prodUseTab")]].map(([k, l]) => (
             <Btn key={k} onClick={() => setTab(k)} style={{ padding: mob ? "10px 16px" : "11px 24px", background: "none", borderBottom: tab === k ? `2px solid ${C.dk}` : "2px solid transparent", color: tab === k ? C.dk : C.mu, fontSize: mob ? 12 : 13, fontWeight: tab === k ? 500 : 300 }}>{l}</Btn>
           ))}
         </div>
@@ -1099,7 +1269,7 @@ function ProdDetail({ id, go, allProds }) {
       </div>
       <Reviews productId={id} />
       <div style={{ background: C.cr, padding: `28px ${px}` }}>
-        <h2 style={{ fontFamily: "Georgia,serif", fontSize: mob ? 18 : 24, fontWeight: 300, color: C.dk, marginBottom: 16, textAlign: "center" }}>قد يعجبكِ أيضاً</h2>
+        <h2 style={{ fontFamily: "Georgia,serif", fontSize: mob ? 18 : 24, fontWeight: 300, color: C.dk, marginBottom: 16, textAlign: "center" }}>{t("prodRelated")}</h2>
         <div style={{ display: "grid", gridTemplateColumns: mob ? "1fr 1fr" : "repeat(3,1fr)", gap: mob ? 10 : 12, maxWidth: 1050, margin: "0 auto" }}>
           {rel.map(p => <Card key={p.id} p={p} go={go} />)}
         </div>
@@ -1109,28 +1279,26 @@ function ProdDetail({ id, go, allProds }) {
 }
 
 function About({ go }) {
+  const { t, dir } = useLang();
   const mob = useMob();
   const px = mob ? "20px" : "56px";
   return (
-    <div style={{ direction: "rtl" }}>
+    <div style={{ direction: dir }}>
       <div style={{ background: C.bl, padding: mob ? "34px 20px" : "60px 56px", textAlign: "center" }}>
-        <div style={{ fontFamily: "Georgia,serif", fontSize: mob ? 28 : 44, letterSpacing: 8, color: C.dk, marginBottom: 8 }}><img src={LogoSVG} alt="نوّرة" style={{height: mob ? 150 : 200, width:"auto", display:"block", margin:"0 auto 16px"}} /></div>
-        <h1 style={{ fontFamily: "Georgia,serif", fontSize: mob ? 22 : 36, fontWeight: 300, color: C.dk, marginBottom: 10 }}>قصة نوّرة</h1>
-        <p style={{ fontSize: mob ? 13 : 15, color: C.mu, maxWidth: 440, margin: "0 auto", lineHeight: 1.9, fontFamily: "Tajawal,sans-serif" }}>ولدنا من حبّ البشرة الصحية والجمال الحقيقي</p>
+        <img src={LogoSVG} alt="نوّرَة" style={{height: mob ? 150 : 200, width:"auto", display:"block", margin:"0 auto 16px"}} />
+        <h1 style={{ fontFamily: "Georgia,serif", fontSize: mob ? 22 : 36, fontWeight: 300, color: C.dk, marginBottom: 10 }}>{t("aboutTitle")}</h1>
+        <p style={{ fontSize: mob ? 13 : 15, color: C.mu, maxWidth: 440, margin: "0 auto", lineHeight: 1.9, fontFamily: "Tajawal,sans-serif" }}>{t("aboutSub")}</p>
       </div>
       <div style={{ maxWidth: 700, margin: "0 auto", padding: `${mob ? "28px" : "48px"} ${px}` }}>
-        {[{t:"لماذا نوّرة؟",x:"نوّرة هو الاسم العربي للإشراقة والنور — وهذا ما نسعى لتقديمه. بشرة مشرقة وصحية تعكس جمالك الحقيقي."},
-          {t:"فلسفتنا",x:"نختار كل منتج بعناية من براندات عالمية موثوقة وموصى بها من أطباء الجلدية. العناية الفعّالة بأسعار مناسبة."},
-          {t:"وعدنا لك",x:"كل منتج في نوّرة أصلي 100% من مصادر موثوقة. توصيل سريع لكل محافظات مصر مع ضمان الجودة."},
-        ].map(s => (
+        {t("aboutSect").map(s => (
           <div key={s.t} style={{ marginBottom: 26 }}>
-            <h3 style={{ fontFamily: "Georgia,serif", fontSize: mob ? 18 : 22, fontWeight: 400, color: C.dk, marginBottom: 8, borderRight: `3px solid ${C.go}`, paddingRight: 12 }}>{s.t}</h3>
-            <p style={{ fontSize: mob ? 13 : 14, color: C.mu, lineHeight: 1.9, fontFamily: "Tajawal,sans-serif", fontWeight: 300, paddingRight: 15 }}>{s.x}</p>
+            <h3 style={{ fontFamily: "Georgia,serif", fontSize: mob ? 18 : 22, fontWeight: 400, color: C.dk, marginBottom: 8, borderInlineStart: `3px solid ${C.go}`, paddingInlineStart: 12 }}>{s.t}</h3>
+            <p style={{ fontSize: mob ? 13 : 14, color: C.mu, lineHeight: 1.9, fontFamily: "Tajawal,sans-serif", fontWeight: 300, paddingInlineStart: 15 }}>{s.x}</p>
           </div>
         ))}
         <div style={{ background: C.bl, padding: mob ? "20px" : "26px", textAlign: "center", marginTop: 26 }}>
-          <p style={{ fontFamily: "Georgia,serif", fontSize: mob ? 16 : 19, fontStyle: "italic", color: C.dk, marginBottom: 14 }}>جاهزة تبدئي روتينك؟</p>
-          <Btn onClick={() => go("#products")} style={{ background: C.dk, color: C.cr, padding: mob ? "10px 22px" : "12px 28px", fontSize: 12, letterSpacing: 2 }}>اكتشفي المنتجات</Btn>
+          <p style={{ fontFamily: "Georgia,serif", fontSize: mob ? 16 : 19, fontStyle: "italic", color: C.dk, marginBottom: 14 }}>{t("aboutCtaQ")}</p>
+          <Btn onClick={() => go("#products")} style={{ background: C.dk, color: C.cr, padding: mob ? "10px 22px" : "12px 28px", fontSize: 12, letterSpacing: 2 }}>{t("aboutCtaBtn")}</Btn>
         </div>
       </div>
     </div>
@@ -1138,20 +1306,21 @@ function About({ go }) {
 }
 
 function Contact() {
+  const { t, dir } = useLang();
   const mob = useMob();
   const px = mob ? "20px" : "56px";
   const [f, setF] = useState({ n: "", e: "", p: "", m: "" });
   const [ok, setOk] = useState(false);
   return (
-    <div style={{ direction: "rtl" }}>
+    <div style={{ direction: dir }}>
       <div style={{ background: C.bl, padding: mob ? "30px 20px" : "48px 56px", textAlign: "center" }}>
-        <h1 style={{ fontFamily: "Georgia,serif", fontSize: mob ? 26 : 36, fontWeight: 300, color: C.dk }}>تواصلي معنا</h1>
-        <p style={{ color: C.mu, marginTop: 8, fontFamily: "Tajawal,sans-serif", fontSize: 13 }}>سعيدون بمساعدتك</p>
+        <h1 style={{ fontFamily: "Georgia,serif", fontSize: mob ? 26 : 36, fontWeight: 300, color: C.dk }}>{t("contactTitle")}</h1>
+        <p style={{ color: C.mu, marginTop: 8, fontFamily: "Tajawal,sans-serif", fontSize: 13 }}>{t("contactSub")}</p>
       </div>
       <div style={{ maxWidth: 780, margin: "0 auto", padding: `${mob ? "26px" : "48px"} ${px}`, display: mob ? "block" : "grid", gridTemplateColumns: "1fr 1fr", gap: 48 }}>
         <div style={{ marginBottom: mob ? 26 : 0 }}>
-          <h3 style={{ fontFamily: "Georgia,serif", fontSize: mob ? 18 : 22, fontWeight: 400, color: C.dk, marginBottom: 16 }}>معلومات التواصل</h3>
-          {[["📱","واتساب","01xxxxxxxx"],["📧","البريد","info@nawra.eg"],["📍","العنوان","القاهرة، مصر"],["🕐","أوقات العمل","السبت-الخميس: 10ص-10م"]].map(([ic, l, v]) => (
+          <h3 style={{ fontFamily: "Georgia,serif", fontSize: mob ? 18 : 22, fontWeight: 400, color: C.dk, marginBottom: 16 }}>{t("contactInfoTitle")}</h3>
+          {t("contactInfo").map(([ic, l, v]) => (
             <div key={l} style={{ display: "flex", gap: 10, marginBottom: 14, alignItems: "flex-start" }}>
               <span style={{ fontSize: 18, color: C.go, flexShrink: 0 }}>{ic}</span>
               <div>
@@ -1165,24 +1334,24 @@ function Contact() {
           {ok ? (
             <div style={{ textAlign: "center", padding: "26px 0" }}>
               <div style={{ fontSize: 38, marginBottom: 10 }}>✅</div>
-              <h3 style={{ fontFamily: "Georgia,serif", fontSize: 18, marginBottom: 7 }}>تم الإرسال!</h3>
-              <p style={{ color: C.mu, fontFamily: "Tajawal,sans-serif", fontSize: 13, marginBottom: 14 }}>هنرد عليكِ قريباً.</p>
-              <Btn onClick={() => setOk(false)} style={{ background: C.dk, color: C.cr, padding: "10px 20px", fontSize: 12 }}>رسالة جديدة</Btn>
+              <h3 style={{ fontFamily: "Georgia,serif", fontSize: 18, marginBottom: 7 }}>{t("contactSentTitle")}</h3>
+              <p style={{ color: C.mu, fontFamily: "Tajawal,sans-serif", fontSize: 13, marginBottom: 14 }}>{t("contactSentMsg")}</p>
+              <Btn onClick={() => setOk(false)} style={{ background: C.dk, color: C.cr, padding: "10px 20px", fontSize: 12 }}>{t("contactNewBtn")}</Btn>
             </div>
           ) : (
             <>
-              <h3 style={{ fontFamily: "Georgia,serif", fontSize: mob ? 18 : 22, fontWeight: 400, color: C.dk, marginBottom: 16 }}>أرسلي رسالة</h3>
-              {[["n","الاسم","اسمك"],["e","البريد","email@example.com"],["p","الموبايل","01xxxxxxxxx"]].map(([k, l, ph]) => (
+              <h3 style={{ fontFamily: "Georgia,serif", fontSize: mob ? 18 : 22, fontWeight: 400, color: C.dk, marginBottom: 16 }}>{t("contactFormTitle")}</h3>
+              {t("contactFields").map(([k, l, ph]) => (
                 <div key={k} style={{ marginBottom: 11 }}>
                   <label style={{ display: "block", fontSize: 10, letterSpacing: 2, color: C.mu, marginBottom: 4, fontFamily: "Tajawal,sans-serif" }}>{l}</label>
                   <input value={f[k]} onChange={e => setF({ ...f, [k]: e.target.value })} placeholder={ph} style={{ width: "100%", padding: "10px 11px", border: "1px solid rgba(0,0,0,.12)", background: C.cr, fontFamily: "Tajawal,sans-serif", fontSize: 13, outline: "none", boxSizing: "border-box" }} />
                 </div>
               ))}
               <div style={{ marginBottom: 14 }}>
-                <label style={{ display: "block", fontSize: 10, letterSpacing: 2, color: C.mu, marginBottom: 4, fontFamily: "Tajawal,sans-serif" }}>الرسالة</label>
-                <textarea value={f.m} onChange={e => setF({ ...f, m: e.target.value })} rows={mob ? 4 : 5} placeholder="كيف يمكننا مساعدتك؟" style={{ width: "100%", padding: "10px 11px", border: "1px solid rgba(0,0,0,.12)", background: C.cr, fontFamily: "Tajawal,sans-serif", fontSize: 13, outline: "none", resize: "vertical", boxSizing: "border-box" }} />
+                <label style={{ display: "block", fontSize: 10, letterSpacing: 2, color: C.mu, marginBottom: 4, fontFamily: "Tajawal,sans-serif" }}>{t("contactMsgLabel")}</label>
+                <textarea value={f.m} onChange={e => setF({ ...f, m: e.target.value })} rows={mob ? 4 : 5} placeholder={t("contactMsgPh")} style={{ width: "100%", padding: "10px 11px", border: "1px solid rgba(0,0,0,.12)", background: C.cr, fontFamily: "Tajawal,sans-serif", fontSize: 13, outline: "none", resize: "vertical", boxSizing: "border-box" }} />
               </div>
-              <Btn onClick={() => { if (f.n && f.m) setOk(true); }} style={{ width: "100%", background: C.dk, color: C.cr, padding: 13, fontSize: 13, letterSpacing: 1 }}>إرسال الرسالة</Btn>
+              <Btn onClick={() => { if (f.n && f.m) setOk(true); }} style={{ width: "100%", background: C.dk, color: C.cr, padding: 13, fontSize: 13, letterSpacing: 1 }}>{t("contactSendBtn")}</Btn>
             </>
           )}
         </div>
@@ -1192,22 +1361,19 @@ function Contact() {
 }
 
 function Shipping() {
+  const { t, dir } = useLang();
   const mob = useMob();
   const px = mob ? "20px" : "56px";
   return (
-    <div style={{ direction: "rtl" }}>
+    <div style={{ direction: dir }}>
       <div style={{ background: C.bl, padding: mob ? "30px 20px" : "48px 56px", textAlign: "center" }}>
-        <h1 style={{ fontFamily: "Georgia,serif", fontSize: mob ? 26 : 36, fontWeight: 300, color: C.dk }}>الشحن والإرجاع</h1>
-        <p style={{ color: C.mu, marginTop: 8, fontFamily: "Tajawal,sans-serif", fontSize: 13 }}>كل اللي محتاجة تعرفيه</p>
+        <h1 style={{ fontFamily: "Georgia,serif", fontSize: mob ? 26 : 36, fontWeight: 300, color: C.dk }}>{t("shippingTitle")}</h1>
+        <p style={{ color: C.mu, marginTop: 8, fontFamily: "Tajawal,sans-serif", fontSize: 13 }}>{t("shippingSub")}</p>
       </div>
       <div style={{ maxWidth: 680, margin: "0 auto", padding: `${mob ? "26px" : "44px"} ${px}` }}>
-        {[{t:"الشحن",i:["نوصل لكل مصر خلال 2-4 أيام","شحن مجاني فوق 500 جنيه","50 جنيه للطلبات الأقل","عبر Bosta / J&T"]},
-          {t:"الإرجاع",i:["خلال 14 يوم من الاستلام","المنتج بحالته الأصلية","مجاني لو المنتج معيب","يُستثنى المنتجات المفتوحة"]},
-          {t:"الدفع",i:["كاش عند الاستلام فقط","مفيش بطاقة مطلوبة","ادفعي لما الطلب يوصلك"]},
-          {t:"التواصل",i:["واتساب: 01xxxxxxxx","info@nawra.eg","السبت-الخميس: 10ص-10م"]},
-        ].map(s => (
+        {t("shippingSects").map(s => (
           <div key={s.t} style={{ marginBottom: 24 }}>
-            <h3 style={{ fontFamily: "Georgia,serif", fontSize: mob ? 17 : 21, fontWeight: 400, color: C.dk, marginBottom: 10, borderRight: `3px solid ${C.go}`, paddingRight: 12 }}>{s.t}</h3>
+            <h3 style={{ fontFamily: "Georgia,serif", fontSize: mob ? 17 : 21, fontWeight: 400, color: C.dk, marginBottom: 10, borderInlineStart: `3px solid ${C.go}`, paddingInlineStart: 12 }}>{s.t}</h3>
             <ul style={{ listStyle: "none", padding: 0, margin: 0 }}>
               {s.i.map(it => <li key={it} style={{ display: "flex", gap: 8, marginBottom: 7, fontFamily: "Tajawal,sans-serif", fontSize: mob ? 12 : 13, color: C.mu, lineHeight: 1.6 }}><span style={{ color: C.go, flexShrink: 0 }}>✦</span>{it}</li>)}
             </ul>
@@ -1219,19 +1385,16 @@ function Shipping() {
 }
 
 function Footer({ go }) {
+  const { t, dir } = useLang();
   const mob = useMob();
   return (
-    <footer style={{ background: C.dk, color: C.bl, direction: "rtl" }}>
+    <footer style={{ background: C.dk, color: C.bl, direction: dir }}>
       <div style={{ padding: mob ? "26px 18px" : "36px 56px", display: "grid", gridTemplateColumns: mob ? "1fr 1fr" : "2fr 1fr 1fr 1fr", gap: mob ? "18px" : "36px", maxWidth: 1050, margin: "0 auto" }}>
         <div style={{ gridColumn: mob ? "1 / -1" : undefined }}>
-          <div style={{ fontFamily: "Georgia,serif", display:"none"}}>x</div>
-          <img src={LogoSVG} alt="نوّرة" style={{height: mob ? 80 : 100, width:"auto", marginBottom:12, filter:"brightness(0) invert(1) opacity(0.85)"}} />
-          <p style={{ fontSize: 11, opacity: .5, lineHeight: 1.8, fontFamily: "Tajawal,sans-serif", fontWeight: 300, maxWidth: 200 }}>منتجات عناية مختارة لبشرة صحية ومتألقة.</p>
+          <img src={LogoSVG} alt="نوّرَة" style={{height: mob ? 80 : 100, width:"auto", marginBottom:12, filter:"brightness(0) invert(1) opacity(0.85)"}} />
+          <p style={{ fontSize: 11, opacity: .5, lineHeight: 1.8, fontFamily: "Tajawal,sans-serif", fontWeight: 300, maxWidth: 200 }}>{t("footerTagline")}</p>
         </div>
-        {[{t:"تصفحي",l:[["#home","الرئيسية"],["#products","المنتجات"],["#about","عن نوّرة"]]},
-          {t:"خدمة العملاء",l:[["#contact","تواصلي"],["#shipping","الشحن والإرجاع"]]},
-          {t:"تابعينا",l:[["#","Instagram"],["#","TikTok"],["#","Facebook"]]},
-        ].map(col => (
+        {t("footerCols").map(col => (
           <div key={col.t}>
             <h4 style={{ fontSize: 9, letterSpacing: 3, color: C.go, marginBottom: 11, fontFamily: "Tajawal,sans-serif" }}>{col.t}</h4>
             <ul style={{ listStyle: "none", padding: 0, margin: 0 }}>
@@ -1241,7 +1404,7 @@ function Footer({ go }) {
         ))}
       </div>
       <div style={{ borderTop: "1px solid rgba(255,255,255,.08)", padding: "11px 18px", textAlign: "center", fontSize: 10, opacity: .4, letterSpacing: 1, fontFamily: "Tajawal,sans-serif" }}>
-        © 2025 NAWRA SKINCARE — نوّرة للعناية بالبشرة
+        {t("footerCopyright")}
       </div>
     </footer>
   );
@@ -1251,6 +1414,7 @@ function Footer({ go }) {
 // ─── My Orders Page ───────────────────────────────────────────────────────────
 function MyOrders({ go }) {
   const { user } = useAuth();
+  const { t, dir } = useLang();
   const mob = useMob();
   const px = mob ? "16px" : "56px";
 
@@ -1258,22 +1422,21 @@ function MyOrders({ go }) {
 
   const allOrders = (() => { try { return JSON.parse(localStorage.getItem("nawra_orders") || "[]"); } catch { return []; } })();
   const orders = allOrders.filter(o => o.userEmail === user.email);
-
   const statusColor = (s) => s === "مكتمل" ? { bg:"#D1FAE5", c:"#065F46" } : s === "ملغي" ? { bg:"#FEE2E2", c:"#DC2626" } : { bg:"#FEF3C7", c:"#92400E" };
 
   return (
-    <div style={{ direction: "rtl", minHeight: "80vh", background: C.cr }}>
+    <div style={{ direction: dir, minHeight: "80vh", background: C.cr }}>
       <div style={{ background: C.bl, padding: mob ? "28px 20px" : "40px 56px", textAlign: "center" }}>
-        <h1 style={{ fontFamily: "Georgia,serif", fontSize: mob ? 24 : 34, fontWeight: 300, color: C.dk }}>طلباتي 📦</h1>
-        <p style={{ color: C.mu, marginTop: 8, fontFamily: "Tajawal,sans-serif", fontSize: 13 }}>أهلاً، <strong>{user.name}</strong> — سجل مشترياتك</p>
+        <h1 style={{ fontFamily: "Georgia,serif", fontSize: mob ? 24 : 34, fontWeight: 300, color: C.dk }}>{t("myOrdersTitle")}</h1>
+        <p style={{ color: C.mu, marginTop: 8, fontFamily: "Tajawal,sans-serif", fontSize: 13 }}>{t("myOrdersHello")} <strong>{user.name}</strong> — {t("myOrdersSub")}</p>
       </div>
       <div style={{ maxWidth: 800, margin: "0 auto", padding: `24px ${px}` }}>
         {orders.length === 0 ? (
           <div style={{ background: C.wh, padding: "48px 24px", textAlign: "center", boxShadow: "0 2px 8px rgba(0,0,0,.06)" }}>
             <div style={{ fontSize: 48, marginBottom: 14 }}>🛍️</div>
-            <p style={{ fontFamily: "Georgia,serif", fontSize: 20, fontWeight: 300, color: C.dk, marginBottom: 10 }}>مفيش طلبات لحد دلوقتي</p>
-            <p style={{ color: C.mu, fontFamily: "Tajawal,sans-serif", fontSize: 13, marginBottom: 22 }}>ابدئي التسوق وهتلاقي طلباتك هنا</p>
-            <Btn onClick={() => go("#products")} style={{ background: C.dk, color: C.cr, padding: "12px 28px", fontSize: 13, letterSpacing: 1 }}>تسوقي الآن</Btn>
+            <p style={{ fontFamily: "Georgia,serif", fontSize: 20, fontWeight: 300, color: C.dk, marginBottom: 10 }}>{t("myOrdersEmpty")}</p>
+            <p style={{ color: C.mu, fontFamily: "Tajawal,sans-serif", fontSize: 13, marginBottom: 22 }}>{t("myOrdersEmptySub")}</p>
+            <Btn onClick={() => go("#products")} style={{ background: C.dk, color: C.cr, padding: "12px 28px", fontSize: 13, letterSpacing: 1 }}>{t("myOrdersShop")}</Btn>
           </div>
         ) : orders.map(o => {
           const sc = statusColor(o.status);
@@ -1281,19 +1444,19 @@ function MyOrders({ go }) {
             <div key={o.id} style={{ background: C.wh, padding: mob ? "16px" : "20px", marginBottom: 12, boxShadow: "0 2px 8px rgba(0,0,0,.06)" }}>
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", flexWrap: "wrap", gap: 8, marginBottom: 10 }}>
                 <div>
-                  <div style={{ fontSize: 12, color: C.mu, fontFamily: "Tajawal,sans-serif" }}>رقم الطلب: <span style={{ color: C.dk, fontWeight: 500 }}>#{o.id}</span></div>
+                  <div style={{ fontSize: 12, color: C.mu, fontFamily: "Tajawal,sans-serif" }}>{t("myOrdersNum")} <span style={{ color: C.dk, fontWeight: 500 }}>#{o.id}</span></div>
                   <div style={{ fontSize: 12, color: C.mu, fontFamily: "Tajawal,sans-serif", marginTop: 3 }}>{o.date} | {o.city}</div>
                 </div>
                 <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
                   <span style={{ fontSize: 11, padding: "3px 12px", background: sc.bg, color: sc.c, fontFamily: "Tajawal,sans-serif", borderRadius: 10 }}>{o.status}</span>
-                  <span style={{ fontFamily: "Georgia,serif", fontSize: 17, color: C.dk }}>{o.total} جنيه</span>
+                  <span style={{ fontFamily: "Georgia,serif", fontSize: 17, color: C.dk }}>{o.total} {t("egp")}</span>
                 </div>
               </div>
               <div style={{ borderTop: "1px solid rgba(0,0,0,.06)", paddingTop: 10 }}>
                 {(o.items || []).map((item, i) => (
                   <div key={i} style={{ display: "flex", justifyContent: "space-between", fontSize: 13, color: C.dk, fontFamily: "Tajawal,sans-serif", marginBottom: 4 }}>
                     <span>{item.name} × {item.qty}</span>
-                    <span>{item.price * item.qty} جنيه</span>
+                    <span>{item.price * item.qty} {t("egp")}</span>
                   </div>
                 ))}
               </div>
@@ -1307,16 +1470,18 @@ function MyOrders({ go }) {
 
 export default function App() {
   return (
-    <AuthProvider>
-      <ProdsProvider initialProds={PRODS}>
-        <CartProvider>
-          <ToastProvider>
-            <link href="https://fonts.googleapis.com/css2?family=Tajawal:wght@300;400;500&display=swap" rel="stylesheet" />
-            <AppInner />
-          </ToastProvider>
-        </CartProvider>
-      </ProdsProvider>
-    </AuthProvider>
+    <LangProvider>
+      <AuthProvider>
+        <ProdsProvider initialProds={PRODS}>
+          <CartProvider>
+            <ToastProvider>
+              <link href="https://fonts.googleapis.com/css2?family=Tajawal:wght@300;400;500&display=swap" rel="stylesheet" />
+              <AppInner />
+            </ToastProvider>
+          </CartProvider>
+        </ProdsProvider>
+      </AuthProvider>
+    </LangProvider>
   );
 }
 
@@ -1324,6 +1489,7 @@ function AppInner() {
   const { route, nav: go } = useRoute();
   const { user, logout } = useAuth();
   const { prods } = useProds();
+  const { dir } = useLang();
   const [cartOpen, setCartOpen] = useState(false);
   const pid = (() => { const m = route.match(/^#product-(\d+)/); return m ? parseInt(m[1]) : null; })();
   const isAdmin = route === "#admin";
@@ -1346,7 +1512,7 @@ function AppInner() {
   };
 
   return (
-    <div style={{ fontFamily: "Tajawal,sans-serif", background: C.cr, minHeight: "100vh", overflowX: "hidden" }}>
+    <div dir={dir} style={{ fontFamily: "Tajawal,sans-serif", background: C.cr, minHeight: "100vh", overflowX: "hidden" }}>
       {!isAdmin && <Nav r={route} go={go} openCart={() => setCartOpen(true)} user={user} onLogout={logout} />}
       {!isAdmin && <CartSide open={cartOpen} close={() => setCartOpen(false)} go={go} />}
       <main>{page()}</main>
