@@ -12,6 +12,8 @@
     <link href="https://fonts.googleapis.com/css2?family=Noto+Serif+Arabic:wght@300;400;500;600;700&display=swap" rel="stylesheet" />
     <!-- Arabic sans-serif body / UI -->
     <link href="https://fonts.googleapis.com/css2?family=Cairo:wght@300;400;500;600;700&display=swap" rel="stylesheet" />
+    <!-- Noto Naskh Arabic: superior tashkeel / diacritics rendering -->
+    <link href="https://fonts.googleapis.com/css2?family=Noto+Naskh+Arabic:wght@400;500;600&display=swap" rel="stylesheet" />
     <!-- English elegant accents, prices, eyebrows -->
     <link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,300;0,400;0,500;0,600;1,300;1,400;1,500&display=swap" rel="stylesheet" />
     <style>
@@ -27,7 +29,7 @@
         --warm:   #7A5C42;
         --muted:  #9C7D65;
         --white:  #FFFFFF;
-        --fa: 'Noto Serif Arabic', serif;
+        --fa: 'Noto Naskh Arabic', 'Noto Serif Arabic', serif;
         --fb: 'Cairo', sans-serif;
         --fe: 'Cormorant Garamond', serif;
       }
@@ -39,6 +41,7 @@
         color: var(--dark);
         direction: rtl;
         overflow-x: hidden;
+        -webkit-font-smoothing: antialiased;
       }
       ::-webkit-scrollbar { width: 5px; }
       ::-webkit-scrollbar-track { background: var(--cream); }
@@ -46,9 +49,17 @@
       button { font-family: var(--fb); }
       input, textarea, select { font-family: var(--fb); }
 
-      /* Ensure Arabic glyphs always use Noto Serif Arabic or Cairo */
-      :lang(ar) h1, :lang(ar) h2, :lang(ar) h3 { font-family: var(--fa); }
-      :lang(ar) p, :lang(ar) span, :lang(ar) a, :lang(ar) li, :lang(ar) label { font-family: var(--fb); }
+      /* Arabic text: Noto Naskh Arabic first for full tashkeel support */
+      :lang(ar) h1, :lang(ar) h2, :lang(ar) h3 {
+        font-family: var(--fa);
+        font-feature-settings: "kern" 1;
+        -webkit-font-smoothing: antialiased;
+      }
+      :lang(ar) p, :lang(ar) span, :lang(ar) a, :lang(ar) li, :lang(ar) label {
+        font-family: 'Noto Naskh Arabic', var(--fb);
+        font-feature-settings: "kern" 1;
+        -webkit-font-smoothing: antialiased;
+      }
 
       /* Cormorant for English display text */
       .font-fe { font-family: var(--fe); }

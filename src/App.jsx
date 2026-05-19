@@ -232,7 +232,7 @@ const C = {
   cr:"#FBF7F4", cr2:"#F3EAE2", cr3:"#EDE0D4",
   go:"#C4956A", gof:"rgba(196,149,106,.10)", gom:"rgba(196,149,106,.40)",
   dk:"#2A1F0E", dk2:"#1E1508", wa:"#7A5C42", mu:"#9C7D65", wh:"#FFFFFF",
-  fa:"'Noto Serif Arabic',serif", fb:"'Cairo',sans-serif", fe:"'Cormorant Garamond',serif",
+  fa:"'Noto Naskh Arabic','Noto Serif Arabic',serif", fb:"'Cairo',sans-serif", fe:"'Cormorant Garamond',serif",
   // legacy aliases
   bl:"#F3EAE2", ro:"#C4956A"
 };
@@ -1681,7 +1681,7 @@ function Footer({ go }) {
       </div>
       <div style={{ borderTop: "1px solid rgba(196,149,106,.1)", padding: mob ? "14px 20px" : "14px 52px", display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 8 }}>
         <span style={{ fontFamily: C.fe, fontSize: 12, color: "rgba(251,247,244,.28)", letterSpacing: "0.04em" }}>{t("footerCopyright")}</span>
-        <span style={{ fontFamily: C.fe, fontSize: 10.5, letterSpacing: "0.14em", color: "rgba(196,149,106,.4)", textTransform: "uppercase" }}>NAWRA · نوّرَة</span>
+        <span style={{ fontFamily: `'Noto Naskh Arabic',${C.fe}`, fontSize: 10.5, letterSpacing: "0.14em", color: "rgba(196,149,106,.4)", fontFeatureSettings: '"kern" 1', WebkitFontSmoothing: "antialiased" }}>NAWRA · نوّرَة</span>
       </div>
     </footer>
   );
