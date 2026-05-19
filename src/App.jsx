@@ -1,5 +1,5 @@
 import { useState, useEffect, createContext, useContext } from "react";
-import LogoSVG from "/nawra-logo-animated.svg";
+import LogoImg from '/nawra-logo.png';
 
 // ─── Translations ─────────────────────────────────────────────────────────────
 const TR = {
@@ -498,7 +498,7 @@ function Nav({ r, go, openCart, user, onLogout }) {
         height: 74, display: "flex", alignItems: "center", justifyContent: "space-between",
         position: "sticky", top: 0, zIndex: 200, direction: dir
       }}>
-        <div style={{ cursor: "pointer" }} onClick={() => { go("#home"); setOpen(false); }}><img src={LogoSVG} alt="نوّرَة" style={{height: mob ? 60 : 78, width:"auto", display:"block"}} /></div>
+        <div style={{ cursor: "pointer" }} onClick={() => { go("#home"); setOpen(false); }}><img src={LogoImg} alt="نوّرَة" style={{height:60, width:"auto", display:"block"}} /></div>
         {!mob && (
           <div style={{display:"flex",alignItems:"center",gap:24}}>
             <ul style={{ display: "flex", gap: 22, listStyle: "none", margin: 0, padding: 0 }}>
@@ -697,7 +697,7 @@ function LoginPage({ go }) {
     <div style={{direction:dir,minHeight:"80vh",display:"flex",alignItems:"center",justifyContent:"center",background:`linear-gradient(135deg,${C.cr2},${C.cr})`}}>
       <div style={{background:C.wh,padding:mob?"28px 24px":"44px 40px",width:mob?"92%":undefined,maxWidth:420,boxShadow:"0 8px 48px rgba(42,31,14,.08)"}}>
         <div style={{textAlign:"center",marginBottom:28}}>
-          <img src={LogoSVG} alt="نوّرَة" style={{height:80,display:"block",margin:"0 auto 14px"}}/>
+          <img src={LogoImg} alt="نوّرَة" style={{height:80,display:"block",margin:"0 auto 14px"}}/>
         </div>
         <div style={{display:"flex",borderBottom:"1px solid rgba(196,149,106,.18)",marginBottom:24}}>
           {[["login",t("loginTab")],["register",t("registerTab")]].map(([k,l])=>(
@@ -1330,9 +1330,9 @@ function Home({ go, allProds }) {
               }} />
             ))}
             {/* Logo centered */}
-            <img src={LogoSVG} alt="نوّرَة" style={{
-              height: 160, width: "auto", position: "relative", zIndex: 2,
-              filter: "drop-shadow(0 4px 16px rgba(42,31,14,.12))"
+            <img src={LogoImg} alt="نوّرَة" style={{
+              height: 160, width: "auto", display: "block", margin: "0 auto",
+              position: "relative", zIndex: 2
             }} />
             {/* Corner ornaments */}
             {[[16,16],[16,"auto"],[null,16],["auto","auto"]].map(([t2,b2],i)=>(
@@ -1552,7 +1552,7 @@ function About({ go }) {
       <div style={{ background: "linear-gradient(145deg,#F5E9D8,#EDD8BC)", padding: mob ? "44px 20px" : "72px 52px", textAlign: "center", position: "relative", overflow: "hidden" }}>
         <div style={{ position: "absolute", inset: 0, background: "radial-gradient(ellipse 60% 80% at 50% 60%,rgba(255,255,255,.3) 0%,transparent 70%)" }} />
         <div style={{ position: "relative", zIndex: 1 }}>
-          <img src={LogoSVG} alt="نوّرَة" style={{height: mob ? 120 : 160, width:"auto", display:"block", margin:"0 auto 20px"}} />
+          <img src={LogoImg} alt="نوّرَة" style={{height:120, width:"auto", display:"block", margin:"0 auto 20px"}} />
           <div style={{ fontFamily: C.fe, fontSize: 11, letterSpacing: "0.26em", color: C.go, textTransform: "uppercase", fontStyle: "italic", marginBottom: 12 }}>Our Story</div>
           <h1 style={{ fontFamily: C.fa, fontSize: mob ? 28 : 44, fontWeight: 600, color: C.dk, marginBottom: 12 }}>{t("aboutTitle")}</h1>
           <div style={{ width: 48, height: 1, background: C.go, margin: "0 auto 14px" }} />
@@ -1666,7 +1666,7 @@ function Footer({ go }) {
     <footer style={{ background: C.dk2, color: C.cr, direction: dir }}>
       <div style={{ padding: mob ? "36px 20px 28px" : "52px 52px 40px", display: "grid", gridTemplateColumns: mob ? "1fr 1fr" : "1.5fr 1fr 1fr 1fr", gap: mob ? "24px" : "48px", maxWidth: 1100, margin: "0 auto" }}>
         <div style={{ gridColumn: mob ? "1 / -1" : undefined }}>
-          <img src={LogoSVG} alt="نوّرَة" style={{height: mob ? 64 : 72, width:"auto", marginBottom:14, filter:"brightness(0) invert(1) opacity(0.82)"}} />
+          <img src={LogoImg} alt="نوّرَة" style={{height:70, width:"auto", marginBottom:14, opacity:0.85}} />
           <p style={{ fontFamily: C.fb, fontSize: 12.5, color: "rgba(251,247,244,.38)", lineHeight: 1.75, maxWidth: 200 }}>{t("footerTagline")}</p>
         </div>
         {t("footerCols").map(col => (
