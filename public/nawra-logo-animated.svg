@@ -1,18 +1,19 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 600 600" width="100%" height="100%" preserveAspectRatio="xMidYMid meet" role="img">
 <title>نوّرَة Skincare Logo</title>
 <desc>Animated drawing of Nawra skincare logo</desc>
+<defs>
+  <clipPath id="logoReveal" clipPathUnits="userSpaceOnUse">
+    <circle cx="300" cy="290" r="0">
+      <animate attributeName="r" from="0" to="450" dur="3s"
+        calcMode="spline" keyTimes="0;1" keySplines="0.4 0 0.2 1"
+        fill="freeze"/>
+    </circle>
+  </clipPath>
+</defs>
 <style>
-  .logo-path {
-    fill: #C4956A;
-    stroke: none;
-    opacity: 0;
-  }
-  @keyframes fadeIn {
-    from { opacity: 0; }
-    to   { opacity: 1; }
-  }
+  .logo-path { fill: #C4956A; stroke: none; }
 </style>
-<g transform="translate(0,600) scale(0.1,-0.1)">
+<g transform="translate(0,600) scale(0.1,-0.1)" clip-path="url(#logoReveal)">
 <path class="logo-path" d="M2986 5047 c-10 -7 -27 -50 -40 -103 -58 -226 -138 -386 -397 -796
 -66 -102 -119 -189 -119 -193 0 -4 -8 -19 -19 -33 -69 -100 -158 -311 -185
 -444 -20 -96 -20 -261 -1 -353 8 -39 37 -115 65 -171 145 -294 469 -473 787
