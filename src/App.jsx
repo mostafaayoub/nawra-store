@@ -244,15 +244,96 @@ function useMob() {
 }
 
 const PRODS = [
-  { id:1, brand:"CERAVE", name:"غسول الوجه المرطب", desc:"غسول لطيف بالسيراميد — لكل أنواع البشرة", price:320, badge:"الأكثر مبيعاً", stars:5, bg:"linear-gradient(135deg,#E8F4F8,#C8E6F0)", icon:"🧴", det:"يحتوي على السيراميد وحمض الهيالورونيك. مناسب للاستخدام اليومي.", use:"ادلكيه على بشرة رطبة ثم اشطفيه بماء فاتر.", stock:10 },
-  { id:2, brand:"THE ORDINARY", name:"سيروم النياسيناميد", desc:"يقلل المسام ويوحد لون البشرة", price:280, badge:"ترند TikTok", stars:5, bg:"linear-gradient(135deg,#F0EBE3,#D4C4B0)", icon:"💧", det:"10% نياسيناميد + 1% زنك للبشرة الدهنية.", use:"بعد الغسول وقبل المرطب. مرتين يومياً.", stock:10 },
-  { id:3, brand:"LA ROCHE-POSAY", name:"واقي الشمس SPF50+", desc:"حماية قصوى — خفيف على البشرة الحساسة", price:450, badge:"جديد", stars:4, bg:"linear-gradient(135deg,#FFF8E8,#F0D89A)", icon:"☀️", det:"حماية UVA+UVB. مناسب للبشرة الحساسة.", use:"كآخر خطوة صباحاً قبل الخروج بـ 15 دقيقة.", stock:10 },
-  { id:4, brand:"CERAVE", name:"كريم الترطيب", desc:"ترطيب عميق 24 ساعة — للوجه والجسم", price:380, badge:null, stars:5, bg:"linear-gradient(135deg,#EEF5F0,#C8DFC8)", icon:"✨", det:"سيراميد يدوم 24 ساعة. للبشرة الجافة.", use:"بعد الاستحمام على بشرة رطبة.", stock:10 },
-  { id:5, brand:"THE ORDINARY", name:"سيروم فيتامين C", desc:"تفتيح وإشراقة — يعالج التصبغات", price:260, badge:null, stars:4, bg:"linear-gradient(135deg,#FFF4E0,#FFD98A)", icon:"🍋", det:"23% فيتامين C. يقلل البقع الداكنة.", use:"مساءً فقط. قطرة على الوجه النظيف.", stock:10 },
-  { id:6, brand:"BIODERMA", name:"ماء مزيل المكياج", desc:"لطيف للبشرة الحساسة — بدون شطف", price:340, badge:"كلاسيك", stars:5, bg:"linear-gradient(135deg,#F5E8F0,#E0B8D0)", icon:"🌸", det:"ماء ميسيلار ينظف ويزيل المكياج بلطف.", use:"بللي قطنة وامسحي برفق.", stock:10 },
-  { id:7, brand:"NEUTROGENA", name:"غسول وجه شفاف", desc:"يزيل الزيادة الزيتية ويبقي البشرة نظيفة", price:220, badge:null, stars:4, bg:"linear-gradient(135deg,#E8F0F5,#B8D4E8)", icon:"🫧", det:"خالٍ من الزيت للبشرة الدهنية والمختلطة.", use:"على بشرة مبللة وادلكي برفق ثم اشطفي.", stock:10 },
-  { id:8, brand:"GARNIER", name:"كريم مرطب خفيف", desc:"ترطيب خفيف للاستخدام اليومي", price:190, badge:"قيمة ممتازة", stars:4, bg:"linear-gradient(135deg,#E8F5E8,#B8DFB8)", icon:"💚", det:"هيالورونيك. خفيف ويمتص سريعاً.", use:"على الوجه النظيف صباحاً ومساءً.", stock:10 },
-  { id:9, brand:"NIVEA", name:"كريم الليل", desc:"يجدد البشرة أثناء النوم", price:250, badge:null, stars:4, bg:"linear-gradient(135deg,#E8EAF5,#B8BEE0)", icon:"🌙", det:"زبدة القمح وفيتامين E. ترطيب عميق.", use:"كآخر خطوة مساءً على بشرة نظيفة.", stock:10 },
+  {
+    id:1, brand:"CERAVE",
+    nameAr:"غسول الوجه المرطب",      nameEn:"Hydrating Facial Cleanser",
+    descAr:"غسول لطيف بالسيراميد — لكل أنواع البشرة", descEn:"Gentle ceramide cleanser — for all skin types",
+    detAr:"يحتوي على السيراميد وحمض الهيالورونيك. مناسب للاستخدام اليومي.", detEn:"Contains ceramides and hyaluronic acid. Suitable for daily use.",
+    useAr:"ادلكيه على بشرة رطبة ثم اشطفيه بماء فاتر.", useEn:"Massage onto damp skin then rinse with lukewarm water.",
+    price:320, badgeAr:"الأكثر مبيعاً", badgeEn:"Best Seller", stars:5,
+    bg:"linear-gradient(135deg,#E8F4F8,#C8E6F0)",
+    img:"https://images.unsplash.com/photo-1556228578-8c89e6adf883?w=400", icon:"🧴", stock:10
+  },
+  {
+    id:2, brand:"THE ORDINARY",
+    nameAr:"سيروم النياسيناميد",       nameEn:"Niacinamide 10% + Zinc 1%",
+    descAr:"يقلل المسام ويوحد لون البشرة", descEn:"Reduces pores and evens skin tone",
+    detAr:"10% نياسيناميد + 1% زنك للبشرة الدهنية.", detEn:"10% Niacinamide + 1% Zinc. Formulated for oily skin.",
+    useAr:"بعد الغسول وقبل المرطب. مرتين يومياً.", useEn:"Apply after cleanser and before moisturizer. Twice daily.",
+    price:280, badgeAr:"ترند TikTok", badgeEn:"TikTok Viral", stars:5,
+    bg:"linear-gradient(135deg,#F0EBE3,#D4C4B0)",
+    img:"https://images.unsplash.com/photo-1620916566398-39f1143ab7be?w=400", icon:"💧", stock:10
+  },
+  {
+    id:3, brand:"LA ROCHE-POSAY",
+    nameAr:"واقي الشمس SPF50+",        nameEn:"Anthelios SPF50+ Sunscreen",
+    descAr:"حماية قصوى — خفيف على البشرة الحساسة", descEn:"Maximum protection — lightweight for sensitive skin",
+    detAr:"حماية UVA+UVB. مناسب للبشرة الحساسة.", detEn:"UVA+UVB protection. Suitable for sensitive skin.",
+    useAr:"كآخر خطوة صباحاً قبل الخروج بـ 15 دقيقة.", useEn:"Apply as the last morning step 15 minutes before sun exposure.",
+    price:450, badgeAr:"جديد", badgeEn:"New", stars:4,
+    bg:"linear-gradient(135deg,#FFF8E8,#F0D89A)",
+    img:"https://images.unsplash.com/photo-1598440947619-2c35fc9aa908?w=400", icon:"☀️", stock:10
+  },
+  {
+    id:4, brand:"CERAVE",
+    nameAr:"كريم الترطيب",             nameEn:"Moisturizing Cream",
+    descAr:"ترطيب عميق 24 ساعة — للوجه والجسم", descEn:"Deep 24-hour hydration — face & body",
+    detAr:"سيراميد يدوم 24 ساعة. للبشرة الجافة.", detEn:"Ceramides that last 24 hours. For dry skin.",
+    useAr:"بعد الاستحمام على بشرة رطبة.", useEn:"Apply after shower on damp skin.",
+    price:380, badgeAr:null, badgeEn:null, stars:5,
+    bg:"linear-gradient(135deg,#EEF5F0,#C8DFC8)",
+    img:"https://images.unsplash.com/photo-1571781926291-c477ebfd024b?w=400", icon:"✨", stock:10
+  },
+  {
+    id:5, brand:"THE ORDINARY",
+    nameAr:"سيروم فيتامين C",           nameEn:"Vitamin C Suspension 23%",
+    descAr:"تفتيح وإشراقة — يعالج التصبغات", descEn:"Brightening & radiance — treats dark spots",
+    detAr:"23% فيتامين C. يقلل البقع الداكنة.", detEn:"23% Vitamin C. Reduces dark spots and hyperpigmentation.",
+    useAr:"مساءً فقط. قطرة على الوجه النظيف.", useEn:"Evening only. A few drops on clean dry skin.",
+    price:260, badgeAr:null, badgeEn:null, stars:4,
+    bg:"linear-gradient(135deg,#FFF4E0,#FFD98A)",
+    img:"https://images.unsplash.com/photo-1596755389378-c31d21fd1273?w=400", icon:"🍋", stock:10
+  },
+  {
+    id:6, brand:"BIODERMA",
+    nameAr:"ماء مزيل المكياج",          nameEn:"Sensibio Micellar Water",
+    descAr:"لطيف للبشرة الحساسة — بدون شطف", descEn:"Gentle on sensitive skin — no-rinse formula",
+    detAr:"ماء ميسيلار ينظف ويزيل المكياج بلطف.", detEn:"Micellar water that gently cleanses and removes makeup.",
+    useAr:"بللي قطنة وامسحي برفق.", useEn:"Soak a cotton pad and wipe gently.",
+    price:340, badgeAr:"كلاسيك", badgeEn:"Classic", stars:5,
+    bg:"linear-gradient(135deg,#F5E8F0,#E0B8D0)",
+    img:"https://images.unsplash.com/photo-1629198688000-71f23e745b6e?w=400", icon:"🌸", stock:10
+  },
+  {
+    id:7, brand:"NEUTROGENA",
+    nameAr:"غسول وجه شفاف",            nameEn:"Oil-Free Clear Face Wash",
+    descAr:"يزيل الزيادة الزيتية ويبقي البشرة نظيفة", descEn:"Removes excess oil and keeps skin clean",
+    detAr:"خالٍ من الزيت للبشرة الدهنية والمختلطة.", detEn:"Oil-free formula for oily and combination skin.",
+    useAr:"على بشرة مبللة وادلكي برفق ثم اشطفي.", useEn:"Lather on damp skin, massage gently, then rinse.",
+    price:220, badgeAr:null, badgeEn:null, stars:4,
+    bg:"linear-gradient(135deg,#E8F0F5,#B8D4E8)",
+    img:"https://images.unsplash.com/photo-1556228453-efd6c1ff04f6?w=400", icon:"🫧", stock:10
+  },
+  {
+    id:8, brand:"GARNIER",
+    nameAr:"كريم مرطب خفيف",           nameEn:"Moisture Bomb Day Cream",
+    descAr:"ترطيب خفيف للاستخدام اليومي", descEn:"Lightweight hydration for daily use",
+    detAr:"هيالورونيك. خفيف ويمتص سريعاً.", detEn:"Hyaluronic acid formula. Lightweight and fast-absorbing.",
+    useAr:"على الوجه النظيف صباحاً ومساءً.", useEn:"Apply on clean face morning and evening.",
+    price:190, badgeAr:"قيمة ممتازة", badgeEn:"Best Value", stars:4,
+    bg:"linear-gradient(135deg,#E8F5E8,#B8DFB8)",
+    img:"https://images.unsplash.com/photo-1570194065650-d99fb4d8ef6b?w=400", icon:"💚", stock:10
+  },
+  {
+    id:9, brand:"NIVEA",
+    nameAr:"كريم الليل",                nameEn:"Nourishing Night Cream",
+    descAr:"يجدد البشرة أثناء النوم", descEn:"Renews and restores skin overnight",
+    detAr:"زبدة القمح وفيتامين E. ترطيب عميق.", detEn:"Wheat germ oil and Vitamin E. Deep overnight nourishment.",
+    useAr:"كآخر خطوة مساءً على بشرة نظيفة.", useEn:"As the last evening step on clean face.",
+    price:250, badgeAr:null, badgeEn:null, stars:4,
+    bg:"linear-gradient(135deg,#E8EAF5,#B8BEE0)",
+    img:"https://images.unsplash.com/photo-1590439471364-192aa70c0b53?w=400", icon:"🌙", stock:10
+  },
 ];
 
 const GOVS = ["القاهرة","الجيزة","الإسكندرية","الشرقية","الدقهلية","البحيرة","المنوفية","الغربية","القليوبية","أسيوط","سوهاج","قنا","الأقصر","أسوان","المنيا","بني سويف","الفيوم","بورسعيد","السويس","دمياط"];
@@ -320,9 +401,13 @@ function ToastProvider({ children }) {
 function Card({ p, go }) {
   const { add } = useCart();
   const { show } = useToast();
-  const { t } = useLang();
+  const { t, lang } = useLang();
   const mob = useMob();
   const [hov, setHov] = useState(false);
+  const [imgErr, setImgErr] = useState(false);
+  const name = lang === "ar" ? (p.nameAr || p.name) : (p.nameEn || p.nameAr || p.name);
+  const desc = lang === "ar" ? (p.descAr || p.desc) : (p.descEn || p.descAr || p.desc);
+  const badge = lang === "ar" ? p.badgeAr : (p.badgeEn || p.badgeAr);
   return (
     <div onMouseEnter={() => setHov(true)} onMouseLeave={() => setHov(false)}
       style={{
@@ -334,17 +419,32 @@ function Card({ p, go }) {
         cursor: "pointer"
       }}>
       <div onClick={() => go(`#product-${p.id}`)} style={{
-        height: mob ? 220 : 268, background: p.bg, position: "relative",
-        backgroundImage: "repeating-linear-gradient(45deg,transparent,transparent 9px,rgba(196,149,106,.055) 9px,rgba(196,149,106,.055) 10px)",
-        display: "flex", alignItems: "center", justifyContent: "center", flexDirection: "column", gap: 6
+        height: mob ? 220 : 268, background: p.bg, position: "relative", overflow: "hidden",
+        display: "flex", alignItems: "center", justifyContent: "center"
       }}>
-        {p.badge && <span style={{ position: "absolute", top: 10, right: 10, background: C.dk, color: C.cr, fontSize: 9, padding: "3px 9px", letterSpacing: "0.08em", fontFamily: C.fb }}>{p.badge}</span>}
-        {p.stock <= 3 && p.stock > 0 && <span style={{ position: "absolute", top: 10, left: 10, background: "#EF4444", color: "white", fontSize: 9, padding: "3px 8px", fontFamily: C.fb }}>{t("stockLow")} {p.stock} {t("stockLowUnit")}</span>}
-        {p.stock === 0 && <span style={{ position: "absolute", top: 10, left: 10, background: "#6B7280", color: "white", fontSize: 9, padding: "3px 8px", fontFamily: C.fb }}>{t("stockOut")}</span>}
-        <span style={{ fontSize: mob ? 40 : 48 }}>{p.icon}</span>
-        <span style={{ fontFamily: C.fe, fontSize: 9, letterSpacing: "0.22em", color: C.go, textTransform: "uppercase" }}>{p.brand}</span>
+        {/* Product image */}
+        {p.img && !imgErr ? (
+          <img
+            src={p.img} alt={name}
+            onError={() => setImgErr(true)}
+            style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }}
+          />
+        ) : (
+          <div style={{
+            width: "100%", height: "100%", background: p.bg, display: "flex", alignItems: "center", justifyContent: "center", flexDirection: "column", gap: 6,
+            backgroundImage: "repeating-linear-gradient(45deg,transparent,transparent 9px,rgba(196,149,106,.055) 9px,rgba(196,149,106,.055) 10px)"
+          }}>
+            <span style={{ fontSize: mob ? 40 : 48 }}>{p.icon}</span>
+            <span style={{ fontFamily: C.fe, fontSize: 9, letterSpacing: "0.22em", color: C.go, textTransform: "uppercase" }}>{p.brand}</span>
+          </div>
+        )}
+        {/* Badges */}
+        {badge && <span style={{ position: "absolute", top: 10, right: 10, background: C.dk, color: C.cr, fontSize: 9, padding: "3px 9px", letterSpacing: "0.08em", fontFamily: C.fb, zIndex: 2 }}>{badge}</span>}
+        {p.stock <= 3 && p.stock > 0 && <span style={{ position: "absolute", top: 10, left: 10, background: "#EF4444", color: "white", fontSize: 9, padding: "3px 8px", fontFamily: C.fb, zIndex: 2 }}>{t("stockLow")} {p.stock} {t("stockLowUnit")}</span>}
+        {p.stock === 0 && <span style={{ position: "absolute", top: 10, left: 10, background: "#6B7280", color: "white", fontSize: 9, padding: "3px 8px", fontFamily: C.fb, zIndex: 2 }}>{t("stockOut")}</span>}
+        {/* Add to cart overlay */}
         <div style={{
-          position: "absolute", bottom: 0, left: 0, right: 0,
+          position: "absolute", bottom: 0, left: 0, right: 0, zIndex: 3,
           background: "rgba(42,31,14,.88)", padding: "10px 12px",
           transform: mob || hov ? "translateY(0)" : "translateY(100%)",
           transition: "transform .28s ease"
@@ -357,8 +457,8 @@ function Card({ p, go }) {
       </div>
       <div style={{ padding: "20px 22px 24px", borderTop: "1px solid rgba(196,149,106,.1)", cursor: "pointer" }} onClick={() => go(`#product-${p.id}`)}>
         <div style={{ fontFamily: C.fe, fontSize: 10.5, letterSpacing: "0.22em", color: C.go, textTransform: "uppercase", marginBottom: 5 }}>{p.brand}</div>
-        <div style={{ fontFamily: C.fa, fontSize: mob ? 17 : 19, fontWeight: 600, color: C.dk, marginBottom: 4, lineHeight: 1.3 }}>{p.name}</div>
-        <div style={{ fontSize: 12.5, color: C.mu, lineHeight: 1.6, marginBottom: 13, overflow: "hidden", display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical", fontFamily: C.fb }}>{p.desc}</div>
+        <div style={{ fontFamily: lang === "ar" ? C.fa : C.fe, fontSize: mob ? 17 : 19, fontWeight: lang === "ar" ? 600 : 500, color: C.dk, marginBottom: 4, lineHeight: 1.3 }}>{name}</div>
+        <div style={{ fontSize: 12.5, color: C.mu, lineHeight: 1.6, marginBottom: 13, overflow: "hidden", display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical", fontFamily: C.fb }}>{desc}</div>
         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
           <span style={{ fontFamily: C.fe, fontSize: mob ? 18 : 21, fontWeight: 500, color: C.dk }}>{p.price} <span style={{ fontSize: 11, color: C.mu, fontFamily: C.fb }}>{t("egp")}</span></span>
           <Stars n={p.stars} />
@@ -440,7 +540,7 @@ function Nav({ r, go, openCart, user, onLogout }) {
 function CartSide({ open, close, go }) {
   const { cart, rem, upd, tot, ship, clr } = useCart();
   const { user } = useAuth();
-  const { t, dir } = useLang();
+  const { t, lang, dir } = useLang();
   const mob = useMob();
   const [step, setStep] = useState(0);
   const [f, setF] = useState({ n: "", p: "", city: "", addr: "" });
@@ -463,7 +563,7 @@ function CartSide({ open, close, go }) {
       id: Date.now(), date: new Date().toLocaleDateString("ar-EG"),
       name: f.n, phone: f.p, city: f.city, address: f.addr,
       userEmail: user?.email || null,
-      items: cart.map(i=>({name:i.name, qty:i.qty, price:i.price})),
+      items: cart.map(i=>({name:i.nameAr||i.name, qty:i.qty, price:i.price})),
       total: tot + ship, status: "جديد"
     };
     const orders = JSON.parse(localStorage.getItem("nawra_orders")||"[]");
@@ -501,7 +601,7 @@ function CartSide({ open, close, go }) {
               </select>
             </div>
             <div style={{ borderTop: "1px solid rgba(196,149,106,.12)", paddingTop: 12, marginBottom: 14 }}>
-              {cart.map(i => <div key={i.id} style={{ display: "flex", justifyContent: "space-between", fontSize: 12, marginBottom: 5, color: C.dk, fontFamily: C.fb }}><span>{i.name} × {i.qty}</span><span style={{fontFamily:C.fe}}>{i.price * i.qty} {t("egp")}</span></div>)}
+              {cart.map(i => <div key={i.id} style={{ display: "flex", justifyContent: "space-between", fontSize: 12, marginBottom: 5, color: C.dk, fontFamily: C.fb }}><span>{(lang==="ar"?i.nameAr:i.nameEn)||i.nameAr||i.name} × {i.qty}</span><span style={{fontFamily:C.fe}}>{i.price * i.qty} {t("egp")}</span></div>)}
               <div style={{ display: "flex", justifyContent: "space-between", fontFamily: C.fe, fontSize: 17, borderTop: "1px solid rgba(196,149,106,.12)", paddingTop: 9, marginTop: 6, color: C.dk }}><span style={{fontFamily:C.fa,fontSize:14}}>{t("cartTotal")}</span><span>{tot + ship} {t("egp")}</span></div>
             </div>
             <div style={{ display: "flex", gap: 8 }}>
@@ -523,7 +623,7 @@ function CartSide({ open, close, go }) {
                   <div style={{ width: 68, height: 68, background: C.gof, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}><span style={{ fontSize: 26 }}>{i.icon}</span></div>
                   <div style={{ flex: 1, minWidth: 0 }}>
                     <div style={{ fontFamily: C.fe, fontSize: 9.5, letterSpacing: "0.18em", color: C.go, textTransform: "uppercase", marginBottom: 2 }}>{i.brand || ""}</div>
-                    <div style={{ fontFamily: C.fa, fontSize: 14.5, color: C.dk, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{i.name}</div>
+                    <div style={{ fontFamily: lang==="ar"?C.fa:C.fe, fontSize: 14.5, color: C.dk, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{(lang==="ar"?i.nameAr:i.nameEn)||i.nameAr||i.name}</div>
                     <div style={{ fontFamily: C.fe, fontSize: 16, fontWeight: 500, color: C.dk, marginTop: 2 }}>{i.price * i.qty} {t("egp")}</div>
                     <div style={{ display: "flex", alignItems: "center", gap: 7, marginTop: 6 }}>
                       <Btn onClick={() => upd(i.id, i.qty - 1)} style={{ width: 26, height: 26, border: `1px solid rgba(42,31,14,.3)`, background: "none", fontSize: 14, display: "flex", alignItems: "center", justifyContent: "center", padding: 0, color: C.dk }}>−</Btn>
@@ -794,7 +894,7 @@ function AdminDash({ go }) {
                   </div>
                   <div style={{flex:1,minWidth:0}}>
                     <div style={{fontSize:9,color:C.go,letterSpacing:2,fontFamily:C.fb}}>{p.brand}</div>
-                    <div style={{fontFamily:C.fa,fontSize:14,color:C.dk,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{p.name}</div>
+                    <div style={{fontFamily:C.fa,fontSize:14,color:C.dk,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{p.nameAr || p.name}</div>
                     <div style={{fontSize:13,color:C.dk,fontFamily:C.fb,marginTop:2}}>{p.price} جنيه</div>
                     <div style={{fontSize:11,fontFamily:C.fb,marginTop:2,color:p.stock===0?"#EF4444":p.stock<=3?"#F59E0B":"#10B981"}}>
                       {p.stock===0?"نفد المخزون":p.stock<=3?`آخر ${p.stock} قطع`:`${p.stock} قطعة`}
@@ -966,9 +1066,14 @@ function SearchBar({ go, allProds }) {
   const [open, setOpen] = useState(false);
   const mob = useMob();
   const results = q.length > 1
-    ? (allProds||PRODS).filter(p =>
-        p.name.includes(q) || p.brand.toLowerCase().includes(q.toLowerCase()) || p.desc.includes(q)
-      ).slice(0, 5)
+    ? (allProds||PRODS).filter(p => {
+        const ql = q.toLowerCase();
+        return (p.nameAr||p.name||"").includes(q)
+          || (p.nameEn||"").toLowerCase().includes(ql)
+          || p.brand.toLowerCase().includes(ql)
+          || (p.descAr||p.desc||"").includes(q)
+          || (p.descEn||"").toLowerCase().includes(ql);
+      }).slice(0, 5)
     : [];
 
   useEffect(() => {
@@ -1000,7 +1105,7 @@ function SearchBar({ go, allProds }) {
               <div style={{width:36,height:36,background:p.bg,display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0,borderRadius:3,fontSize:18}}>{p.icon}</div>
               <div style={{minWidth:0}}>
                 <div style={{fontSize:9,color:"#B8963E",letterSpacing:2,fontFamily:C.fb}}>{p.brand}</div>
-                <div style={{fontSize:13,color:"#2A1F0E",fontFamily:C.fb,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{p.name}</div>
+                <div style={{fontSize:13,color:"#2A1F0E",fontFamily:C.fb,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{p.nameAr || p.name}</div>
                 <div style={{fontSize:12,color:"#9C7E6A",fontFamily:C.fb}}>{p.price} جنيه</div>
               </div>
             </div>
@@ -1350,26 +1455,37 @@ function ProdDetail({ id, go, allProds }) {
   const [tab, setTab] = useState("d");
   const prodsData = (allProds && allProds.length) ? allProds : PRODS;
   const p = prodsData.find(x => x.id === id);
-  const { t, dir } = useLang();
+  const { t, lang, dir } = useLang();
   if (!p) return <div style={{ padding: 60, textAlign: "center" }}>{t("prodNotFound")}</div>;
   const px = mob ? "16px" : "56px";
   const rel = prodsData.filter(x => x.id !== p.id).slice(0, mob ? 2 : 3);
+  // Language-aware fields
+  const pName = lang === "ar" ? (p.nameAr || p.name) : (p.nameEn || p.nameAr || p.name);
+  const pDesc = lang === "ar" ? (p.descAr || p.desc) : (p.descEn || p.descAr || p.desc);
+  const pDet  = lang === "ar" ? (p.detAr  || p.det)  : (p.detEn  || p.detAr  || p.det);
+  const pUse  = lang === "ar" ? (p.useAr  || p.use)  : (p.useEn  || p.useAr  || p.use);
   return (
     <div style={{ direction: dir, minHeight: "80vh" }}>
       {/* Breadcrumb */}
       <div style={{ padding: `10px ${px}`, background: C.wh, borderBottom: "1px solid rgba(196,149,106,.1)", fontSize: 11, color: C.mu, fontFamily: C.fe, letterSpacing: "0.08em" }}>
-        <span onClick={() => go("#home")} style={{ cursor: "pointer" }}>{t("prodHome")}</span>{" › "}<span onClick={() => go("#products")} style={{ cursor: "pointer" }}>{t("prodProds")}</span>{" › "}{p.name}
+        <span onClick={() => go("#home")} style={{ cursor: "pointer" }}>{t("prodHome")}</span>{" › "}<span onClick={() => go("#products")} style={{ cursor: "pointer" }}>{t("prodProds")}</span>{" › "}{pName}
       </div>
       <div style={{ padding: `${mob ? "24px" : "48px"} ${px}`, display: mob ? "block" : "grid", gridTemplateColumns: "1fr 1fr", gap: 48, maxWidth: 1100, margin: "0 auto" }}>
         {/* Product image */}
-        <div style={{ background: p.bg, height: mob ? 260 : 420, display: "flex", alignItems: "center", justifyContent: "center", flexDirection: "column", gap: 12, marginBottom: mob ? 24 : 0, position: "relative", overflow: "hidden", border: "1px solid rgba(196,149,106,.13)" }}>
-          <div style={{ position: "absolute", inset: 0, backgroundImage: "repeating-linear-gradient(45deg,transparent,transparent 9px,rgba(196,149,106,.05) 9px,rgba(196,149,106,.05) 10px)" }} />
-          <span style={{ fontSize: mob ? 72 : 96, position: "relative", zIndex: 1 }}>{p.icon}</span>
-          <span style={{ fontFamily: C.fe, fontSize: 10, letterSpacing: "0.22em", color: "#5C4A2A", textTransform: "uppercase", position: "relative", zIndex: 1 }}>{p.brand}</span>
+        <div style={{ height: mob ? 300 : 460, marginBottom: mob ? 24 : 0, position: "relative", overflow: "hidden", border: "1px solid rgba(196,149,106,.13)", background: p.bg }}>
+          {p.img ? (
+            <img src={p.img} alt={pName} style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }} />
+          ) : (
+            <div style={{ width: "100%", height: "100%", display: "flex", alignItems: "center", justifyContent: "center", flexDirection: "column", gap: 12,
+              backgroundImage: "repeating-linear-gradient(45deg,transparent,transparent 9px,rgba(196,149,106,.05) 9px,rgba(196,149,106,.05) 10px)" }}>
+              <span style={{ fontSize: mob ? 72 : 96 }}>{p.icon}</span>
+              <span style={{ fontFamily: C.fe, fontSize: 10, letterSpacing: "0.22em", color: "#5C4A2A", textTransform: "uppercase" }}>{p.brand}</span>
+            </div>
+          )}
         </div>
         <div>
           <div style={{ fontFamily: C.fe, fontSize: 10, letterSpacing: "0.22em", color: C.go, textTransform: "uppercase", marginBottom: 8 }}>{p.brand}</div>
-          <h1 style={{ fontFamily: C.fa, fontSize: mob ? 24 : 34, fontWeight: 600, color: C.dk, marginBottom: 10, lineHeight: 1.2 }}>{p.name}</h1>
+          <h1 style={{ fontFamily: lang === "ar" ? C.fa : C.fe, fontSize: mob ? 24 : 34, fontWeight: lang === "ar" ? 600 : 500, color: C.dk, marginBottom: 10, lineHeight: 1.2 }}>{pName}</h1>
           <div style={{ marginBottom: 14 }}><Stars n={p.stars} /></div>
           <div style={{ marginBottom: 14, display: "flex", alignItems: "center", gap: 10 }}>
             {p.stock > 0 ? (
@@ -1386,7 +1502,7 @@ function ProdDetail({ id, go, allProds }) {
               </>
             )}
           </div>
-          <p style={{ fontSize: mob ? 13.5 : 14.5, color: C.wa, lineHeight: 1.85, marginBottom: 20, fontFamily: C.fb }}>{p.desc}</p>
+          <p style={{ fontSize: mob ? 13.5 : 14.5, color: C.wa, lineHeight: 1.85, marginBottom: 20, fontFamily: C.fb }}>{pDesc}</p>
           <div style={{ fontFamily: C.fe, fontSize: mob ? 28 : 34, fontWeight: 500, color: C.dk, marginBottom: 22 }}>{p.price} <span style={{ fontSize: 13, color: C.mu, fontFamily: C.fb }}>{t("egp")}</span></div>
           <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 20 }}>
             <Btn onClick={() => setQty(Math.max(1, qty - 1))} style={{ width: 36, height: 36, border: "1.5px solid rgba(42,31,14,.4)", background: "none", fontSize: 18, display: "flex", alignItems: "center", justifyContent: "center", padding: 0 }}>−</Btn>
@@ -1410,7 +1526,7 @@ function ProdDetail({ id, go, allProds }) {
             <Btn key={k} onClick={() => setTab(k)} style={{ padding: mob ? "11px 18px" : "13px 28px", background: "none", borderBottom: tab === k ? `2px solid ${C.dk}` : "2px solid transparent", color: tab === k ? C.dk : C.mu, fontFamily: C.fb, fontSize: mob ? 12.5 : 13.5, fontWeight: tab === k ? 600 : 400, letterSpacing: "0.03em" }}>{l}</Btn>
           ))}
         </div>
-        <p style={{ fontSize: mob ? 13.5 : 14.5, color: C.wa, lineHeight: 1.9, fontFamily: C.fb }}>{tab === "d" ? p.det : p.use}</p>
+        <p style={{ fontSize: mob ? 13.5 : 14.5, color: C.wa, lineHeight: 1.9, fontFamily: C.fb }}>{tab === "d" ? pDet : pUse}</p>
       </div>
       <Reviews productId={id} />
       {/* Related products */}
@@ -1638,7 +1754,7 @@ export default function App() {
         <ProdsProvider initialProds={PRODS}>
           <CartProvider>
             <ToastProvider>
-              <link href="https://fonts.googleapis.com/css2?family=Tajawal:wght@300;400;500&display=swap" rel="stylesheet" />
+              {/* Fonts loaded in index.html: Noto Serif Arabic, Cairo, Cormorant Garamond */}
               <AppInner />
             </ToastProvider>
           </CartProvider>

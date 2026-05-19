@@ -8,7 +8,12 @@
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-    <link href="https://fonts.googleapis.com/css2?family=Noto+Serif+Arabic:wght@300;400;500;600;700&family=Cairo:wght@300;400;500;600;700&family=Cormorant+Garamond:ital,wght@0,300;0,400;0,500;0,600;1,300;1,400;1,500&display=swap" rel="stylesheet" />
+    <!-- Arabic serif headings -->
+    <link href="https://fonts.googleapis.com/css2?family=Noto+Serif+Arabic:wght@300;400;500;600;700&display=swap" rel="stylesheet" />
+    <!-- Arabic sans-serif body / UI -->
+    <link href="https://fonts.googleapis.com/css2?family=Cairo:wght@300;400;500;600;700&display=swap" rel="stylesheet" />
+    <!-- English elegant accents, prices, eyebrows -->
+    <link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,300;0,400;0,500;0,600;1,300;1,400;1,500&display=swap" rel="stylesheet" />
     <style>
       :root {
         --cream:  #FBF7F4;
@@ -40,6 +45,15 @@
       ::-webkit-scrollbar-thumb { background: var(--gold-mid); border-radius: 3px; }
       button { font-family: var(--fb); }
       input, textarea, select { font-family: var(--fb); }
+
+      /* Ensure Arabic glyphs always use Noto Serif Arabic or Cairo */
+      :lang(ar) h1, :lang(ar) h2, :lang(ar) h3 { font-family: var(--fa); }
+      :lang(ar) p, :lang(ar) span, :lang(ar) a, :lang(ar) li, :lang(ar) label { font-family: var(--fb); }
+
+      /* Cormorant for English display text */
+      .font-fe { font-family: var(--fe); }
+      .font-fa { font-family: var(--fa); }
+      .font-fb { font-family: var(--fb); }
     </style>
   </head>
   <body>
