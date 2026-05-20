@@ -59,7 +59,7 @@ const TR = {
     shippingSects:[{t:"الشحن",i:["نوصل لكل مصر خلال 2-4 أيام","شحن مجاني فوق 500 جنيه","50 جنيه للطلبات الأقل","عبر Bosta / J&T"]},{t:"الإرجاع",i:["خلال 14 يوم من الاستلام","المنتج بحالته الأصلية","مجاني لو المنتج معيب","يُستثنى المنتجات المفتوحة"]},{t:"الدفع",i:["كاش عند الاستلام فقط","مفيش بطاقة مطلوبة","ادفعي لما الطلب يوصلك"]},{t:"التواصل",i:["واتساب: 01xxxxxxxx","info@nawra.eg","السبت-الخميس: 10ص-10م"]}],
     footerTagline:"منتجات عناية مختارة لبشرة صحية ومتألقة.",
     footerCols:[{t:"تصفحي",l:[["#home","الرئيسية"],["#products","المنتجات"],["#about","عن نوّرَة"]]},{t:"خدمة العملاء",l:[["#contact","تواصلي"],["#shipping","الشحن والإرجاع"]]},{t:"تابعينا",l:[["#","Instagram"],["#","TikTok"],["#","Facebook"]]}],
-    footerCopyright:"© 2025 NAWRA SKINCARE — نوّرَة للعناية بالبشرة",
+    footerCopyright:"© 2026 NAWRA SKINCARE — نوّرَة للعناية بالبشرة",
     reviewsTitle:"آراء العملاء", reviewsEmpty:"كوني أول من تقيّم هذا المنتج ✨",
     reviewsFormTitle:"أضيفي تقييمك", reviewsNameLabel:"الاسم", reviewsNamePh:"اسمك",
     reviewsRatingLabel:"التقييم", reviewsCommentLabel:"رأيك في المنتج",
@@ -125,7 +125,7 @@ const TR = {
     shippingSects:[{t:"Shipping",i:["Delivery across Egypt in 2-4 days","Free shipping over 500 EGP","50 EGP for smaller orders","Via Bosta / J&T"]},{t:"Returns",i:["Within 14 days of receipt","Product in original condition","Free if item is defective","Opened products excluded"]},{t:"Payment",i:["Cash on Delivery only","No card required","Pay when your order arrives"]},{t:"Contact",i:["WhatsApp: 01xxxxxxxx","info@nawra.eg","Sat–Thu: 10am–10pm"]}],
     footerTagline:"Curated skincare for healthy, glowing skin.",
     footerCols:[{t:"Browse",l:[["#home","Home"],["#products","Products"],["#about","About Nawra"]]},{t:"Customer Service",l:[["#contact","Contact"],["#shipping","Shipping & Returns"]]},{t:"Follow Us",l:[["#","Instagram"],["#","TikTok"],["#","Facebook"]]}],
-    footerCopyright:"© 2025 NAWRA SKINCARE",
+    footerCopyright:"© 2026 NAWRA SKINCARE",
     reviewsTitle:"Customer Reviews", reviewsEmpty:"Be the first to review this product ✨",
     reviewsFormTitle:"Add Your Review", reviewsNameLabel:"Name", reviewsNamePh:"Your name",
     reviewsRatingLabel:"Rating", reviewsCommentLabel:"Your Review",
@@ -1305,6 +1305,18 @@ function Home({ go, allProds }) {
             </div>
           )}
         </div>
+        {/* Mobile-only: product image strip */}
+        {mob && (
+          <div style={{ display: "flex", height: 200, overflow: "hidden" }}>
+            {homProds.slice(0, 3).map(p => (
+              <div key={p.id} onClick={() => go(`#product-${p.id}`)}
+                style={{ flex: 1, overflow: "hidden", cursor: "pointer", position: "relative" }}>
+                <img src={p.img} alt={p.nameAr} style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+                <div style={{ position: "absolute", inset: 0, background: "rgba(42,31,14,.18)" }} />
+              </div>
+            ))}
+          </div>
+        )}
         {/* Right: Visual panel */}
         {!mob && (
           <div style={{
