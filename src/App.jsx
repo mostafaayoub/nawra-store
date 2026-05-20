@@ -555,15 +555,19 @@ function CartSide({ open, close, go }) {
   const submit = () => {
     if (!f.n || !f.p || !f.city || !f.addr) { alert(t("orderAlert")); return; }
     const order = {
-      id: Date.now(), date: new Date().toLocaleDateString("ar-EG"),
-      name: f.n, phone: f.p, city: f.city, address: f.addr,
-      userEmail: user?.email || null,
-      items: cart.map(i=>({name:i.nameAr||i.name, qty:i.qty, price:i.price})),
-      total: tot + ship, status: "جديد"
+      id: Date.now(),
+      date: new Date().toLocaleDateString("ar-EG"),
+      name: f.n,
+      phone: f.p,
+      city: f.city,
+      address: f.addr,
+      items: cart.map(i => ({ name: i.nameAr || i.nameEn || i.name || "", qty: i.qty, price: i.price })),
+      total: tot + ship,
+      status: "جديد"
     };
-    const orders = JSON.parse(localStorage.getItem("nawra_orders")||"[]");
-    localStorage.setItem("nawra_orders", JSON.stringify([order, ...orders]));
-    console.log("[Nawra] Order saved:", order, "| total in storage:", orders.length + 1);
+    const prev = JSON.parse(localStorage.getItem("nawra_orders") || "[]");
+    localStorage.setItem("nawra_orders", JSON.stringify([order, ...prev]));
+    console.log("[Nawra] Order saved:", order, "| total orders now:", prev.length + 1);
     window.dispatchEvent(new CustomEvent("nawra-new-order", { detail: order }));
     clr(); setStep(2);
   };
@@ -728,19 +732,31 @@ function AdminDash({ go }) {
   const [editId, setEditId] = useState(null);
   const [newP, setNewP] = useState({ name:"", brand:"", desc:"", price:"", stock:"10", icon:"✨", badge:"", bg:"linear-gradient(135deg,#F5EBE8,#E8D5C4)" });
   const [delConfirm, setDelConfirm] = useState(null);
-  const readOrders = () => { try { return JSON.parse(localStorage.getItem("nawra_orders")||"[]"); } catch { return []; } };
-  const [orderList, setOrderList] = useState(readOrders);
+  const [orderList, setOrderList] = useState(() => {
+    try {
+      return JSON.parse(localStorage.getItem("nawra_orders") || "[]");
+    } catch { return []; }
+  });
   const [statusEdit, setStatusEdit] = useState({});
 
-  // Refresh whenever a new order is placed (same-tab event) or the tab is opened
+  // Refresh helper — always reads fresh from localStorage
+  const refreshOrders = () => {
+    try { setOrderList(JSON.parse(localStorage.getItem("nawra_orders") || "[]")); } catch {}
+  };
+
   useEffect(() => {
-    const refresh = () => setOrderList(readOrders());
-    window.addEventListener("nawra-new-order", refresh);
-    // Also refresh when switching to the orders/overview tab
-    refresh();
-    return () => window.removeEventListener("nawra-new-order", refresh);
+    // Immediate: sync with any orders placed before AdminDash mounted
+    refreshOrders();
+    // Real-time: same-tab event fired by submit()
+    window.addEventListener("nawra-new-order", refreshOrders);
+    // Fallback: poll every 30 seconds (catches cross-tab or missed events)
+    const interval = setInterval(refreshOrders, 30000);
+    return () => {
+      window.removeEventListener("nawra-new-order", refreshOrders);
+      clearInterval(interval);
+    };
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [tab]);
+  }, []);
 
   const totalRev = orderList.reduce((s,o)=>s+(o.total||0),0);
   const totalOrders = orderList.length;
@@ -933,7 +949,14 @@ function AdminDash({ go }) {
         {/* ORDERS */}
         {tab==="orders" && (
           <div>
-            <h3 style={{fontFamily:C.fa,fontSize:18,fontWeight:600,color:C.dk,marginBottom:16}}>الطلبات ({orderList.length})</h3>
+            <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:16}}>
+              <h3 style={{fontFamily:C.fa,fontSize:18,fontWeight:600,color:C.dk,margin:0}}>الطلبات ({orderList.length})</h3>
+              <button onClick={refreshOrders}
+                style={{background:C.go,color:"#fff",border:"none",padding:"7px 16px",cursor:"pointer",
+                  fontFamily:C.fb,fontSize:12,borderRadius:4,display:"flex",alignItems:"center",gap:5}}>
+                🔄 تحديث
+              </button>
+            </div>
             {orderList.length===0 ? (
               <div style={{background:C.wh,padding:"40px",textAlign:"center",color:C.mu,fontFamily:C.fb}}>
                 <div style={{fontSize:40,marginBottom:12}}>🧾</div>
