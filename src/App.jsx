@@ -68,6 +68,38 @@ const TR = {
     searchPh:"ابحثي عن منتج...", searchViewAll:"عرض كل النتائج ←",
     waHello:"👋 أهلاً!\nمحتاجة مساعدة في اختيار المنتج؟", waStart:"ابدئي المحادثة",
     waMsg:"مرحباً، أريد الاستفسار عن منتج من نوّرَة 💕",
+    // ── Address system ──────────────────────────────────────────────────────
+    navAddresses:"عناويني",
+    addrPageTitle:"عناويني", addrPageSub:"إدارة عناوين التوصيل",
+    addrCountry:"الدولة", addrCountryVal:"🇪🇬 مصر",
+    addrFullName:"الاسم الكامل", addrFullNamePh:"الاسم الأول والأخير",
+    addrPhone:"رقم الموبايل", addrPhonePh:"1xxxxxxxxx",
+    addrStreet:"الشارع", addrStreetPh:"اسم الشارع",
+    addrBuilding:"اسم / رقم المبنى", addrBuildingPh:"مثال: عمارة النيل، شقة 5",
+    addrCity:"المدينة / المنطقة", addrCityPh:"مثال: المعادي، مدينة نصر",
+    addrDistrict:"الحي", addrDistrictPh:"اسم الحي",
+    addrGov:"المحافظة", addrGovPh:"اختاري المحافظة",
+    addrLandmark:"أقرب معلم", addrLandmarkPh:"اختياري — مثال: قرب مسجد النور",
+    addrType:"نوع العنوان",
+    addrHome:"🏠 منزل", addrOffice:"🏢 مكتب",
+    addrOfficeHols:"هل المكتب مفتوح في الإجازات؟",
+    addrFriday:"الجمعة", addrSaturday:"السبت",
+    addrGPS:"📍 استخدم موقعي الحالي",
+    addrGPSGetting:"جاري تحديد الموقع...",
+    addrGPSDone:"✓ تم تحديد الموقع",
+    addrGPSError:"تعذّر الوصول للموقع",
+    addrDefault:"تعيين كعنوان افتراضي",
+    addrSave:"حفظ العنوان", addrSaving:"جاري الحفظ...",
+    addrEdit:"تعديل", addrRemove:"حذف",
+    addrSetDefault:"تعيين كافتراضي", addrDefaultBadge:"الافتراضي",
+    addrAddNew:"+ إضافة عنوان جديد",
+    addrConfirmDel:"هل تريد حذف هذا العنوان؟",
+    addrUseThis:"استخدم هذا العنوان",
+    addrAddNewCheckout:"+ إضافة عنوان جديد",
+    addrSelectTitle:"اختاري عنوان التوصيل",
+    addrNoAddresses:"مفيش عناوين محفوظة",
+    addrNoAddressesSub:"أضيفي عنوانك الأول لتسريع عملية الشراء",
+    addrRequired:"من فضلك اكملي الحقول الإلزامية",
   },
   en: {
     navHome:"Home", navProducts:"Products", navAbout:"About Nawra", navContact:"Contact", navShipping:"Shipping & Returns",
@@ -134,6 +166,38 @@ const TR = {
     searchPh:"Search for a product...", searchViewAll:"View all results →",
     waHello:"👋 Hello!\nNeed help choosing a product?", waStart:"Start a chat",
     waMsg:"Hello, I'd like to inquire about a product from Nawra 💕",
+    // ── Address system ──────────────────────────────────────────────────────
+    navAddresses:"My Addresses",
+    addrPageTitle:"My Addresses", addrPageSub:"Manage your delivery addresses",
+    addrCountry:"Country", addrCountryVal:"🇪🇬 Egypt",
+    addrFullName:"Full Name", addrFullNamePh:"First and last name",
+    addrPhone:"Mobile", addrPhonePh:"1xxxxxxxxx",
+    addrStreet:"Street Name", addrStreetPh:"Street name",
+    addrBuilding:"Building name or number", addrBuildingPh:"e.g. Nile Tower, Apt 5",
+    addrCity:"City / Area", addrCityPh:"e.g. Maadi, Nasr City",
+    addrDistrict:"District", addrDistrictPh:"District name",
+    addrGov:"Governorate", addrGovPh:"Select governorate",
+    addrLandmark:"Nearest Landmark", addrLandmarkPh:"Optional — e.g. Near the mosque",
+    addrType:"Address Type",
+    addrHome:"🏠 Home", addrOffice:"🏢 Office",
+    addrOfficeHols:"Is the office open on holidays?",
+    addrFriday:"Friday", addrSaturday:"Saturday",
+    addrGPS:"📍 Use My Current Location",
+    addrGPSGetting:"Getting location...",
+    addrGPSDone:"✓ Location set",
+    addrGPSError:"Could not access location",
+    addrDefault:"Use as default address",
+    addrSave:"Save Address", addrSaving:"Saving...",
+    addrEdit:"Edit", addrRemove:"Remove",
+    addrSetDefault:"Set as Default", addrDefaultBadge:"Default",
+    addrAddNew:"+ Add New Address",
+    addrConfirmDel:"Are you sure you want to delete this address?",
+    addrUseThis:"Use this address",
+    addrAddNewCheckout:"+ Add new address",
+    addrSelectTitle:"Select Delivery Address",
+    addrNoAddresses:"No saved addresses",
+    addrNoAddressesSub:"Add your first address to speed up checkout",
+    addrRequired:"Please fill in all required fields",
   }
 };
 
@@ -509,6 +573,7 @@ function Nav({ r, go, openCart, user, onLogout }) {
               {!mob && <span style={{fontSize:12,color:C.mu,fontFamily:C.fb}}>{t("navGreeting")} {user.name} 👋</span>}
               {user.role==="admin" && <Btn onClick={()=>go("#admin")} style={{background:C.go,color:"white",padding:"5px 12px",fontSize:11,letterSpacing:"0.06em",fontFamily:C.fb,border:"none"}}>Admin</Btn>}
               {user.role==="user" && !mob && <Btn onClick={()=>go("#myorders")} style={{background:"none",border:`1.5px solid rgba(42,31,14,.4)`,color:C.dk,padding:"5px 11px",fontSize:11,fontFamily:C.fb,letterSpacing:"0.04em"}}>{t("navMyOrders")}</Btn>}
+              {user.role==="user" && !mob && <Btn onClick={()=>go("#addresses")} style={{background:"none",border:`1.5px solid rgba(42,31,14,.4)`,color:C.dk,padding:"5px 11px",fontSize:11,fontFamily:C.fb,letterSpacing:"0.04em"}}>📍 {t("navAddresses")}</Btn>}
               <Btn onClick={onLogout} style={{background:"none",border:"1px solid rgba(196,149,106,.3)",color:C.mu,padding:"5px 11px",fontSize:11,fontFamily:C.fb}}>{t("navLogout")}</Btn>
             </div>
           ) : (
@@ -525,6 +590,7 @@ function Nav({ r, go, openCart, user, onLogout }) {
           {user && <div style={{ padding: "10px 0", borderBottom: "1px solid rgba(196,149,106,.1)", fontSize: 14, color: C.go, fontFamily: C.fb }}>{t("navGreeting")} {user.name} 👋</div>}
           {links.map(([h, l]) => <span key={h} onClick={() => { go(h); setOpen(false); }} style={{ display: "block", cursor: "pointer", color: r === h ? C.go : C.dk, fontSize: 15, fontFamily: C.fb, fontWeight: 500, padding: "10px 0", borderBottom: "1px solid rgba(196,149,106,.08)" }}>{l}</span>)}
           {user && user.role === "user" && <span onClick={() => { go("#myorders"); setOpen(false); }} style={{ display: "block", cursor: "pointer", color: r === "#myorders" ? C.go : C.dk, fontSize: 15, fontFamily: C.fb, fontWeight: 500, padding: "10px 0", borderBottom: "1px solid rgba(196,149,106,.08)" }}>{t("navMyOrders")} 📦</span>}
+          {user && user.role === "user" && <span onClick={() => { go("#addresses"); setOpen(false); }} style={{ display: "block", cursor: "pointer", color: r === "#addresses" ? C.go : C.dk, fontSize: 15, fontFamily: C.fb, fontWeight: 500, padding: "10px 0", borderBottom: "1px solid rgba(196,149,106,.08)" }}>📍 {t("navAddresses")}</span>}
         </div>
       )}
     </>
@@ -539,7 +605,34 @@ function CartSide({ open, close, go }) {
   const mob = useMob();
   const [step, setStep] = useState(0);
   const [f, setF] = useState({ n: "", p: "", city: "", addr: "" });
+  const [savedAddrs, setSavedAddrs] = useState([]);
+  const [selAddrId, setSelAddrId] = useState(null);
+  const [showNewAddrInCart, setShowNewAddrInCart] = useState(false);
   const W = mob ? "100vw" : "390px";
+
+  // Load user's saved addresses when entering checkout step
+  useEffect(() => {
+    if (step !== 1 || !user?.email) return;
+    setShowNewAddrInCart(false);
+    const load = async () => {
+      try {
+        const res = await fetch(`/api/addresses/${encodeURIComponent(user.email)}`);
+        if (res.ok) {
+          const data = await res.json();
+          setSavedAddrs(data);
+          const def = data.find(a => a.isDefault);
+          if (def) setSelAddrId(def.id);
+          return;
+        }
+      } catch {}
+      const stored = JSON.parse(localStorage.getItem(`nawra_addresses_${user.email}`) || "[]");
+      setSavedAddrs(stored);
+      const def = stored.find(a => a.isDefault);
+      if (def) setSelAddrId(def.id);
+    };
+    load();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [step]);
 
   if (step === 2) return (
     <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.6)", zIndex: 400, display: "flex", alignItems: "center", justifyContent: "center", padding: 16 }}>
@@ -552,37 +645,40 @@ function CartSide({ open, close, go }) {
     </div>
   );
 
-  const submit = async () => {
-    if (!f.n || !f.p || !f.city || !f.addr) { alert(t("orderAlert")); return; }
+  // Core order-saving logic — accepts a resolved address object
+  const placeOrder = async ({ name, phone, city, address, lat, lng }) => {
     const order = {
       id: Date.now(),
       date: new Date().toLocaleDateString("ar-EG"),
-      name: f.n,
-      phone: f.p,
-      city: f.city,
-      address: f.addr,
+      name, phone, city, address, lat: lat||null, lng: lng||null,
       items: cart.map(i => ({ name: i.nameAr || i.nameEn || i.name || "", qty: i.qty, price: i.price })),
-      total: tot + ship,
-      status: "جديد"
+      total: tot + ship, status: "جديد"
     };
-    // ── Primary: save to backend API ────────────────────────────────────────
     try {
-      const res = await fetch("/api/orders", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(order)
-      });
+      const res = await fetch("/api/orders", { method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify(order) });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       console.log("[Nawra] Order saved to API:", order.id);
-    } catch (e) {
-      console.warn("[Nawra] API unavailable, using localStorage fallback:", e.message);
-    }
-    // ── Always mirror to localStorage for offline admin / instant refresh ──
+    } catch (e) { console.warn("[Nawra] API fallback:", e.message); }
     const prev = JSON.parse(localStorage.getItem("nawra_orders") || "[]");
     localStorage.setItem("nawra_orders", JSON.stringify([order, ...prev]));
     window.dispatchEvent(new CustomEvent("nawra-new-order", { detail: order }));
     clr(); setStep(2);
   };
+
+  // Submit from manual form
+  const submit = () => {
+    if (!f.n || !f.p || !f.city || !f.addr) { alert(t("orderAlert")); return; }
+    placeOrder({ name:f.n, phone:f.p, city:f.city, address:f.addr });
+  };
+
+  // Submit using a saved address card
+  const submitWithAddr = (addr) => placeOrder({
+    name: addr.fullName,
+    phone: `+20${addr.phone}`,
+    city: addr.governorate,
+    address: [addr.street, addr.building, addr.district].filter(Boolean).join("، "),
+    lat: addr.lat, lng: addr.lng
+  });
 
   const fld = (k, lbl, ph) => (
     <div style={{ marginBottom: 11 }}>
@@ -598,29 +694,70 @@ function CartSide({ open, close, go }) {
       <div onClick={close} style={{ display: open ? "block" : "none", position: "fixed", inset: 0, background: "rgba(0,0,0,.5)", zIndex: 300 }} />
       <div style={{ position: "fixed", top: 0, left: open ? 0 : `-${W}`, width: W, height: "100vh", background: C.cr, zIndex: 301, transition: "left .35s", display: "flex", flexDirection: "column", direction: dir, overflowX: "hidden" }}>
         <div style={{ padding: "28px 28px 18px", borderBottom: "1px solid rgba(196,149,106,.18)", display: "flex", alignItems: "center", justifyContent: "space-between", flexShrink: 0 }}>
-          <span style={{ fontFamily: C.fa, fontSize: 20, fontWeight: 600, color: C.dk }}>{step === 1 ? t("checkoutTitle") : t("cartTitle")}</span>
+          <span style={{ fontFamily: C.fa, fontSize: 20, fontWeight: 600, color: C.dk }}>
+            {step === 1 && user && savedAddrs.length > 0 && !showNewAddrInCart
+              ? t("addrSelectTitle")
+              : step === 1 ? t("checkoutTitle") : t("cartTitle")}
+          </span>
           <Btn onClick={() => { close(); setStep(0); }} style={{ background: "none", fontSize: 20, color: C.mu, padding: 0, border: "none" }}>✕</Btn>
         </div>
         {step === 1 ? (
           <div style={{ flex: 1, overflowY: "auto", padding: "16px 20px" }}>
-            <div style={{ background: C.cr2, padding: "9px 14px", marginBottom: 14, borderInlineStart: `3px solid ${C.go}`, fontSize: 12, color: C.wa, fontFamily: C.fb }}><b>{t("checkoutCashLabel")}</b></div>
-            {fld("n", t("checkoutName"), t("checkoutNamePh"))}
-            {fld("p", t("checkoutPhone"), t("checkoutPhonePh"))}
-            {fld("addr", t("checkoutAddr"), t("checkoutAddrPh"))}
-            <div style={{ marginBottom: 11 }}>
-              <label style={{ display: "block", fontFamily: C.fe, fontSize: 10, letterSpacing: "0.2em", color: C.mu, marginBottom: 5, textTransform: "uppercase" }}>{t("checkoutGov")}</label>
-              <select value={f.city} onChange={e => setF({ ...f, city: e.target.value })} style={{ width: "100%", padding: "11px 14px", border: "1px solid rgba(196,149,106,.25)", background: C.wh, fontFamily: C.fb, fontSize: 13.5, outline: "none" }}>
-                <option value="">{t("checkoutGovPh")}</option>{GOVS.map(g => <option key={g}>{g}</option>)}
-              </select>
-            </div>
-            <div style={{ borderTop: "1px solid rgba(196,149,106,.12)", paddingTop: 12, marginBottom: 14 }}>
-              {cart.map(i => <div key={i.id} style={{ display: "flex", justifyContent: "space-between", fontSize: 12, marginBottom: 5, color: C.dk, fontFamily: C.fb }}><span>{(lang==="ar"?i.nameAr:i.nameEn)||i.nameAr||i.name} × {i.qty}</span><span style={{fontFamily:C.fe}}>{i.price * i.qty} {t("egp")}</span></div>)}
-              <div style={{ display: "flex", justifyContent: "space-between", fontFamily: C.fe, fontSize: 17, borderTop: "1px solid rgba(196,149,106,.12)", paddingTop: 9, marginTop: 6, color: C.dk }}><span style={{fontFamily:C.fa,fontSize:14}}>{t("cartTotal")}</span><span>{tot + ship} {t("egp")}</span></div>
-            </div>
-            <div style={{ display: "flex", gap: 8 }}>
-              <Btn onClick={() => setStep(0)} style={{ padding: "13px 14px", background: "none", border: "1.5px solid rgba(42,31,14,.4)", color: C.dk, fontSize: 12, whiteSpace: "nowrap", fontFamily: C.fb }}>{t("checkoutBack")}</Btn>
-              <Btn onClick={submit} style={{ flex: 1, background: C.dk, color: C.cr, padding: 13, fontSize: 13, letterSpacing: "0.05em", fontFamily: C.fb, fontWeight: 600, border: "none" }}>{t("checkoutConfirm")}</Btn>
-            </div>
+            {/* ── Saved address cards (logged-in + has addresses) ── */}
+            {user && savedAddrs.length > 0 && !showNewAddrInCart ? (
+              <div>
+                {savedAddrs.map(addr => (
+                  <div key={addr.id} onClick={() => setSelAddrId(addr.id)}
+                    style={{ border:`1.5px solid ${selAddrId===addr.id?C.go:"rgba(196,149,106,.18)"}`,
+                      background: selAddrId===addr.id?"rgba(196,149,106,.06)":C.wh,
+                      padding:"14px 16px", marginBottom:10, cursor:"pointer", transition:"all .2s" }}>
+                    {addr.isDefault && <span style={{background:C.go,color:"#fff",fontSize:9,padding:"2px 9px",fontFamily:C.fb,letterSpacing:"0.05em",display:"inline-block",marginBottom:6}}>{t("addrDefaultBadge")}</span>}
+                    <div style={{fontFamily:C.fa,fontSize:14,fontWeight:600,color:C.dk,marginBottom:5}}>{addr.fullName}</div>
+                    <div style={{fontFamily:C.fb,fontSize:12,color:C.wa,lineHeight:1.75}}>
+                      {addr.street}{addr.building?`، ${addr.building}`:""}{addr.district?`، ${addr.district}`:""}<br/>
+                      {addr.city?`${addr.city}، `:""}{addr.governorate}<br/>
+                      🇪🇬 +20 {addr.phone}
+                    </div>
+                    {selAddrId === addr.id && (
+                      <Btn onClick={e => { e.stopPropagation(); submitWithAddr(addr); }}
+                        style={{width:"100%",marginTop:10,background:C.dk,color:C.cr,padding:"10px 0",fontSize:12,fontFamily:C.fb,fontWeight:600,border:"none",letterSpacing:"0.04em"}}>
+                        {t("addrUseThis")} ←
+                      </Btn>
+                    )}
+                  </div>
+                ))}
+                <Btn onClick={() => setShowNewAddrInCart(true)}
+                  style={{width:"100%",padding:11,background:"none",border:`1.5px dashed rgba(196,149,106,.4)`,color:C.go,fontFamily:C.fb,fontSize:12,marginBottom:10}}>
+                  {t("addrAddNewCheckout")}
+                </Btn>
+                <Btn onClick={() => setStep(0)}
+                  style={{width:"100%",padding:11,background:"none",border:"1.5px solid rgba(42,31,14,.25)",color:C.dk,fontSize:12,fontFamily:C.fb}}>
+                  {t("checkoutBack")}
+                </Btn>
+              </div>
+            ) : (
+              /* ── Manual checkout form (guest / no saved addrs / add new) ── */
+              <div>
+                <div style={{ background: C.cr2, padding:"9px 14px", marginBottom:14, borderInlineStart:`3px solid ${C.go}`, fontSize:12, color:C.wa, fontFamily:C.fb }}><b>{t("checkoutCashLabel")}</b></div>
+                {fld("n", t("checkoutName"), t("checkoutNamePh"))}
+                {fld("p", t("checkoutPhone"), t("checkoutPhonePh"))}
+                {fld("addr", t("checkoutAddr"), t("checkoutAddrPh"))}
+                <div style={{ marginBottom: 11 }}>
+                  <label style={{ display:"block", fontFamily:C.fe, fontSize:10, letterSpacing:"0.2em", color:C.mu, marginBottom:5, textTransform:"uppercase" }}>{t("checkoutGov")}</label>
+                  <select value={f.city} onChange={e => setF({...f, city:e.target.value})} style={{ width:"100%", padding:"11px 14px", border:"1px solid rgba(196,149,106,.25)", background:C.wh, fontFamily:C.fb, fontSize:13.5, outline:"none" }}>
+                    <option value="">{t("checkoutGovPh")}</option>{GOVS.map(g => <option key={g}>{g}</option>)}
+                  </select>
+                </div>
+                <div style={{ borderTop:"1px solid rgba(196,149,106,.12)", paddingTop:12, marginBottom:14 }}>
+                  {cart.map(i => <div key={i.id} style={{ display:"flex", justifyContent:"space-between", fontSize:12, marginBottom:5, color:C.dk, fontFamily:C.fb }}><span>{(lang==="ar"?i.nameAr:i.nameEn)||i.nameAr||i.name} × {i.qty}</span><span style={{fontFamily:C.fe}}>{i.price*i.qty} {t("egp")}</span></div>)}
+                  <div style={{ display:"flex", justifyContent:"space-between", fontFamily:C.fe, fontSize:17, borderTop:"1px solid rgba(196,149,106,.12)", paddingTop:9, marginTop:6, color:C.dk }}><span style={{fontFamily:C.fa,fontSize:14}}>{t("cartTotal")}</span><span>{tot+ship} {t("egp")}</span></div>
+                </div>
+                <div style={{ display:"flex", gap:8 }}>
+                  <Btn onClick={() => showNewAddrInCart ? setShowNewAddrInCart(false) : setStep(0)} style={{ padding:"13px 14px", background:"none", border:"1.5px solid rgba(42,31,14,.4)", color:C.dk, fontSize:12, whiteSpace:"nowrap", fontFamily:C.fb }}>{t("checkoutBack")}</Btn>
+                  <Btn onClick={submit} style={{ flex:1, background:C.dk, color:C.cr, padding:13, fontSize:13, letterSpacing:"0.05em", fontFamily:C.fb, fontWeight:600, border:"none" }}>{t("checkoutConfirm")}</Btn>
+                </div>
+              </div>
+            )}
           </div>
         ) : (
           <>
@@ -1764,6 +1901,259 @@ function Footer({ go }) {
   );
 }
 
+// ─── Address Form ─────────────────────────────────────────────────────────────
+function AddressForm({ initial = {}, userId, onSave, onCancel }) {
+  const { t, lang, dir } = useLang();
+  const mob = useMob();
+  const [saving, setSaving] = useState(false);
+  const [gpsStatus, setGpsStatus] = useState(""); // ""|"getting"|"done"|"error"
+  const blank = { fullName:"", phone:"", street:"", building:"", city:"", district:"",
+    governorate:"", landmark:"", type:"home", officeFri:false, officeSat:false,
+    lat:null, lng:null, isDefault:false };
+  const [f, setF] = useState({ ...blank, ...initial });
+  const set = (k, v) => setF(p => ({ ...p, [k]: v }));
+
+  const getGPS = () => {
+    if (!navigator.geolocation) { setGpsStatus("error"); return; }
+    setGpsStatus("getting");
+    navigator.geolocation.getCurrentPosition(
+      pos => { set("lat", pos.coords.latitude); set("lng", pos.coords.longitude); setGpsStatus("done"); },
+      () => setGpsStatus("error"),
+      { timeout: 10000 }
+    );
+  };
+
+  const save = async () => {
+    if (!f.fullName || !f.phone || !f.street || !f.governorate) {
+      alert(t("addrRequired")); return;
+    }
+    setSaving(true);
+    const addr = { ...f, id: initial.id || String(Date.now()), userId,
+      createdAt: initial.createdAt || new Date().toISOString() };
+    try {
+      const method = initial.id ? "PUT" : "POST";
+      const url = initial.id ? `/api/addresses/${initial.id}` : "/api/addresses";
+      await fetch(url, { method, headers:{"Content-Type":"application/json"}, body:JSON.stringify(addr) });
+    } catch {}
+    const stored = JSON.parse(localStorage.getItem(`nawra_addresses_${userId}`) || "[]");
+    if (initial.id) {
+      const idx = stored.findIndex(a => a.id === initial.id);
+      if (idx >= 0) stored[idx] = addr; else stored.push(addr);
+    } else {
+      if (addr.isDefault) stored.forEach(a => { a.isDefault = false; });
+      stored.push(addr);
+    }
+    localStorage.setItem(`nawra_addresses_${userId}`, JSON.stringify(stored));
+    setSaving(false);
+    onSave(addr);
+  };
+
+  const inp = (key, lbl, ph) => (
+    <div style={{ marginBottom:14 }}>
+      <label style={{ display:"block", fontFamily:C.fe, fontSize:10, letterSpacing:"0.16em", color:C.mu, marginBottom:5, textTransform:"uppercase" }}>{lbl}</label>
+      <input value={f[key]} onChange={e => set(key, e.target.value)} placeholder={ph}
+        style={{ width:"100%", padding:"11px 14px", border:"1px solid rgba(196,149,106,.25)", background:C.wh, fontFamily:C.fb, fontSize:13.5, outline:"none", boxSizing:"border-box" }}
+        onFocus={e=>e.target.style.borderColor=C.go} onBlur={e=>e.target.style.borderColor="rgba(196,149,106,.25)"} />
+    </div>
+  );
+
+  return (
+    <div style={{ direction: dir }}>
+      {/* Country — fixed */}
+      <div style={{ marginBottom:14 }}>
+        <label style={{ display:"block", fontFamily:C.fe, fontSize:10, letterSpacing:"0.16em", color:C.mu, marginBottom:5, textTransform:"uppercase" }}>{t("addrCountry")}</label>
+        <div style={{ padding:"11px 14px", border:"1px solid rgba(196,149,106,.15)", background:C.cr2, fontFamily:C.fb, fontSize:13.5, color:C.mu }}>{t("addrCountryVal")}</div>
+      </div>
+      {inp("fullName", t("addrFullName"), t("addrFullNamePh"))}
+      {/* Phone with flag prefix */}
+      <div style={{ marginBottom:14 }}>
+        <label style={{ display:"block", fontFamily:C.fe, fontSize:10, letterSpacing:"0.16em", color:C.mu, marginBottom:5, textTransform:"uppercase" }}>{t("addrPhone")}</label>
+        <div style={{ display:"flex" }}>
+          <div style={{ padding:"11px 12px", border:"1px solid rgba(196,149,106,.25)", borderInlineEnd:"none", background:C.cr2, fontFamily:C.fb, fontSize:13, color:C.dk, flexShrink:0 }}>🇪🇬 +20</div>
+          <input value={f.phone} onChange={e => set("phone", e.target.value.replace(/\D/g,""))} placeholder={t("addrPhonePh")} maxLength={10}
+            style={{ flex:1, padding:"11px 12px", border:"1px solid rgba(196,149,106,.25)", background:C.wh, fontFamily:C.fb, fontSize:13.5, outline:"none", boxSizing:"border-box" }}
+            onFocus={e=>e.target.style.borderColor=C.go} onBlur={e=>e.target.style.borderColor="rgba(196,149,106,.25)"} />
+        </div>
+      </div>
+      {inp("street", t("addrStreet"), t("addrStreetPh"))}
+      {inp("building", t("addrBuilding"), t("addrBuildingPh"))}
+      <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:12 }}>
+        <div>{inp("city", t("addrCity"), t("addrCityPh"))}</div>
+        <div>{inp("district", t("addrDistrict"), t("addrDistrictPh"))}</div>
+      </div>
+      {/* Governorate */}
+      <div style={{ marginBottom:14 }}>
+        <label style={{ display:"block", fontFamily:C.fe, fontSize:10, letterSpacing:"0.16em", color:C.mu, marginBottom:5, textTransform:"uppercase" }}>{t("addrGov")}</label>
+        <select value={f.governorate} onChange={e => set("governorate", e.target.value)}
+          style={{ width:"100%", padding:"11px 14px", border:"1px solid rgba(196,149,106,.25)", background:C.wh, fontFamily:C.fb, fontSize:13.5, outline:"none" }}
+          onFocus={e=>e.target.style.borderColor=C.go} onBlur={e=>e.target.style.borderColor="rgba(196,149,106,.25)"}>
+          <option value="">{t("addrGovPh")}</option>
+          {GOVS.map(g => <option key={g} value={g}>{g}</option>)}
+        </select>
+      </div>
+      {inp("landmark", t("addrLandmark"), t("addrLandmarkPh"))}
+      {/* Address type */}
+      <div style={{ marginBottom:14 }}>
+        <label style={{ display:"block", fontFamily:C.fe, fontSize:10, letterSpacing:"0.16em", color:C.mu, marginBottom:8, textTransform:"uppercase" }}>{t("addrType")}</label>
+        <div style={{ display:"flex", gap:10 }}>
+          {[["home",t("addrHome")],["office",t("addrOffice")]].map(([v,lbl]) => (
+            <label key={v} style={{ flex:1, display:"flex", alignItems:"center", justifyContent:"center", gap:8, cursor:"pointer", padding:"11px 0", border:`1.5px solid ${f.type===v?C.go:"rgba(196,149,106,.2)"}`, background:f.type===v?"rgba(196,149,106,.07)":C.wh, fontFamily:C.fb, fontSize:13 }}>
+              <input type="radio" name="addrType" value={v} checked={f.type===v} onChange={() => set("type",v)} style={{ accentColor:C.go }} />
+              {lbl}
+            </label>
+          ))}
+        </div>
+      </div>
+      {/* Office holiday checkboxes */}
+      {f.type === "office" && (
+        <div style={{ marginBottom:14, background:C.cr2, padding:"12px 16px", borderInlineStart:`3px solid ${C.go}` }}>
+          <div style={{ fontFamily:C.fb, fontSize:13, color:C.dk, marginBottom:10 }}>{t("addrOfficeHols")}</div>
+          <div style={{ display:"flex", gap:20 }}>
+            {[["officeFri",t("addrFriday")],["officeSat",t("addrSaturday")]].map(([k,lbl]) => (
+              <label key={k} style={{ display:"flex", alignItems:"center", gap:6, cursor:"pointer", fontFamily:C.fb, fontSize:13, color:C.dk }}>
+                <input type="checkbox" checked={f[k]} onChange={e=>set(k,e.target.checked)} style={{ accentColor:C.go }} /> {lbl}
+              </label>
+            ))}
+          </div>
+        </div>
+      )}
+      {/* GPS */}
+      <div style={{ marginBottom:14 }}>
+        <button onClick={getGPS} disabled={gpsStatus==="getting"}
+          style={{ width:"100%", padding:"11px 0", border:`1.5px solid ${gpsStatus==="done"?C.go:"rgba(196,149,106,.35)"}`, background:gpsStatus==="done"?"rgba(196,149,106,.07)":"none", color:gpsStatus==="done"?C.go:C.mu, fontFamily:C.fb, fontSize:13, cursor:gpsStatus==="getting"?"not-allowed":"pointer", display:"flex", alignItems:"center", justifyContent:"center", gap:8 }}>
+          {gpsStatus==="getting" ? t("addrGPSGetting") : gpsStatus==="done" ? t("addrGPSDone") : gpsStatus==="error" ? t("addrGPSError") : t("addrGPS")}
+        </button>
+        {f.lat && f.lng && <div style={{ fontSize:11, color:C.mu, fontFamily:C.fb, marginTop:5, textAlign:"center" }}>📍 {Number(f.lat).toFixed(5)}, {Number(f.lng).toFixed(5)}</div>}
+      </div>
+      {/* Default checkbox */}
+      <label style={{ display:"flex", alignItems:"center", gap:10, cursor:"pointer", marginBottom:20, fontFamily:C.fb, fontSize:13, color:C.dk }}>
+        <input type="checkbox" checked={f.isDefault} onChange={e=>set("isDefault",e.target.checked)} style={{ accentColor:C.go, width:16, height:16 }} />
+        {t("addrDefault")}
+      </label>
+      <div style={{ display:"flex", gap:10 }}>
+        {onCancel && <Btn onClick={onCancel} style={{ flex:1, padding:13, background:"none", border:"1.5px solid rgba(42,31,14,.3)", color:C.dk, fontFamily:C.fb, fontSize:13 }}>← {lang==="ar"?"رجوع":"Back"}</Btn>}
+        <Btn onClick={save} disabled={saving} style={{ flex:2, padding:13, background:C.dk, color:C.cr, border:`1.5px solid ${C.dk}`, fontFamily:C.fb, fontSize:13, fontWeight:600, letterSpacing:"0.05em" }}>
+          {saving ? t("addrSaving") : t("addrSave")}
+        </Btn>
+      </div>
+    </div>
+  );
+}
+
+// ─── My Addresses Page ─────────────────────────────────────────────────────────
+function MyAddresses({ go }) {
+  const { user } = useAuth();
+  const { t, dir } = useLang();
+  const mob = useMob();
+  const [addresses, setAddresses] = useState([]);
+  const [editAddr, setEditAddr] = useState(null); // null=list | "new" | addr-obj=edit
+  const [loading, setLoading] = useState(true);
+
+  if (!user) { go("#login"); return null; }
+
+  const load = async () => {
+    setLoading(true);
+    try {
+      const res = await fetch(`/api/addresses/${encodeURIComponent(user.email)}`);
+      if (res.ok) { setAddresses(await res.json()); setLoading(false); return; }
+    } catch {}
+    try { setAddresses(JSON.parse(localStorage.getItem(`nawra_addresses_${user.email}`) || "[]")); } catch {}
+    setLoading(false);
+  };
+  useEffect(() => { load(); }, []); // eslint-disable-line
+
+  const remove = async (id) => {
+    if (!window.confirm(t("addrConfirmDel"))) return;
+    try { await fetch(`/api/addresses/${id}`, { method:"DELETE" }); } catch {}
+    const updated = addresses.filter(a => a.id !== id);
+    setAddresses(updated);
+    localStorage.setItem(`nawra_addresses_${user.email}`, JSON.stringify(updated));
+  };
+
+  const setDef = async (id) => {
+    try {
+      await fetch(`/api/addresses/${id}/default`, { method:"PATCH",
+        headers:{"Content-Type":"application/json"}, body:JSON.stringify({ userId:user.email }) });
+    } catch {}
+    const updated = addresses.map(a => ({ ...a, isDefault: a.id === id }));
+    setAddresses(updated);
+    localStorage.setItem(`nawra_addresses_${user.email}`, JSON.stringify(updated));
+  };
+
+  if (editAddr) return (
+    <div style={{ direction:dir, minHeight:"80vh" }}>
+      <div style={{ background:C.cr2, padding:mob?"28px 20px":"40px 52px", borderBottom:"1px solid rgba(196,149,106,.1)" }}>
+        <h1 style={{ fontFamily:C.fa, fontSize:mob?22:30, fontWeight:600, color:C.dk }}>
+          {editAddr === "new" ? t("addrAddNew") : t("addrEdit")}
+        </h1>
+      </div>
+      <div style={{ maxWidth:600, margin:"0 auto", padding:mob?"20px":"40px 52px" }}>
+        <AddressForm
+          initial={editAddr === "new" ? {} : editAddr}
+          userId={user.email}
+          onSave={() => { setEditAddr(null); load(); }}
+          onCancel={() => setEditAddr(null)}
+        />
+      </div>
+    </div>
+  );
+
+  return (
+    <div style={{ direction:dir, minHeight:"80vh" }}>
+      <div style={{ background:C.cr2, padding:mob?"28px 20px":"40px 52px", borderBottom:"1px solid rgba(196,149,106,.1)" }}>
+        <div style={{ fontFamily:C.fe, fontSize:11, letterSpacing:"0.22em", color:C.go, textTransform:"uppercase", fontStyle:"italic", marginBottom:8 }}>My Account</div>
+        <h1 style={{ fontFamily:C.fa, fontSize:mob?24:32, fontWeight:600, color:C.dk }}>{t("addrPageTitle")}</h1>
+        <p style={{ color:C.mu, fontFamily:C.fb, fontSize:13, marginTop:4 }}>{t("addrPageSub")}</p>
+      </div>
+      <div style={{ maxWidth:1100, margin:"0 auto", padding:mob?"20px":"32px 52px" }}>
+        {loading ? (
+          <div style={{ textAlign:"center", padding:60, color:C.mu, fontFamily:C.fb }}>...</div>
+        ) : (
+          <div style={{ display:"grid", gridTemplateColumns:mob?"1fr":"repeat(auto-fill,minmax(300px,1fr))", gap:16 }}>
+            {/* Add new card */}
+            <div onClick={() => setEditAddr("new")}
+              style={{ border:"2px dashed rgba(196,149,106,.35)", padding:32, display:"flex", flexDirection:"column", alignItems:"center", justifyContent:"center", gap:12, cursor:"pointer", minHeight:180, transition:"border-color .2s" }}
+              onMouseEnter={e=>e.currentTarget.style.borderColor=C.go}
+              onMouseLeave={e=>e.currentTarget.style.borderColor="rgba(196,149,106,.35)"}>
+              <div style={{ fontSize:32, color:C.go }}>＋</div>
+              <div style={{ fontFamily:C.fa, fontSize:15, color:C.go, fontWeight:600 }}>{t("addrAddNew")}</div>
+            </div>
+            {addresses.map(addr => (
+              <div key={addr.id} style={{ background:C.wh, border:`1.5px solid ${addr.isDefault?C.go:"rgba(196,149,106,.15)"}`, padding:"20px 22px", position:"relative" }}>
+                {addr.isDefault && (
+                  <span style={{ position:"absolute", top:12, insetInlineEnd:12, background:C.go, color:"#fff", fontSize:9, padding:"3px 10px", fontFamily:C.fb, letterSpacing:"0.06em" }}>{t("addrDefaultBadge")}</span>
+                )}
+                <div style={{ fontFamily:C.fa, fontSize:15, fontWeight:600, color:C.dk, marginBottom:8 }}>{addr.fullName}</div>
+                <div style={{ fontFamily:C.fb, fontSize:13, color:C.wa, lineHeight:1.8 }}>
+                  {addr.street}{addr.building?`، ${addr.building}`:""}<br/>
+                  {addr.district?`${addr.district}، `:""}{addr.city?`${addr.city}، `:""}{addr.governorate}<br/>
+                  {addr.landmark && <span style={{ color:C.mu }}>📍 {addr.landmark}<br/></span>}
+                  🇪🇬 +20 {addr.phone}
+                  {addr.lat && <span style={{ display:"block", fontSize:11, color:C.mu, marginTop:3 }}>🗺 {Number(addr.lat).toFixed(4)}, {Number(addr.lng).toFixed(4)}</span>}
+                </div>
+                {addr.type === "office" && (addr.officeFri || addr.officeSat) && (
+                  <div style={{ fontSize:11, color:C.mu, fontFamily:C.fb, marginTop:4 }}>
+                    🏢 {[addr.officeFri && t("addrFriday"), addr.officeSat && t("addrSaturday")].filter(Boolean).join(" · ")}
+                  </div>
+                )}
+                <div style={{ display:"flex", gap:12, marginTop:14, paddingTop:12, borderTop:"1px solid rgba(196,149,106,.1)" }}>
+                  <span onClick={() => setEditAddr(addr)} style={{ cursor:"pointer", color:C.go, fontFamily:C.fb, fontSize:12, fontWeight:500 }}>{t("addrEdit")}</span>
+                  <span style={{ color:"rgba(196,149,106,.3)" }}>|</span>
+                  <span onClick={() => remove(addr.id)} style={{ cursor:"pointer", color:"#EF4444", fontFamily:C.fb, fontSize:12 }}>{t("addrRemove")}</span>
+                  {!addr.isDefault && <>
+                    <span style={{ color:"rgba(196,149,106,.3)" }}>|</span>
+                    <span onClick={() => setDef(addr.id)} style={{ cursor:"pointer", color:C.dk, fontFamily:C.fb, fontSize:12 }}>{t("addrSetDefault")}</span>
+                  </>}
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 // ─── App ──────────────────────────────────────────────────────────────────────
 // ─── My Orders Page ───────────────────────────────────────────────────────────
 function MyOrders({ go }) {
@@ -1862,8 +2252,9 @@ function AppInner() {
       case "#about":    return <About go={go} />;
       case "#contact":  return <Contact />;
       case "#shipping": return <Shipping />;
-      case "#myorders": return <MyOrders go={go} />;
-      default:          return <Home go={go} allProds={(prods&&prods.length)?prods:PRODS} />;
+      case "#myorders":  return <MyOrders go={go} />;
+      case "#addresses": return <MyAddresses go={go} />;
+      default:           return <Home go={go} allProds={(prods&&prods.length)?prods:PRODS} />;
     }
   };
 
