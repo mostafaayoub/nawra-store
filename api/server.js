@@ -111,7 +111,7 @@ function orderEmailHtml(order) {
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>تأكيد طلبك من نوّرة</title>
+  <title>تأكيد طلبك من نوّرَة</title>
 </head>
 <body style="margin:0; padding:0; background:#0d0d0d; font-family:'Segoe UI', Tahoma, Arial, sans-serif;">
   <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#0d0d0d; padding:32px 16px;">
@@ -120,7 +120,7 @@ function orderEmailHtml(order) {
 
         <!-- Brand header -->
         <tr><td align="center" style="padding:36px 20px 28px; border-bottom:1px solid rgba(201,169,110,.18);">
-          <div style="color:#c9a96e; font-size:42px; font-weight:400; letter-spacing:0.12em; font-family:'Times New Roman', serif;">نوّرة</div>
+          <div style="color:#c9a96e; font-size:42px; font-weight:400; letter-spacing:0.12em; font-family:'Times New Roman', serif;">نوّرَة</div>
           <div style="color:rgba(201,169,110,.6); font-size:11px; letter-spacing:0.3em; margin-top:6px;">SKINCARE&nbsp;&nbsp;E-SHOP</div>
         </td></tr>
 
@@ -128,7 +128,7 @@ function orderEmailHtml(order) {
         <tr><td align="center" style="padding:38px 20px 6px;">
           <div style="font-size:48px; line-height:1; margin-bottom:8px;">✅</div>
           <h2 style="margin:8px 0 0; color:#fff; font-size:22px; font-weight:500;">تم استلام طلبك بنجاح</h2>
-          <p style="color:rgba(255,255,255,.6); margin:10px 0 0; font-size:14px;">شكراً لاختيارك نوّرة 💕</p>
+          <p style="color:rgba(255,255,255,.6); margin:10px 0 0; font-size:14px;">شكراً لاختيارك نوّرَة 💕</p>
         </td></tr>
 
         <!-- Order # + date -->
@@ -188,14 +188,14 @@ function orderEmailHtml(order) {
         <!-- Thank you -->
         <tr><td align="center" style="padding:24px 28px 32px;">
           <p style="color:rgba(255,255,255,.65); font-size:14px; line-height:1.85; margin:0;">
-            شكراً لثقتك في <span style="color:#c9a96e; font-weight:600;">نوّرة</span><br/>
+            شكراً لثقتك في <span style="color:#c9a96e; font-weight:600;">نوّرَة</span><br/>
             نسعد بخدمتك دائماً ✨
           </p>
         </td></tr>
 
         <!-- Footer -->
         <tr><td align="center" style="padding:20px; background:#0d0d0d; color:rgba(255,255,255,.35); font-size:11px; letter-spacing:0.04em;">
-          © 2025 NAWRA SKINCARE — نوّرة للعناية بالبشرة<br/>
+          © 2025 NAWRA SKINCARE — نوّرَة للعناية بالبشرة<br/>
           <a href="https://nawra.ayoupstudio.tech" style="color:#c9a96e; text-decoration:none; margin-top:4px; display:inline-block;">nawra.ayoupstudio.tech</a>
         </td></tr>
 
@@ -214,9 +214,9 @@ async function sendOrderEmail(order) {
   }
   try {
     const info = await mailer.sendMail({
-      from: `"نوّرة Skincare" <${gmailUser}>`,
+      from: `"نوّرَة Skincare" <${gmailUser}>`,
       to:   order.userEmail,
-      subject: `✅ تم استلام طلبك من نوّرة #${order.id}`,
+      subject: `✅ تم استلام طلبك من نوّرَة #${order.id}`,
       html: orderEmailHtml(order)
     });
     console.log('[nawra-api] ✓ confirmation email sent to', order.userEmail, '|', info.messageId);
