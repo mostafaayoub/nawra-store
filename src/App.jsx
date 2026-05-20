@@ -915,10 +915,15 @@ function AdminDash({ go }) {
 
   useEffect(() => {
     refreshOrders();
+    // Same-tab: customer places order in cart sidebar
     window.addEventListener("nawra-new-order", refreshOrders);
+    // Cross-tab: customer in another browser tab saves order to localStorage
+    const onStorage = (e) => { if (e.key === "nawra_orders") refreshOrders(); };
+    window.addEventListener("storage", onStorage);
     const interval = setInterval(refreshOrders, 10000); // every 10 s
     return () => {
       window.removeEventListener("nawra-new-order", refreshOrders);
+      window.removeEventListener("storage", onStorage);
       clearInterval(interval);
     };
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -2045,7 +2050,15 @@ function AddressForm({ initial = {}, userId, onSave, onCancel }) {
           style={{ width:"100%", padding:"11px 0", border:`1.5px solid ${gpsStatus==="done"?C.go:"rgba(196,149,106,.35)"}`, background:gpsStatus==="done"?"rgba(196,149,106,.07)":"none", color:gpsStatus==="done"?C.go:C.mu, fontFamily:C.fb, fontSize:13, cursor:gpsStatus==="getting"?"not-allowed":"pointer", display:"flex", alignItems:"center", justifyContent:"center", gap:8 }}>
           {gpsStatus==="getting" ? t("addrGPSGetting") : gpsStatus==="done" ? t("addrGPSDone") : gpsStatus==="error" ? t("addrGPSError") : t("addrGPS")}
         </button>
-        {f.lat && f.lng && <div style={{ fontSize:11, color:C.mu, fontFamily:C.fb, marginTop:5, textAlign:"center" }}>📍 {Number(f.lat).toFixed(5)}, {Number(f.lng).toFixed(5)}</div>}
+        {f.lat && f.lng && (
+          <div style={{ fontSize:11, fontFamily:C.fb, marginTop:6, textAlign:"center" }}>
+            📍 {Number(f.lat).toFixed(5)}, {Number(f.lng).toFixed(5)}{" · "}
+            <a href={`https://www.google.com/maps?q=${f.lat},${f.lng}`} target="_blank" rel="noreferrer"
+              style={{ color:C.go, textDecoration:"none", fontWeight:500 }}>
+              {lang==="ar" ? "فتح في خرائط Google" : "View on Google Maps"}
+            </a>
+          </div>
+        )}
       </div>
       {/* Default checkbox */}
       <label style={{ display:"flex", alignItems:"center", gap:10, cursor:"pointer", marginBottom:20, fontFamily:C.fb, fontSize:13, color:C.dk }}>
@@ -2068,21 +2081,36 @@ function MyAddresses({ go }) {
   const { t, dir } = useLang();
   const mob = useMob();
   const [addresses, setAddresses] = useState([]);
-  const [editAddr, setEditAddr] = useState(null); // null=list | "new" | addr-obj=edit
+  const [editAddr, setEditAddr] = useState(null);
   const [loading, setLoading] = useState(true);
 
-  if (!user) { go("#login"); return null; }
-
-  const load = async () => {
+  // ─ ALL hooks run unconditionally before any conditional return ─────────────
+  useEffect(() => {
+    if (!user?.email) { go("#login"); return; }
     setLoading(true);
-    try {
-      const res = await fetch(`/api/addresses/${encodeURIComponent(user.email)}`);
-      if (res.ok) { setAddresses(await res.json()); setLoading(false); return; }
-    } catch {}
-    try { setAddresses(JSON.parse(localStorage.getItem(`nawra_addresses_${user.email}`) || "[]")); } catch {}
-    setLoading(false);
+    fetch(`/api/addresses/${encodeURIComponent(user.email)}`)
+      .then(r => r.ok ? r.json() : Promise.reject())
+      .then(data => { setAddresses(data); setLoading(false); })
+      .catch(() => {
+        try { setAddresses(JSON.parse(localStorage.getItem(`nawra_addresses_${user.email}`) || "[]")); } catch {}
+        setLoading(false);
+      });
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [user?.email]);
+
+  // Safe early return — all hooks above have already run
+  if (!user) return null;
+
+  const reload = () => {
+    setLoading(true);
+    fetch(`/api/addresses/${encodeURIComponent(user.email)}`)
+      .then(r => r.ok ? r.json() : Promise.reject())
+      .then(data => { setAddresses(data); setLoading(false); })
+      .catch(() => {
+        try { setAddresses(JSON.parse(localStorage.getItem(`nawra_addresses_${user.email}`) || "[]")); } catch {}
+        setLoading(false);
+      });
   };
-  useEffect(() => { load(); }, []); // eslint-disable-line
 
   const remove = async (id) => {
     if (!window.confirm(t("addrConfirmDel"))) return;
@@ -2113,7 +2141,7 @@ function MyAddresses({ go }) {
         <AddressForm
           initial={editAddr === "new" ? {} : editAddr}
           userId={user.email}
-          onSave={() => { setEditAddr(null); load(); }}
+          onSave={() => { setEditAddr(null); reload(); }}
           onCancel={() => setEditAddr(null)}
         />
       </div>
@@ -2132,7 +2160,6 @@ function MyAddresses({ go }) {
           <div style={{ textAlign:"center", padding:60, color:C.mu, fontFamily:C.fb }}>...</div>
         ) : (
           <div style={{ display:"grid", gridTemplateColumns:mob?"1fr":"repeat(auto-fill,minmax(300px,1fr))", gap:16 }}>
-            {/* Add new card */}
             <div onClick={() => setEditAddr("new")}
               style={{ border:"2px dashed rgba(196,149,106,.35)", padding:32, display:"flex", flexDirection:"column", alignItems:"center", justifyContent:"center", gap:12, cursor:"pointer", minHeight:180, transition:"border-color .2s" }}
               onMouseEnter={e=>e.currentTarget.style.borderColor=C.go}
@@ -2151,7 +2178,12 @@ function MyAddresses({ go }) {
                   {addr.district?`${addr.district}، `:""}{addr.city?`${addr.city}، `:""}{addr.governorate}<br/>
                   {addr.landmark && <span style={{ color:C.mu }}>📍 {addr.landmark}<br/></span>}
                   🇪🇬 +20 {addr.phone}
-                  {addr.lat && <span style={{ display:"block", fontSize:11, color:C.mu, marginTop:3 }}>🗺 {Number(addr.lat).toFixed(4)}, {Number(addr.lng).toFixed(4)}</span>}
+                  {addr.lat && addr.lng && (
+                    <a href={`https://www.google.com/maps?q=${addr.lat},${addr.lng}`} target="_blank" rel="noreferrer"
+                      style={{ display:"block", fontSize:11, color:C.go, marginTop:3, textDecoration:"none" }}>
+                      🗺 {Number(addr.lat).toFixed(4)}, {Number(addr.lng).toFixed(4)}
+                    </a>
+                  )}
                 </div>
                 {addr.type === "office" && (addr.officeFri || addr.officeSat) && (
                   <div style={{ fontSize:11, color:C.mu, fontFamily:C.fb, marginTop:4 }}>
@@ -2183,28 +2215,43 @@ function MyOrders({ go }) {
   const { t, dir } = useLang();
   const mob = useMob();
   const px = mob ? "16px" : "56px";
-
   const [orders, setOrders] = useState([]);
   const [ordersLoading, setOrdersLoading] = useState(true);
 
-  if (!user) { go("#login"); return null; }
-
-  // Load this user's orders from API, fall back to filtered localStorage
+  // ─ ALL hooks run unconditionally before any conditional return ─────────────
   useEffect(() => {
+    if (!user?.email) { go("#login"); return; }
+    let cancelled = false;
     const load = async () => {
       try {
         const res = await fetch(`/api/orders?userId=${encodeURIComponent(user.email)}`);
-        if (res.ok) { setOrders(await res.json()); setOrdersLoading(false); return; }
+        if (res.ok && !cancelled) { setOrders(await res.json()); setOrdersLoading(false); return; }
       } catch {}
-      try {
-        const all = JSON.parse(localStorage.getItem("nawra_orders") || "[]");
-        setOrders(all.filter(o => o.userEmail === user.email));
-      } catch {}
-      setOrdersLoading(false);
+      if (!cancelled) {
+        try {
+          const all = JSON.parse(localStorage.getItem("nawra_orders") || "[]");
+          setOrders(all.filter(o => o.userEmail === user.email));
+        } catch {}
+        setOrdersLoading(false);
+      }
     };
     load();
+    // Same-tab: order just placed
+    const onNew = () => { if (!cancelled) load(); };
+    window.addEventListener("nawra-new-order", onNew);
+    // Cross-tab: another tab/window saved to localStorage
+    const onStorage = (e) => { if (e.key === "nawra_orders" && !cancelled) load(); };
+    window.addEventListener("storage", onStorage);
+    return () => {
+      cancelled = true;
+      window.removeEventListener("nawra-new-order", onNew);
+      window.removeEventListener("storage", onStorage);
+    };
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [user.email]);
+  }, [user?.email]);
+
+  // Safe early return — all hooks above have already run
+  if (!user) return null;
 
   const statusColor = (s) => s === "مكتمل" ? { bg:"#D1FAE5", c:"#065F46" } : s === "ملغي" ? { bg:"#FEE2E2", c:"#DC2626" } : { bg:"#FEF3C7", c:"#92400E" };
 
