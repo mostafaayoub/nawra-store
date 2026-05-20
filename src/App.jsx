@@ -249,7 +249,12 @@ function AuthProvider({ children }) {
     localStorage.setItem("nawra_user", JSON.stringify(u2));
     setUser(u2); return { ok: true };
   };
-  const logout = () => { localStorage.removeItem("nawra_user"); setUser(null); };
+  const logout = () => {
+    localStorage.removeItem("nawra_user");
+    localStorage.removeItem("nawra_cart");
+    setUser(null);
+    window.dispatchEvent(new Event("nawra-logout"));
+  };
   return <AuthCtx.Provider value={{ user, login, register, logout }}>{children}</AuthCtx.Provider>;
 }
 
@@ -414,7 +419,17 @@ const GOVS = ["القاهرة","الجيزة","الإسكندرية","الشرق
 const Ctx = createContext(null);
 const useCart = () => useContext(Ctx);
 function CartProvider({ children }) {
-  const [cart, setCart] = useState([]);
+  // Persist across refreshes
+  const [cart, setCart] = useState(() => {
+    try { return JSON.parse(localStorage.getItem("nawra_cart") || "[]"); } catch { return []; }
+  });
+  useEffect(() => { localStorage.setItem("nawra_cart", JSON.stringify(cart)); }, [cart]);
+  // Clear cart when user logs out
+  useEffect(() => {
+    const onLogout = () => setCart([]);
+    window.addEventListener("nawra-logout", onLogout);
+    return () => window.removeEventListener("nawra-logout", onLogout);
+  }, []);
   const add = p => setCart(prev => { const ex = prev.find(i => i.id === p.id); return ex ? prev.map(i => i.id === p.id ? { ...i, qty: i.qty + 1 } : i) : [...prev, { ...p, qty: 1 }]; });
   const rem = id => setCart(prev => prev.filter(i => i.id !== id));
   const upd = (id, q) => q <= 0 ? rem(id) : setCart(prev => prev.map(i => i.id === id ? { ...i, qty: q } : i));
@@ -651,6 +666,7 @@ function CartSide({ open, close, go }) {
       id: Date.now(),
       date: new Date().toLocaleDateString("ar-EG"),
       name, phone, city, address, lat: lat||null, lng: lng||null,
+      userEmail: user?.email || null,
       items: cart.map(i => ({ name: i.nameAr || i.nameEn || i.name || "", qty: i.qty, price: i.price })),
       total: tot + ship, status: "جديد"
     };
@@ -900,13 +916,19 @@ function AdminDash({ go }) {
   useEffect(() => {
     refreshOrders();
     window.addEventListener("nawra-new-order", refreshOrders);
-    const interval = setInterval(refreshOrders, 30000);
+    const interval = setInterval(refreshOrders, 10000); // every 10 s
     return () => {
       window.removeEventListener("nawra-new-order", refreshOrders);
       clearInterval(interval);
     };
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // Also refresh immediately whenever the orders or overview tab is opened
+  useEffect(() => {
+    if (tab === "orders" || tab === "overview") refreshOrders();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tab]);
 
   const totalRev = orderList.reduce((s,o)=>s+(o.total||0),0);
   const totalOrders = orderList.length;
@@ -2162,10 +2184,28 @@ function MyOrders({ go }) {
   const mob = useMob();
   const px = mob ? "16px" : "56px";
 
+  const [orders, setOrders] = useState([]);
+  const [ordersLoading, setOrdersLoading] = useState(true);
+
   if (!user) { go("#login"); return null; }
 
-  const allOrders = (() => { try { return JSON.parse(localStorage.getItem("nawra_orders") || "[]"); } catch { return []; } })();
-  const orders = allOrders.filter(o => o.userEmail === user.email);
+  // Load this user's orders from API, fall back to filtered localStorage
+  useEffect(() => {
+    const load = async () => {
+      try {
+        const res = await fetch(`/api/orders?userId=${encodeURIComponent(user.email)}`);
+        if (res.ok) { setOrders(await res.json()); setOrdersLoading(false); return; }
+      } catch {}
+      try {
+        const all = JSON.parse(localStorage.getItem("nawra_orders") || "[]");
+        setOrders(all.filter(o => o.userEmail === user.email));
+      } catch {}
+      setOrdersLoading(false);
+    };
+    load();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [user.email]);
+
   const statusColor = (s) => s === "مكتمل" ? { bg:"#D1FAE5", c:"#065F46" } : s === "ملغي" ? { bg:"#FEE2E2", c:"#DC2626" } : { bg:"#FEF3C7", c:"#92400E" };
 
   return (
@@ -2177,7 +2217,9 @@ function MyOrders({ go }) {
         <p style={{ color: C.wa, fontFamily: C.fb, fontSize: 14 }}>{t("myOrdersHello")} <strong style={{ color: C.dk }}>{user.name}</strong> — {t("myOrdersSub")}</p>
       </div>
       <div style={{ maxWidth: 860, margin: "0 auto", padding: mob ? "20px 16px" : "32px 52px" }}>
-        {orders.length === 0 ? (
+        {ordersLoading ? (
+          <div style={{ textAlign:"center", padding:60, color:C.mu, fontFamily:C.fb }}>...</div>
+        ) : orders.length === 0 ? (
           <div style={{ background: C.wh, padding: "52px 28px", textAlign: "center", border: "1px solid rgba(196,149,106,.13)", boxShadow: "0 4px 20px rgba(196,149,106,.08)" }}>
             <div style={{ fontSize: 52, marginBottom: 16 }}>🛍️</div>
             <p style={{ fontFamily: C.fa, fontSize: 22, fontWeight: 600, color: C.dk, marginBottom: 10 }}>{t("myOrdersEmpty")}</p>
