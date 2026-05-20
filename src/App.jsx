@@ -713,13 +713,33 @@ function CartSide({ open, close, go }) {
           <span style={{ fontFamily: C.fa, fontSize: 20, fontWeight: 600, color: C.dk }}>
             {step === 1 && user && savedAddrs.length > 0 && !showNewAddrInCart
               ? t("addrSelectTitle")
-              : step === 1 ? t("checkoutTitle") : t("cartTitle")}
+              : step === 1 && user && (showNewAddrInCart || savedAddrs.length === 0)
+                ? t("addrAddNew")
+                : step === 1 ? t("checkoutTitle") : t("cartTitle")}
           </span>
           <Btn onClick={() => { close(); setStep(0); }} style={{ background: "none", fontSize: 20, color: C.mu, padding: 0, border: "none" }}>✕</Btn>
         </div>
         {step === 1 ? (
           <div style={{ flex: 1, overflowY: "auto", padding: "16px 20px" }}>
-            {/* ── Saved address cards (logged-in + has addresses) ── */}
+            {/* COD banner — shown in all checkout states */}
+            <div style={{ background: C.cr2, padding:"9px 14px", marginBottom:14, borderInlineStart:`3px solid ${C.go}`, fontSize:12, color:C.wa, fontFamily:C.fb }}>
+              <b>{t("checkoutCashLabel")}</b>
+            </div>
+            {/* Order summary — shown in all checkout states */}
+            <div style={{ marginBottom:16, padding:"12px 14px", background:C.wh, border:"1px solid rgba(196,149,106,.13)" }}>
+              {cart.map(i => (
+                <div key={i.id} style={{ display:"flex", justifyContent:"space-between", fontSize:12, marginBottom:5, color:C.dk, fontFamily:C.fb }}>
+                  <span>{(lang==="ar"?i.nameAr:i.nameEn)||i.nameAr||i.name} × {i.qty}</span>
+                  <span style={{fontFamily:C.fe}}>{i.price*i.qty} {t("egp")}</span>
+                </div>
+              ))}
+              <div style={{ display:"flex", justifyContent:"space-between", fontFamily:C.fe, fontSize:15, borderTop:"1px solid rgba(196,149,106,.12)", paddingTop:8, marginTop:6, color:C.dk, fontWeight:500 }}>
+                <span style={{fontFamily:C.fa,fontSize:13}}>{t("cartTotal")}</span>
+                <span>{tot+ship} {t("egp")}</span>
+              </div>
+            </div>
+
+            {/* CASE 1 — Logged-in + has saved addresses + not adding new ─ pick one */}
             {user && savedAddrs.length > 0 && !showNewAddrInCart ? (
               <div>
                 {savedAddrs.map(addr => (
@@ -751,10 +771,26 @@ function CartSide({ open, close, go }) {
                   {t("checkoutBack")}
                 </Btn>
               </div>
-            ) : (
-              /* ── Manual checkout form (guest / no saved addrs / add new) ── */
+            ) : user ? (
+              /* CASE 2 — Logged-in but no saved addresses OR clicked "add new"
+                  ─── render the FULL AddressForm (same UI as #addresses page).
+                  Saving the form both persists it (so it appears in My Addresses)
+                  AND places this order in one action. */
               <div>
-                <div style={{ background: C.cr2, padding:"9px 14px", marginBottom:14, borderInlineStart:`3px solid ${C.go}`, fontSize:12, color:C.wa, fontFamily:C.fb }}><b>{t("checkoutCashLabel")}</b></div>
+                <AddressForm
+                  userId={user.email}
+                  submitLabel={t("checkoutConfirm")}
+                  onSave={(addr) => submitWithAddr(addr)}
+                  onCancel={() => {
+                    if (savedAddrs.length > 0) setShowNewAddrInCart(false);
+                    else setStep(0);
+                  }}
+                />
+              </div>
+            ) : (
+              /* CASE 3 — Guest (not logged-in) ─ simple inline form,
+                  since they can't save addresses anyway */
+              <div>
                 {fld("n", t("checkoutName"), t("checkoutNamePh"))}
                 {fld("p", t("checkoutPhone"), t("checkoutPhonePh"))}
                 {fld("addr", t("checkoutAddr"), t("checkoutAddrPh"))}
@@ -764,12 +800,8 @@ function CartSide({ open, close, go }) {
                     <option value="">{t("checkoutGovPh")}</option>{GOVS.map(g => <option key={g}>{g}</option>)}
                   </select>
                 </div>
-                <div style={{ borderTop:"1px solid rgba(196,149,106,.12)", paddingTop:12, marginBottom:14 }}>
-                  {cart.map(i => <div key={i.id} style={{ display:"flex", justifyContent:"space-between", fontSize:12, marginBottom:5, color:C.dk, fontFamily:C.fb }}><span>{(lang==="ar"?i.nameAr:i.nameEn)||i.nameAr||i.name} × {i.qty}</span><span style={{fontFamily:C.fe}}>{i.price*i.qty} {t("egp")}</span></div>)}
-                  <div style={{ display:"flex", justifyContent:"space-between", fontFamily:C.fe, fontSize:17, borderTop:"1px solid rgba(196,149,106,.12)", paddingTop:9, marginTop:6, color:C.dk }}><span style={{fontFamily:C.fa,fontSize:14}}>{t("cartTotal")}</span><span>{tot+ship} {t("egp")}</span></div>
-                </div>
                 <div style={{ display:"flex", gap:8 }}>
-                  <Btn onClick={() => showNewAddrInCart ? setShowNewAddrInCart(false) : setStep(0)} style={{ padding:"13px 14px", background:"none", border:"1.5px solid rgba(42,31,14,.4)", color:C.dk, fontSize:12, whiteSpace:"nowrap", fontFamily:C.fb }}>{t("checkoutBack")}</Btn>
+                  <Btn onClick={() => setStep(0)} style={{ padding:"13px 14px", background:"none", border:"1.5px solid rgba(42,31,14,.4)", color:C.dk, fontSize:12, whiteSpace:"nowrap", fontFamily:C.fb }}>{t("checkoutBack")}</Btn>
                   <Btn onClick={submit} style={{ flex:1, background:C.dk, color:C.cr, padding:13, fontSize:13, letterSpacing:"0.05em", fontFamily:C.fb, fontWeight:600, border:"none" }}>{t("checkoutConfirm")}</Btn>
                 </div>
               </div>
@@ -1929,7 +1961,7 @@ function Footer({ go }) {
 }
 
 // ─── Address Form ─────────────────────────────────────────────────────────────
-function AddressForm({ initial = {}, userId, onSave, onCancel }) {
+function AddressForm({ initial = {}, userId, onSave, onCancel, submitLabel }) {
   const { t, lang, dir } = useLang();
   const mob = useMob();
   const [saving, setSaving] = useState(false);
@@ -2068,7 +2100,7 @@ function AddressForm({ initial = {}, userId, onSave, onCancel }) {
       <div style={{ display:"flex", gap:10 }}>
         {onCancel && <Btn onClick={onCancel} style={{ flex:1, padding:13, background:"none", border:"1.5px solid rgba(42,31,14,.3)", color:C.dk, fontFamily:C.fb, fontSize:13 }}>← {lang==="ar"?"رجوع":"Back"}</Btn>}
         <Btn onClick={save} disabled={saving} style={{ flex:2, padding:13, background:C.dk, color:C.cr, border:`1.5px solid ${C.dk}`, fontFamily:C.fb, fontSize:13, fontWeight:600, letterSpacing:"0.05em" }}>
-          {saving ? t("addrSaving") : t("addrSave")}
+          {saving ? t("addrSaving") : (submitLabel || t("addrSave"))}
         </Btn>
       </div>
     </div>
