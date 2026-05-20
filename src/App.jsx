@@ -198,8 +198,16 @@ function ProdsProvider({ children, initialProds }) {
   const [prods, setProds] = useState(() => {
     try {
       const saved = JSON.parse(localStorage.getItem(PRODS_KEY));
-      return saved && saved.length ? saved : initialProds;
-    } catch { return initialProds; }
+      if (saved && saved.length) {
+        // Backfill any missing translated fields (nameEn, descEn, detEn, useEn, img…)
+        // from the fresh PRODS defaults, while keeping admin edits (price, stock, etc.)
+        return saved.map(s => {
+          const fresh = (initialProds || []).find(p => p.id === s.id);
+          return fresh ? { ...fresh, ...s } : s;
+        });
+      }
+    } catch {}
+    return initialProds;
   });
   const save = (p) => { setProds(p); localStorage.setItem(PRODS_KEY, JSON.stringify(p)); };
   const addProd = (p) => save([...prods, { ...p, id: Date.now(), stock: parseInt(p.stock)||10 }]);
@@ -418,11 +426,13 @@ function Card({ p, go }) {
         cursor: "pointer"
       }}>
       <div onClick={() => go(`#product-${p.id}`)} style={{
-        height: mob ? 220 : 268, background: p.bg, position: "relative", overflow: "hidden",
-        display: "flex", alignItems: "center", justifyContent: "center"
+        height: mob ? 220 : 268, background: p.bg, position: "relative", overflow: "hidden"
       }}>
-        {/* Product image */}
-        <img src={p.img} alt={name} style={{width:"100%", height:"100%", objectFit:"cover"}} />
+        {/* Product image — absolute so it always fills regardless of parent display mode */}
+        <img src={p.img} alt={name} style={{
+          position:"absolute", inset:0, width:"100%", height:"100%",
+          objectFit:"cover", display:"block"
+        }} />
         {/* Badges */}
         {badge && <span style={{ position: "absolute", top: 10, right: 10, background: C.dk, color: C.cr, fontSize: 9, padding: "3px 9px", letterSpacing: "0.08em", fontFamily: C.fb, zIndex: 2 }}>{badge}</span>}
         {p.stock <= 3 && p.stock > 0 && <span style={{ position: "absolute", top: 10, left: 10, background: "#EF4444", color: "white", fontSize: 9, padding: "3px 8px", fontFamily: C.fb, zIndex: 2 }}>{t("stockLow")} {p.stock} {t("stockLowUnit")}</span>}
@@ -553,6 +563,8 @@ function CartSide({ open, close, go }) {
     };
     const orders = JSON.parse(localStorage.getItem("nawra_orders")||"[]");
     localStorage.setItem("nawra_orders", JSON.stringify([order, ...orders]));
+    console.log("[Nawra] Order saved:", order, "| total in storage:", orders.length + 1);
+    window.dispatchEvent(new CustomEvent("nawra-new-order", { detail: order }));
     clr(); setStep(2);
   };
 
@@ -716,9 +728,19 @@ function AdminDash({ go }) {
   const [editId, setEditId] = useState(null);
   const [newP, setNewP] = useState({ name:"", brand:"", desc:"", price:"", stock:"10", icon:"✨", badge:"", bg:"linear-gradient(135deg,#F5EBE8,#E8D5C4)" });
   const [delConfirm, setDelConfirm] = useState(null);
-  const orders = (() => { try { return JSON.parse(localStorage.getItem("nawra_orders")||"[]"); } catch { return []; } })();
-  const [orderList, setOrderList] = useState(orders);
+  const readOrders = () => { try { return JSON.parse(localStorage.getItem("nawra_orders")||"[]"); } catch { return []; } };
+  const [orderList, setOrderList] = useState(readOrders);
   const [statusEdit, setStatusEdit] = useState({});
+
+  // Refresh whenever a new order is placed (same-tab event) or the tab is opened
+  useEffect(() => {
+    const refresh = () => setOrderList(readOrders());
+    window.addEventListener("nawra-new-order", refresh);
+    // Also refresh when switching to the orders/overview tab
+    refresh();
+    return () => window.removeEventListener("nawra-new-order", refresh);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tab]);
 
   const totalRev = orderList.reduce((s,o)=>s+(o.total||0),0);
   const totalOrders = orderList.length;
