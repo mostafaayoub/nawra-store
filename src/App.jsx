@@ -100,6 +100,26 @@ const TR = {
     addrNoAddresses:"مفيش عناوين محفوظة",
     addrNoAddressesSub:"أضيفي عنوانك الأول لتسريع عملية الشراء",
     addrRequired:"من فضلك اكملي الحقول الإلزامية",
+    // ── Order timeline + detail ─────────────────────────────────────────────
+    timelineReceived:"تم الاستلام",
+    timelinePreparing:"قيد التجهيز",
+    timelineShipped:"تم الشحن",
+    timelineDelivered:"تم التسليم",
+    timelineCancelled:"تم إلغاء الطلب",
+    detailTitle:"تفاصيل الطلب",
+    detailCustomer:"معلومات العميل",
+    detailAddress:"عنوان التوصيل",
+    detailOrderInfo:"معلومات الطلب",
+    detailItems:"المنتجات",
+    detailUpdateStatus:"تحديث الحالة",
+    detailEmail:"البريد",
+    detailPhone:"الهاتف",
+    detailName:"الاسم",
+    detailDate:"التاريخ",
+    detailStatus:"الحالة",
+    detailTotal:"الإجمالي",
+    detailOpenMap:"فتح في خرائط Google",
+    detailViewBtn:"عرض التفاصيل",
   },
   en: {
     navHome:"Home", navProducts:"Products", navAbout:"About Nawra", navContact:"Contact", navShipping:"Shipping & Returns",
@@ -198,6 +218,26 @@ const TR = {
     addrNoAddresses:"No saved addresses",
     addrNoAddressesSub:"Add your first address to speed up checkout",
     addrRequired:"Please fill in all required fields",
+    // ── Order timeline + detail ─────────────────────────────────────────────
+    timelineReceived:"Order received",
+    timelinePreparing:"Preparing",
+    timelineShipped:"Shipped",
+    timelineDelivered:"Delivered",
+    timelineCancelled:"Order cancelled",
+    detailTitle:"Order details",
+    detailCustomer:"Customer info",
+    detailAddress:"Delivery address",
+    detailOrderInfo:"Order info",
+    detailItems:"Items",
+    detailUpdateStatus:"Update status",
+    detailEmail:"Email",
+    detailPhone:"Phone",
+    detailName:"Name",
+    detailDate:"Date",
+    detailStatus:"Status",
+    detailTotal:"Total",
+    detailOpenMap:"Open in Google Maps",
+    detailViewBtn:"View details",
   }
 };
 
@@ -923,6 +963,7 @@ function LoginPage({ go }) {
 // ─── Admin Dashboard ──────────────────────────────────────────────────────────
 function AdminDash({ go }) {
   const { prods, addProd, delProd, editProd } = useProds();
+  const { t } = useLang();
   const mob = useMob();
   const [tab, setTab] = useState("overview");
   const [showAdd, setShowAdd] = useState(false);
@@ -1015,12 +1056,15 @@ function AdminDash({ go }) {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ status })
       });
-    } catch {
-      // Fallback: persist in localStorage
+    } catch {}
+    // ALWAYS mirror to localStorage — fires the "storage" event in any other
+    // open tab/window, which both this admin's other tabs AND the customer's
+    // MyOrders page listen for. Real-time cross-tab status updates.
+    try {
       const orders = JSON.parse(localStorage.getItem("nawra_orders") || "[]");
       localStorage.setItem("nawra_orders",
         JSON.stringify(orders.map(o => o.id === id ? { ...o, status } : o)));
-    }
+    } catch {}
   };
 
   const statCard = (label, value, color="#2A1F0E") => (
@@ -1030,7 +1074,28 @@ function AdminDash({ go }) {
     </div>
   );
 
-  const allRegisteredUsers = (() => { try { return JSON.parse(localStorage.getItem("nawra_users") || "[]"); } catch { return []; } })();
+  // Detail modal state — opened by clicking any order card
+  const [detailOrderId, setDetailOrderId] = useState(null);
+  const detailOrder = detailOrderId ? orderList.find(o => o.id === detailOrderId) : null;
+
+  // Customers — fetched from /api/users (single source of truth: SQLite)
+  const [allUsers, setAllUsers] = useState([]);
+  const loadUsers = async () => {
+    try {
+      const res = await fetch("/api/users");
+      if (res.ok) { setAllUsers(await res.json()); return; }
+    } catch {}
+    // Fallback: old localStorage user list, so the page still works offline
+    try {
+      const local = JSON.parse(localStorage.getItem("nawra_users") || "[]");
+      setAllUsers(local.map(u => ({
+        email: u.email, name: u.name, phone: u.phone || null,
+        firstOrder: u.registeredAt || null, lastOrder: u.registeredAt || null,
+        totalOrders: 0, totalSpent: 0
+      })));
+    } catch {}
+  };
+  useEffect(() => { loadUsers(); }, [orderList.length]); // eslint-disable-line
   const tabs = [["overview","📊 نظرة عامة"],["products","📦 المنتجات"],["orders","🧾 الطلبات"],["customers","👥 العملاء"]];
 
   return (
@@ -1184,9 +1249,12 @@ function AdminDash({ go }) {
                 <p>مفيش طلبات لحد دلوقتي</p>
               </div>
             ) : orderList.map(o=>(
-              <div key={o.id} style={{background:C.wh,padding:mob?"14px":"18px",marginBottom:10,boxShadow:"0 2px 6px rgba(0,0,0,.06)"}}>
+              <div key={o.id} style={{background:C.wh,padding:mob?"14px":"18px",marginBottom:10,boxShadow:"0 2px 6px rgba(0,0,0,.06)",cursor:"pointer",transition:"box-shadow .2s"}}
+                onClick={()=>setDetailOrderId(o.id)}
+                onMouseEnter={e=>e.currentTarget.style.boxShadow="0 4px 14px rgba(196,149,106,.18)"}
+                onMouseLeave={e=>e.currentTarget.style.boxShadow="0 2px 6px rgba(0,0,0,.06)"}>
                 <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",flexWrap:"wrap",gap:8}}>
-                  <div>
+                  <div style={{flex:1,minWidth:0}}>
                     <div style={{fontSize:15,color:C.dk,fontFamily:C.fb,fontWeight:500}}>{o.name}</div>
                     <div style={{fontSize:12,color:C.mu,fontFamily:C.fb,marginTop:3}}>{o.phone} | {o.city} | {o.date}</div>
                     <div style={{fontSize:12,color:C.mu,fontFamily:C.fb,marginTop:2}}>{o.address}</div>
@@ -1196,72 +1264,73 @@ function AdminDash({ go }) {
                       ))}
                     </div>
                   </div>
-                  <div style={{textAlign:"left"}}>
+                  <div style={{textAlign:"left",flexShrink:0}}>
                     <div style={{fontFamily:C.fa,fontSize:18,color:C.dk}}>{o.total||0} جنيه</div>
-                    <div style={{marginTop:6}}>
-                      {statusEdit[o.id] ? (
-                        <div style={{display:"flex",gap:4,flexWrap:"wrap"}}>
-                          {["جديد","قيد التجهيز","تم الشحن","مكتمل","ملغي"].map(s=>(
-                            <button key={s} onClick={()=>updateOrderStatus(o.id,s)} style={{padding:"4px 8px",background:o.status===s?C.dk:"none",color:o.status===s?C.cr:C.dk,border:`1px solid ${C.dk}`,cursor:"pointer",fontFamily:C.fb,fontSize:10}}>{s}</button>
-                          ))}
-                        </div>
-                      ) : (
-                        <div style={{display:"flex",gap:6,alignItems:"center"}}>
-                          <span style={{fontSize:11,padding:"3px 10px",background:o.status==="مكتمل"?"#D1FAE5":o.status==="ملغي"?"#FEE2E2":"#FEF3C7",color:o.status==="مكتمل"?"#065F46":o.status==="ملغي"?"#DC2626":"#92400E",fontFamily:C.fb}}>{o.status}</span>
-                          <button onClick={()=>setStatusEdit({...statusEdit,[o.id]:true})} style={{background:"none",border:"1px solid rgba(0,0,0,.15)",padding:"3px 8px",cursor:"pointer",fontSize:10,color:C.mu,fontFamily:C.fb}}>تغيير</button>
-                        </div>
-                      )}
+                    <div style={{marginTop:6,display:"flex",gap:6,alignItems:"center",flexWrap:"wrap",justifyContent:"flex-end"}}>
+                      <span style={{fontSize:11,padding:"3px 10px",background:o.status==="مكتمل"?"#D1FAE5":o.status==="ملغي"?"#FEE2E2":"#FEF3C7",color:o.status==="مكتمل"?"#065F46":o.status==="ملغي"?"#DC2626":"#92400E",fontFamily:C.fb}}>{o.status}</span>
+                      <button onClick={(e)=>{e.stopPropagation();setDetailOrderId(o.id);}}
+                        style={{background:C.go,color:"#fff",border:"none",padding:"4px 11px",cursor:"pointer",fontSize:11,fontFamily:C.fb,letterSpacing:".04em"}}>
+                        {t("detailViewBtn")} →
+                      </button>
                     </div>
                   </div>
                 </div>
               </div>
             ))}
+            <OrderDetailModal
+              order={detailOrder}
+              onClose={()=>setDetailOrderId(null)}
+              onStatusChange={(id, status)=>updateOrderStatus(id, status)}
+            />
           </div>
         )}
 
         {/* CUSTOMERS */}
         {tab==="customers" && (
           <div>
-            <h3 style={{fontFamily:C.fa,fontSize:18,fontWeight:600,color:C.dk,marginBottom:16}}>العملاء المسجلون ({allRegisteredUsers.length})</h3>
-            {allRegisteredUsers.length===0 ? (
+            <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:16}}>
+              <h3 style={{fontFamily:C.fa,fontSize:18,fontWeight:600,color:C.dk,margin:0}}>العملاء ({allUsers.length})</h3>
+              <button onClick={loadUsers}
+                style={{background:C.go,color:"#fff",border:"none",padding:"7px 16px",cursor:"pointer",fontFamily:C.fb,fontSize:12,borderRadius:4}}>
+                🔄 تحديث
+              </button>
+            </div>
+            {allUsers.length===0 ? (
               <div style={{background:C.wh,padding:"40px",textAlign:"center",color:C.mu,fontFamily:C.fb,boxShadow:"0 2px 8px rgba(0,0,0,.06)"}}>
                 <div style={{fontSize:40,marginBottom:12}}>👥</div>
-                <p>مفيش عملاء مسجلين لحد دلوقتي</p>
+                <p>مفيش عملاء لحد دلوقتي</p>
               </div>
             ) : (
               <div style={{background:C.wh,boxShadow:"0 2px 8px rgba(0,0,0,.06)",overflowX:"auto"}}>
                 <table style={{width:"100%",borderCollapse:"collapse",direction:"rtl",fontFamily:C.fb}}>
                   <thead>
                     <tr style={{background:C.bl,borderBottom:`2px solid rgba(184,150,62,.2)`}}>
-                      {["#","الاسم","البريد الإلكتروني","تاريخ التسجيل","عدد الطلبات","إجمالي الإنفاق"].map(h=>(
-                        <th key={h} style={{padding:mob?"10px 10px":"12px 16px",textAlign:"right",fontSize:11,letterSpacing:1,color:C.mu,fontWeight:500}}>{h}</th>
+                      {["#","الاسم","البريد","الهاتف","آخر طلب","عدد الطلبات","إجمالي الإنفاق"].map(h=>(
+                        <th key={h} style={{padding:mob?"10px 10px":"12px 16px",textAlign:"right",fontSize:11,letterSpacing:1,color:C.mu,fontWeight:500,whiteSpace:"nowrap"}}>{h}</th>
                       ))}
                     </tr>
                   </thead>
                   <tbody>
-                    {allRegisteredUsers.map((u,i)=>{
-                      const userOrders = orderList.filter(o=>o.userEmail===u.email);
-                      const totalSpent = userOrders.reduce((s,o)=>s+(o.total||0),0);
-                      return (
-                        <tr key={u.email} style={{borderBottom:"1px solid rgba(0,0,0,.06)",background:i%2===0?C.wh:C.cr}}>
-                          <td style={{padding:mob?"10px 10px":"12px 16px",fontSize:12,color:C.mu}}>{i+1}</td>
-                          <td style={{padding:mob?"10px 10px":"12px 16px"}}>
-                            <div style={{display:"flex",alignItems:"center",gap:8}}>
-                              <div style={{width:32,height:32,borderRadius:"50%",background:C.bl,display:"flex",alignItems:"center",justifyContent:"center",fontSize:14,color:C.go,fontWeight:600,flexShrink:0}}>{u.name[0]}</div>
-                              <span style={{fontSize:14,color:C.dk}}>{u.name}</span>
-                            </div>
-                          </td>
-                          <td style={{padding:mob?"10px 10px":"12px 16px",fontSize:13,color:C.mu}}>{u.email}</td>
-                          <td style={{padding:mob?"10px 10px":"12px 16px",fontSize:12,color:C.mu}}>{u.registeredAt||"—"}</td>
-                          <td style={{padding:mob?"10px 10px":"12px 16px",textAlign:"center"}}>
-                            <span style={{background:userOrders.length>0?"#D1FAE5":"#F3F4F6",color:userOrders.length>0?"#065F46":"#6B7280",fontSize:12,padding:"2px 10px",borderRadius:10}}>{userOrders.length}</span>
-                          </td>
-                          <td style={{padding:mob?"10px 10px":"12px 16px"}}>
-                            <span style={{fontFamily:C.fa,fontSize:15,color:C.dk}}>{totalSpent.toLocaleString()} <span style={{fontSize:11,color:C.mu,fontFamily:"sans-serif"}}>جنيه</span></span>
-                          </td>
-                        </tr>
-                      );
-                    })}
+                    {allUsers.map((u,i)=>(
+                      <tr key={u.email} style={{borderBottom:"1px solid rgba(0,0,0,.06)",background:i%2===0?C.wh:C.cr}}>
+                        <td style={{padding:mob?"10px 10px":"12px 16px",fontSize:12,color:C.mu}}>{i+1}</td>
+                        <td style={{padding:mob?"10px 10px":"12px 16px"}}>
+                          <div style={{display:"flex",alignItems:"center",gap:8}}>
+                            <div style={{width:32,height:32,borderRadius:"50%",background:C.bl,display:"flex",alignItems:"center",justifyContent:"center",fontSize:14,color:C.go,fontWeight:600,flexShrink:0}}>{(u.name||u.email||"?")[0].toUpperCase()}</div>
+                            <span style={{fontSize:14,color:C.dk}}>{u.name||"—"}</span>
+                          </div>
+                        </td>
+                        <td style={{padding:mob?"10px 10px":"12px 16px",fontSize:13,color:C.mu}}>{u.email}</td>
+                        <td style={{padding:mob?"10px 10px":"12px 16px",fontSize:13,color:C.mu,fontFamily:"monospace"}}>{u.phone||"—"}</td>
+                        <td style={{padding:mob?"10px 10px":"12px 16px",fontSize:12,color:C.mu,whiteSpace:"nowrap"}}>{u.lastOrder ? new Date(u.lastOrder).toLocaleDateString("ar-EG") : "—"}</td>
+                        <td style={{padding:mob?"10px 10px":"12px 16px",textAlign:"center"}}>
+                          <span style={{background:u.totalOrders>0?"#D1FAE5":"#F3F4F6",color:u.totalOrders>0?"#065F46":"#6B7280",fontSize:12,padding:"2px 10px",borderRadius:10}}>{u.totalOrders||0}</span>
+                        </td>
+                        <td style={{padding:mob?"10px 10px":"12px 16px",whiteSpace:"nowrap"}}>
+                          <span style={{fontFamily:C.fa,fontSize:15,color:C.dk}}>{(u.totalSpent||0).toLocaleString()} <span style={{fontSize:11,color:C.mu,fontFamily:"sans-serif"}}>جنيه</span></span>
+                        </td>
+                      </tr>
+                    ))}
                   </tbody>
                 </table>
               </div>
@@ -1960,6 +2029,152 @@ function Footer({ go }) {
   );
 }
 
+// ─── Order Timeline (4-step status indicator) ─────────────────────────────────
+const ORDER_STATUSES = ["جديد", "قيد التجهيز", "تم الشحن", "مكتمل", "ملغي"];
+function OrderTimeline({ status }) {
+  const { t, lang } = useLang();
+  const STEPS = [
+    { key: "جديد",        label: t("timelineReceived"),  icon: "🟡" },
+    { key: "قيد التجهيز", label: t("timelinePreparing"), icon: "🔵" },
+    { key: "تم الشحن",    label: t("timelineShipped"),   icon: "🚚" },
+    { key: "مكتمل",       label: t("timelineDelivered"), icon: "✅" },
+  ];
+  if (status === "ملغي") {
+    return (
+      <div style={{ marginTop:14, padding:"12px 14px", background:"#FEE2E2", color:"#DC2626", fontFamily:C.fb, fontSize:13, borderInlineStart:"3px solid #DC2626" }}>
+        ❌ {t("timelineCancelled")}
+      </div>
+    );
+  }
+  const idx = STEPS.findIndex(s => s.key === status);
+  const cur = idx === -1 ? 0 : idx;
+  return (
+    <div style={{ position:"relative", marginTop:14, paddingTop:18, paddingBottom:6, borderTop:"1px solid rgba(196,149,106,.1)" }}>
+      {/* Connecting line — background */}
+      <div style={{ position:"absolute", top:36, insetInlineStart:"12.5%", insetInlineEnd:"12.5%", height:2, background:"rgba(196,149,106,.18)", zIndex:1 }}>
+        <div style={{
+          width: `${(cur/(STEPS.length-1))*100}%`, height:"100%", background:C.go,
+          transition:"width .5s ease",
+          marginInlineStart: lang==="ar" ? "auto" : 0,
+        }}/>
+      </div>
+      <div style={{ display:"flex", justifyContent:"space-between", position:"relative", zIndex:2 }}>
+        {STEPS.map((s, i) => {
+          const done = i <= cur;
+          const isCur = i === cur;
+          return (
+            <div key={s.key} style={{ flex:1, textAlign:"center" }}>
+              <div style={{
+                width:36, height:36, borderRadius:"50%",
+                background: done ? C.go : C.wh,
+                border: `2px solid ${done ? C.go : "rgba(196,149,106,.3)"}`,
+                color: done ? "#fff" : C.mu,
+                display:"flex", alignItems:"center", justifyContent:"center",
+                fontSize: done ? 16 : 13, margin:"0 auto 8px",
+                boxShadow: isCur ? `0 0 0 4px rgba(196,149,106,.18)` : "none",
+                transition:"all .3s", fontWeight:600
+              }}>
+                {done ? s.icon : i+1}
+              </div>
+              <div style={{ fontFamily:C.fb, fontSize:10.5, color: done ? C.dk : C.mu, fontWeight: isCur ? 600 : 400, lineHeight:1.4 }}>
+                {s.label}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+// ─── Order Detail Modal (used by AdminDash) ───────────────────────────────────
+function OrderDetailModal({ order, onClose, onStatusChange }) {
+  const { t, dir } = useLang();
+  if (!order) return null;
+  const sectionTitle = { fontFamily:C.fa, fontSize:13.5, fontWeight:600, color:C.dk, marginBottom:8, paddingBottom:4, borderBottom:`1px solid rgba(196,149,106,.15)` };
+  const row = { fontFamily:C.fb, fontSize:13, color:C.dk, lineHeight:1.85, marginBottom:3 };
+  const label = { color:C.mu, marginInlineEnd:6, fontSize:11.5, letterSpacing:".04em" };
+  return (
+    <div onClick={onClose} style={{ position:"fixed", inset:0, background:"rgba(0,0,0,.55)", zIndex:500, display:"flex", alignItems:"center", justifyContent:"center", padding:16, direction:dir, overflowY:"auto" }}>
+      <div onClick={e=>e.stopPropagation()} style={{ background:C.wh, maxWidth:680, width:"100%", maxHeight:"92vh", overflow:"auto", padding:"22px 26px", boxShadow:"0 12px 48px rgba(0,0,0,.25)" }}>
+        {/* Header */}
+        <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:18, paddingBottom:12, borderBottom:`1px solid rgba(196,149,106,.18)` }}>
+          <div>
+            <h2 style={{ fontFamily:C.fa, fontSize:19, fontWeight:600, color:C.dk, margin:0 }}>{t("detailTitle")}</h2>
+            <div style={{ fontFamily:C.fe, fontSize:11, color:C.mu, letterSpacing:".1em", marginTop:3 }}>#{order.id}</div>
+          </div>
+          <button onClick={onClose} style={{ background:"none", border:"none", fontSize:24, color:C.mu, cursor:"pointer", lineHeight:1, padding:4 }}>✕</button>
+        </div>
+
+        {/* Timeline */}
+        <OrderTimeline status={order.status}/>
+
+        {/* Customer */}
+        <section style={{ marginTop:20 }}>
+          <h3 style={sectionTitle}>👤 {t("detailCustomer")}</h3>
+          <div style={row}><span style={label}>{t("detailName")}:</span>{order.name}</div>
+          <div style={row}><span style={label}>{t("detailPhone")}:</span>{order.phone}</div>
+          {order.userEmail && <div style={row}><span style={label}>{t("detailEmail")}:</span>{order.userEmail}</div>}
+        </section>
+
+        {/* Address */}
+        <section style={{ marginTop:16 }}>
+          <h3 style={sectionTitle}>📍 {t("detailAddress")}</h3>
+          <div style={row}>{order.address || "—"}</div>
+          {order.city && <div style={row}>{order.city}</div>}
+          {order.lat && order.lng && (
+            <a href={`https://www.google.com/maps?q=${order.lat},${order.lng}`} target="_blank" rel="noreferrer"
+              style={{ display:"inline-block", marginTop:4, fontFamily:C.fb, fontSize:12, color:C.go, textDecoration:"none" }}>
+              🗺 {t("detailOpenMap")}: {Number(order.lat).toFixed(5)}, {Number(order.lng).toFixed(5)}
+            </a>
+          )}
+        </section>
+
+        {/* Order info */}
+        <section style={{ marginTop:16 }}>
+          <h3 style={sectionTitle}>📅 {t("detailOrderInfo")}</h3>
+          <div style={row}><span style={label}>{t("detailDate")}:</span>{order.created_at || order.date || "—"}</div>
+          <div style={row}><span style={label}>{t("detailStatus")}:</span>{order.status}</div>
+        </section>
+
+        {/* Items */}
+        <section style={{ marginTop:16 }}>
+          <h3 style={sectionTitle}>🛍️ {t("detailItems")}</h3>
+          {(order.items||[]).map((item,i) => (
+            <div key={i} style={{ display:"flex", justifyContent:"space-between", padding:"7px 0", borderBottom:"1px dashed rgba(196,149,106,.12)", fontFamily:C.fb, fontSize:13 }}>
+              <span style={{ color:C.dk }}>{item.name} × {item.qty}</span>
+              <span style={{ fontFamily:C.fe, color:C.dk }}>{(item.price||0) * (item.qty||0)} {t("egp")}</span>
+            </div>
+          ))}
+          <div style={{ display:"flex", justifyContent:"space-between", paddingTop:12, marginTop:4, fontFamily:C.fa, fontSize:17, fontWeight:600, color:C.dk }}>
+            <span>{t("detailTotal")}</span>
+            <span>{order.total||0} {t("egp")}</span>
+          </div>
+        </section>
+
+        {/* Status change */}
+        {onStatusChange && (
+          <section style={{ marginTop:18, paddingTop:14, borderTop:`1px solid rgba(196,149,106,.15)` }}>
+            <h3 style={sectionTitle}>{t("detailUpdateStatus")}</h3>
+            <div style={{ display:"flex", gap:6, flexWrap:"wrap" }}>
+              {ORDER_STATUSES.map(s => (
+                <button key={s} onClick={() => onStatusChange(order.id, s)} style={{
+                  padding:"7px 13px",
+                  background: order.status===s ? C.dk : "none",
+                  color: order.status===s ? C.cr : C.dk,
+                  border: `1.5px solid ${order.status===s ? C.dk : "rgba(42,31,14,.2)"}`,
+                  fontFamily:C.fb, fontSize:12, cursor:"pointer",
+                  fontWeight: order.status===s ? 600 : 400, transition:"all .2s"
+                }}>{s}</button>
+              ))}
+            </div>
+          </section>
+        )}
+      </div>
+    </div>
+  );
+}
+
 // ─── Address Form ─────────────────────────────────────────────────────────────
 function AddressForm({ initial = {}, userId, onSave, onCancel, submitLabel }) {
   const { t, lang, dir } = useLang();
@@ -2271,13 +2486,18 @@ function MyOrders({ go }) {
     // Same-tab: order just placed
     const onNew = () => { if (!cancelled) load(); };
     window.addEventListener("nawra-new-order", onNew);
-    // Cross-tab: another tab/window saved to localStorage
+    // Cross-tab: another tab/window saved to localStorage (covers admin
+    // status updates on the same machine via updateOrderStatus mirroring)
     const onStorage = (e) => { if (e.key === "nawra_orders" && !cancelled) load(); };
     window.addEventListener("storage", onStorage);
+    // Cross-device: poll the API every 15s so the admin changing status from
+    // another machine appears here without a page refresh
+    const interval = setInterval(() => { if (!cancelled) load(); }, 15000);
     return () => {
       cancelled = true;
       window.removeEventListener("nawra-new-order", onNew);
       window.removeEventListener("storage", onStorage);
+      clearInterval(interval);
     };
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [user?.email]);
@@ -2309,7 +2529,7 @@ function MyOrders({ go }) {
           const sc = statusColor(o.status);
           return (
             <div key={o.id} style={{ background: C.wh, padding: mob ? "16px" : "22px 24px", marginBottom: 14, border: "1px solid rgba(196,149,106,.13)", boxShadow: "0 2px 12px rgba(196,149,106,.07)" }}>
-              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", flexWrap: "wrap", gap: 8, marginBottom: 12 }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", flexWrap: "wrap", gap: 8 }}>
                 <div>
                   <div style={{ fontFamily: C.fe, fontSize: 10, letterSpacing: "0.14em", color: C.go, textTransform: "uppercase", marginBottom: 3 }}>{t("myOrdersNum")} {o.id}</div>
                   <div style={{ fontSize: 12.5, color: C.mu, fontFamily: C.fb, marginTop: 2 }}>{o.date} · {o.city}</div>
@@ -2319,7 +2539,11 @@ function MyOrders({ go }) {
                   <span style={{ fontFamily: C.fe, fontSize: 20, fontWeight: 500, color: C.dk }}>{o.total} <span style={{ fontFamily: C.fb, fontSize: 12, color: C.mu }}>{t("egp")}</span></span>
                 </div>
               </div>
-              <div style={{ borderTop: "1px solid rgba(196,149,106,.1)", paddingTop: 12 }}>
+
+              {/* Visual 4-step timeline — reflects admin status updates in real time */}
+              <OrderTimeline status={o.status} />
+
+              <div style={{ borderTop: "1px solid rgba(196,149,106,.1)", paddingTop: 12, marginTop: 12 }}>
                 {(o.items || []).map((item, i) => (
                   <div key={i} style={{ display: "flex", justifyContent: "space-between", fontSize: 13, color: C.dk, fontFamily: C.fb, marginBottom: 5 }}>
                     <span style={{ color: C.wa }}>{item.name} × {item.qty}</span>
