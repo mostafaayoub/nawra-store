@@ -552,7 +552,7 @@ function CartSide({ open, close, go }) {
     </div>
   );
 
-  const submit = () => {
+  const submit = async () => {
     if (!f.n || !f.p || !f.city || !f.addr) { alert(t("orderAlert")); return; }
     const order = {
       id: Date.now(),
@@ -565,9 +565,21 @@ function CartSide({ open, close, go }) {
       total: tot + ship,
       status: "جديد"
     };
+    // ── Primary: save to backend API ────────────────────────────────────────
+    try {
+      const res = await fetch("/api/orders", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(order)
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      console.log("[Nawra] Order saved to API:", order.id);
+    } catch (e) {
+      console.warn("[Nawra] API unavailable, using localStorage fallback:", e.message);
+    }
+    // ── Always mirror to localStorage for offline admin / instant refresh ──
     const prev = JSON.parse(localStorage.getItem("nawra_orders") || "[]");
     localStorage.setItem("nawra_orders", JSON.stringify([order, ...prev]));
-    console.log("[Nawra] Order saved:", order, "| total orders now:", prev.length + 1);
     window.dispatchEvent(new CustomEvent("nawra-new-order", { detail: order }));
     clr(); setStep(2);
   };
@@ -739,17 +751,18 @@ function AdminDash({ go }) {
   });
   const [statusEdit, setStatusEdit] = useState({});
 
-  // Refresh helper — always reads fresh from localStorage
-  const refreshOrders = () => {
+  // Refresh helper — tries API first, falls back to localStorage
+  const refreshOrders = async () => {
+    try {
+      const res = await fetch("/api/orders");
+      if (res.ok) { setOrderList(await res.json()); return; }
+    } catch {}
     try { setOrderList(JSON.parse(localStorage.getItem("nawra_orders") || "[]")); } catch {}
   };
 
   useEffect(() => {
-    // Immediate: sync with any orders placed before AdminDash mounted
     refreshOrders();
-    // Real-time: same-tab event fired by submit()
     window.addEventListener("nawra-new-order", refreshOrders);
-    // Fallback: poll every 30 seconds (catches cross-tab or missed events)
     const interval = setInterval(refreshOrders, 30000);
     return () => {
       window.removeEventListener("nawra-new-order", refreshOrders);
@@ -795,11 +808,23 @@ function AdminDash({ go }) {
     setEditId(p.id); setShowAdd(true);
   };
 
-  const updateOrderStatus = (id, status) => {
-    const updated = orderList.map(o=>o.id===id?{...o,status}:o);
-    setOrderList(updated);
-    localStorage.setItem("nawra_orders", JSON.stringify(updated));
+  const updateOrderStatus = async (id, status) => {
+    // Optimistic local update
+    setOrderList(prev => prev.map(o => o.id === id ? { ...o, status } : o));
     setStatusEdit({});
+    // Persist to API
+    try {
+      await fetch(`/api/orders/${id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ status })
+      });
+    } catch {
+      // Fallback: persist in localStorage
+      const orders = JSON.parse(localStorage.getItem("nawra_orders") || "[]");
+      localStorage.setItem("nawra_orders",
+        JSON.stringify(orders.map(o => o.id === id ? { ...o, status } : o)));
+    }
   };
 
   const statCard = (label, value, color="#2A1F0E") => (
