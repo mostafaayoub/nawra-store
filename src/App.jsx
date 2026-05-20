@@ -605,7 +605,11 @@ function CartSide({ open, close, go }) {
                 </div>
               ) : cart.map(i => (
                 <div key={i.id} style={{ display: "flex", gap: 12, padding: "14px 0", borderBottom: "1px solid rgba(196,149,106,.1)", alignItems: "center" }}>
-                  <div style={{ width: 68, height: 68, background: C.gof, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}><span style={{ fontSize: 26 }}>{i.icon}</span></div>
+                  <div style={{ width: 68, height: 68, flexShrink: 0, overflow: "hidden", background: C.gof, borderRadius: 2 }}>
+                    {i.img
+                      ? <img src={i.img} alt="" style={{ width:"100%", height:"100%", objectFit:"cover" }} />
+                      : <span style={{ fontSize:26, display:"flex", alignItems:"center", justifyContent:"center", height:"100%" }}>{i.icon}</span>}
+                  </div>
                   <div style={{ flex: 1, minWidth: 0 }}>
                     <div style={{ fontFamily: C.fe, fontSize: 9.5, letterSpacing: "0.18em", color: C.go, textTransform: "uppercase", marginBottom: 2 }}>{i.brand || ""}</div>
                     <div style={{ fontFamily: lang==="ar"?C.fa:C.fe, fontSize: 14.5, color: C.dk, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{(lang==="ar"?i.nameAr:i.nameEn)||i.nameAr||i.name}</div>
@@ -874,8 +878,10 @@ function AdminDash({ go }) {
             <div style={{display:"grid",gridTemplateColumns:mob?"1fr":"1fr 1fr",gap:12}}>
               {prods.map(p=>(
                 <div key={p.id} style={{background:C.wh,display:"flex",gap:12,padding:14,boxShadow:"0 2px 6px rgba(0,0,0,.06)",alignItems:"center"}}>
-                  <div style={{width:56,height:56,background:p.bg,display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0,borderRadius:4}}>
-                    <span style={{fontSize:24}}>{p.icon}</span>
+                  <div style={{width:56,height:56,flexShrink:0,borderRadius:4,overflow:"hidden",background:p.bg}}>
+                    {p.img
+                      ? <img src={p.img} alt="" style={{width:"100%",height:"100%",objectFit:"cover"}} />
+                      : <span style={{fontSize:24,display:"flex",alignItems:"center",justifyContent:"center",height:"100%"}}>{p.icon}</span>}
                   </div>
                   <div style={{flex:1,minWidth:0}}>
                     <div style={{fontSize:9,color:C.go,letterSpacing:2,fontFamily:C.fb}}>{p.brand}</div>
@@ -1087,7 +1093,11 @@ function SearchBar({ go, allProds }) {
                 borderBottom:"1px solid rgba(0,0,0,.05)",alignItems:"center"}}
               onMouseEnter={e=>e.currentTarget.style.background="#F5EBE8"}
               onMouseLeave={e=>e.currentTarget.style.background="white"}>
-              <div style={{width:36,height:36,background:p.bg,display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0,borderRadius:3,fontSize:18}}>{p.icon}</div>
+              <div style={{width:36,height:36,flexShrink:0,borderRadius:3,overflow:"hidden",background:p.bg}}>
+                {p.img
+                  ? <img src={p.img} alt="" style={{width:"100%",height:"100%",objectFit:"cover"}} />
+                  : <span style={{fontSize:16,display:"flex",alignItems:"center",justifyContent:"center",height:"100%"}}>{p.icon}</span>}
+              </div>
               <div style={{minWidth:0}}>
                 <div style={{fontSize:9,color:"#B8963E",letterSpacing:2,fontFamily:C.fb}}>{p.brand}</div>
                 <div style={{fontSize:13,color:"#2A1F0E",fontFamily:C.fb,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{p.nameAr || p.name}</div>
