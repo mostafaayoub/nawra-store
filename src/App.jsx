@@ -1068,6 +1068,16 @@ function AdminDash({ go }) {
     } catch {}
     return null;
   };
+  // Default seeded categories live under `cat_default_*` ids and cannot be deleted
+  const isDefaultCategory = (cat) => !!(cat && cat.id && String(cat.id).startsWith("cat_default_"));
+  const deleteCategory = async (id, name) => {
+    if (!confirm(`متأكد من حذف الفئة "${name}"؟`)) return false;
+    try {
+      const r = await fetch(`/api/categories/${id}`, { method: "DELETE" });
+      if (r.ok) { await refreshCategories(); return true; }
+    } catch {}
+    return false;
+  };
   const blankProdForm = () => ({
     name: "", description: "", category: PRODUCT_CATEGORIES[0], brand: "",
     ingredients: "", images: [], price: "", price_before: "", cost: "",
@@ -1086,6 +1096,60 @@ function AdminDash({ go }) {
   const [invImporting, setInvImporting] = useState(false);
   const [invNotice, setInvNotice]   = useState(null); // one-time auto-import banner
   const importedRef = useRef(false); // make sure auto-import runs at most once per session
+
+  // ── Active role (for the approval workflow) ────────────────────────────────
+  // Persisted to localStorage. Super admin sees the approval inbox; non-super
+  // admins see "request" buttons instead of destructive actions.
+  const [activeRole, setActiveRole] = useState(() => localStorage.getItem("nawra_admin_role") || "super_admin");
+  useEffect(() => { localStorage.setItem("nawra_admin_role", activeRole); }, [activeRole]);
+  const isSuper = activeRole === "super_admin";
+
+  // ── Approvals (product delete / stock reduce / etc.) + Notifications ───────
+  const [approvals, setApprovals] = useState([]);
+  const [notiSeenAt, setNotiSeenAt] = useState(() => Number(localStorage.getItem("nawra_noti_seen_at")) || (Date.now() - 24*3600*1000));
+  const [editProdModal, setEditProdModal] = useState(null); // inventory deep-edit modal state
+
+  const refreshApprovals = async () => {
+    try { const r = await fetch("/api/approvals?status=pending"); if (r.ok) setApprovals(await r.json()); } catch {}
+  };
+  // Overview poller — every 10s — fans out to orders / users / products / approvals
+  useEffect(() => {
+    if (tab !== "overview") return;
+    refreshApprovals();
+    const i = setInterval(() => {
+      refreshOrders(); loadUsers(); refreshProducts(); refreshApprovals();
+    }, 10000);
+    return () => clearInterval(i);
+  // eslint-disable-next-line
+  }, [tab]);
+
+  const submitApproval = async (req) => {
+    try {
+      const r = await fetch("/api/approvals", {
+        method:"POST", headers:{"Content-Type":"application/json"},
+        body: JSON.stringify({ requester: activeRole, ...req })
+      });
+      if (r.ok) {
+        refreshApprovals();
+        setSavedToast("تم إرسال الطلب للمراجعة من Super Admin");
+        setTimeout(()=>setSavedToast(""), 2500);
+      }
+    } catch {}
+  };
+  const resolveApproval = async (id, status, note = "") => {
+    try {
+      const r = await fetch(`/api/approvals/${id}`, {
+        method:"PATCH", headers:{"Content-Type":"application/json"},
+        body: JSON.stringify({ status, resolution_note: note })
+      });
+      if (r.ok) {
+        refreshApprovals();
+        refreshProducts({ allowImport: false });
+        setSavedToast(status === "approved" ? "تمت الموافقة" : "تم الرفض");
+        setTimeout(()=>setSavedToast(""), 2000);
+      }
+    } catch {}
+  };
 
   // Map a legacy localStorage product (from useProds / PRODS_KEY) onto the
   // shape that POST /api/products expects. Best-guesses category from name.
@@ -1260,8 +1324,8 @@ function AdminDash({ go }) {
     guest_checkout: true,
   };
   const DEFAULT_ACCOUNT = {
-    admin_name: "Admin",
-    admin_email: "mostafaayoub.ms@gmail.com",
+    admin_name: "Super Admin",
+    admin_email: "nawraskincare@gmail.com",
     // password fields are not persisted — they're only used to submit a change
   };
   const DEFAULT_EMAILS = {
@@ -1276,13 +1340,13 @@ function AdminDash({ go }) {
   };
   const DEFAULT_TEAM = {
     members: [
-      { id: "u_owner", name: "Admin", email: "mostafaayoub.ms@gmail.com", role: "super_admin" },
+      { id: "u_owner", name: "Super Admin", email: "nawraskincare@gmail.com", role: "super_admin" },
     ],
     permissions: {
-      super_admin:     { orders: true,  products: true,  inventory: true, customers: true, returns: true,  shipping: true,  coupons: true,  settings: true },
-      orders_admin:    { orders: true,  products: false, inventory: false, customers: true,  returns: true,  shipping: false, coupons: false, settings: false },
-      inventory_admin: { orders: false, products: true,  inventory: true, customers: false, returns: false, shipping: false, coupons: false, settings: false },
-      shipping_admin:  { orders: true,  products: false, inventory: false, customers: false, returns: false, shipping: true,  coupons: false, settings: false },
+      super_admin:     { overview: true, orders: true,  products: true,  inventory: true, customers: true, returns: true,  shipping: true,  coupons: true,  settings: true },
+      orders_admin:    { overview: true, orders: true,  products: false, inventory: false, customers: true,  returns: true,  shipping: false, coupons: false, settings: false },
+      inventory_admin: { overview: true, orders: false, products: true,  inventory: true, customers: false, returns: false, shipping: false, coupons: false, settings: false },
+      shipping_admin:  { overview: true, orders: true,  products: false, inventory: false, customers: false, returns: false, shipping: true,  coupons: false, settings: false },
     },
   };
 
@@ -1870,6 +1934,121 @@ function AdminDash({ go }) {
         </div>
       </div>
 
+      {/* ── Notifications panel (live) ─────────────────────────────────── */}
+      {(() => {
+        // Build a unified feed of recent events. Each item has { id, ts, icon, title, body, action? }
+        const feed = [];
+        approvals.forEach(a => {
+          const titleMap = {
+            product_delete: "طلب حذف منتج",
+            product_add:    "طلب إضافة منتج",
+            stock_reduce:   "تقليل كمية مخزون",
+          };
+          feed.push({
+            id: "a-"+a.id, ts: new Date(a.created_at.replace(" ","T")+"Z").getTime(),
+            icon: a.type==="product_delete" ? "🗑️" : a.type==="stock_reduce" ? "📉" : "📦",
+            title: titleMap[a.type] || a.type,
+            body: `${a.target_label || a.target_id || ""} · بواسطة ${a.requester || "—"}${a.reason ? ` · السبب: ${a.reason}` : ""}`,
+            approval: a,
+          });
+        });
+        // New orders
+        orderList.slice(0, 30).forEach(o => {
+          const ts = o.created_at ? new Date(o.created_at.replace(" ","T")+"Z").getTime() : Date.now();
+          feed.push({
+            id: "o-"+o.id, ts,
+            icon: "🛍️",
+            title: "طلب جديد",
+            body: `${o.name} · ${o.city || "—"} · ${(o.total||0).toLocaleString()} ج`,
+          });
+        });
+        // New customers (this month)
+        allUsers.slice(0, 20).forEach(u => {
+          if (!u.firstOrder) return;
+          const ts = new Date(u.firstOrder).getTime();
+          if (ts < Date.now() - 30*24*3600*1000) return;
+          feed.push({
+            id: "u-"+u.email, ts,
+            icon: "👤",
+            title: "عميل جديد",
+            body: `${u.name || u.email} · ${u.email}`,
+          });
+        });
+        // Low-stock alerts
+        dbProducts.forEach(p => {
+          if ((p.stock||0) <= 0 || (p.stock||0) > (p.alert_threshold||0)) return;
+          feed.push({
+            id: "lo-"+p.id, ts: Date.now() - 1000,
+            icon: "⚠️",
+            title: "تنبيه: مخزون منخفض",
+            body: `${p.name} · باقي ${p.stock} قطعة (الحد ${p.alert_threshold})`,
+          });
+        });
+        feed.sort((a,b) => b.ts - a.ts);
+        const top = feed.slice(0, 12);
+
+        return (
+          <div style={{background:ui.cardBg,border:ui.border,borderRadius:ui.radius,padding:"14px 16px",marginBottom:10}}>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10,flexWrap:"wrap",gap:6}}>
+              <h3 style={{fontSize:13,fontWeight:500,color:ui.text,margin:0,fontFamily:ui.fontBody}}>
+                الإشعارات المباشرة
+                {approvals.length > 0 && (
+                  <span style={{marginInlineStart:8,padding:"2px 9px",borderRadius:20,background:"#FEE2E2",color:"#B91C1C",fontSize:10.5}}>
+                    {approvals.length} بانتظار الموافقة
+                  </span>
+                )}
+              </h3>
+              <span style={{fontSize:10.5,color:ui.textSub,fontFamily:ui.fontBody}}>تحديث كل 10 ثوانٍ</span>
+            </div>
+            {top.length === 0 ? (
+              <div style={{padding:"20px 0",textAlign:"center",color:ui.textSub,fontFamily:ui.fontBody,fontSize:12}}>
+                لا يوجد نشاط لعرضه حالياً
+              </div>
+            ) : (
+              <div style={{maxHeight:300,overflow:"auto"}}>
+                {top.map(item => (
+                  <div key={item.id} style={{display:"flex",alignItems:"flex-start",gap:10,padding:"8px 0",borderBottom:`0.5px solid #EEE`}}>
+                    <div style={{width:26,height:26,borderRadius:"50%",background:ui.sideBg,display:"flex",alignItems:"center",justifyContent:"center",fontSize:14,flexShrink:0}}>{item.icon}</div>
+                    <div style={{flex:1,minWidth:0}}>
+                      <div style={{fontSize:12.5,color:ui.text,fontWeight:500,fontFamily:ui.fontBody}}>{item.title}</div>
+                      <div style={{fontSize:11.5,color:ui.textSub,fontFamily:ui.fontBody,marginTop:2,wordBreak:"break-word"}}>{item.body}</div>
+                      {item.approval && isSuper && (
+                        <div style={{display:"flex",gap:6,marginTop:6}}>
+                          {/* Stock reductions are informational — no approve/reject needed.
+                              Only product_delete / product_add need a decision. */}
+                          {(item.approval.type === "product_delete" || item.approval.type === "product_add") ? (
+                            <>
+                              <button onClick={()=>resolveApproval(item.approval.id, "approved")}
+                                style={{background:"#DCFCE7",border:"0.5px solid #86EFAC",padding:"3px 9px",cursor:"pointer",fontSize:11,fontFamily:ui.fontBody,color:"#15803D",borderRadius:4}}>موافقة</button>
+                              <button onClick={()=>{
+                                const note = prompt("سبب الرفض (اختياري):") || "";
+                                resolveApproval(item.approval.id, "rejected", note);
+                              }} style={{background:"#FEE2E2",border:"0.5px solid #FCA5A5",padding:"3px 9px",cursor:"pointer",fontSize:11,fontFamily:ui.fontBody,color:"#B91C1C",borderRadius:4}}>رفض</button>
+                            </>
+                          ) : (
+                            <button onClick={()=>resolveApproval(item.approval.id, "approved")}
+                              style={{background:"transparent",border:ui.border,padding:"3px 9px",cursor:"pointer",fontSize:11,fontFamily:ui.fontBody,color:ui.textSub,borderRadius:4}}>وضع علامة كمقروء</button>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                    <div style={{fontSize:10.5,color:ui.textSub,fontFamily:ui.fontBody,flexShrink:0,whiteSpace:"nowrap"}}>
+                      {(() => {
+                        const m = Math.round((Date.now() - item.ts)/60000);
+                        if (m < 1) return "الآن";
+                        if (m < 60) return `${m} د`;
+                        if (m < 60*24) return `${Math.round(m/60)} س`;
+                        return `${Math.round(m/(60*24))} ي`;
+                      })()}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        );
+      })()}
+
       {/* Top selling products */}
       <div style={{background:ui.cardBg,border:ui.border,borderRadius:ui.radius,padding:"14px 16px"}}>
         <h3 style={{fontSize:13,fontWeight:500,color:ui.text,marginBottom:10,fontFamily:ui.fontBody}}>أكثر المنتجات مبيعاً</h3>
@@ -1927,11 +2106,26 @@ function AdminDash({ go }) {
             </div>
           ) : navItems.map(n => <NavBtn key={n.k} item={n} />)}
           <div style={{flex:1}} />
+          {/* Active-role switcher — drives whether destructive actions go
+              through the approval workflow or execute immediately. */}
+          {!mob && (
+            <div style={{padding:"10px 16px",borderTop:ui.border}}>
+              <div style={{fontSize:10.5,color:ui.textSub,fontFamily:ui.fontBody,marginBottom:5,letterSpacing:".04em"}}>وضع الدور (للاختبار)</div>
+              <select value={activeRole} onChange={e=>setActiveRole(e.target.value)}
+                style={{width:"100%",padding:"6px 8px",border:ui.border,borderRadius:5,
+                  background:ui.cardBg,fontFamily:ui.fontBody,fontSize:12,color:ui.text,outline:"none",direction:"rtl"}}>
+                <option value="super_admin">Super Admin</option>
+                <option value="orders_admin">مشرف طلبات</option>
+                <option value="inventory_admin">مشرف مخزون</option>
+                <option value="shipping_admin">موظف شحن</option>
+              </select>
+            </div>
+          )}
           <button onClick={()=>go("#home")} style={{
             display:"flex",alignItems:"center",gap:8,padding:"10px 16px",
             fontSize:12,fontFamily:ui.fontBody,color:ui.textSub,
             background:"transparent",border:"none",cursor:"pointer",textAlign:"right",
-            borderTop:ui.border,marginTop:6
+            borderTop:ui.border
           }}>
             <AdmIcon name="logout" size={15}/>
             <span>الرجوع للموقع</span>
@@ -2064,11 +2258,31 @@ function AdminDash({ go }) {
                       <button onClick={()=>startEdit(p)} style={{background:"#F3F4F6",border:"none",padding:"5px 10px",cursor:"pointer",fontSize:11.5,fontFamily:ui.fontBody,color:ui.text,borderRadius:4}}>تعديل</button>
                       {delConfirm===p.id ? (
                         <div style={{display:"flex",gap:4}}>
-                          <button onClick={()=>{delProd(p.id);setDelConfirm(null);}} style={{background:"#DC2626",color:"white",border:"none",padding:"5px 9px",cursor:"pointer",fontSize:11,fontFamily:ui.fontBody,borderRadius:4}}>تأكيد</button>
+                          <button onClick={async ()=>{
+                            if (isSuper) {
+                              delProd(p.id);
+                              // Mirror delete to API too — best-effort
+                              try { await fetch(`/api/products/${p.id}`, { method:"DELETE" }); } catch {}
+                            } else {
+                              await submitApproval({
+                                type: "product_delete",
+                                target_id: String(p.id),
+                                target_label: p.nameAr || p.name,
+                                reason: prompt("سبب الحذف (اختياري):") || ""
+                              });
+                            }
+                            setDelConfirm(null);
+                          }} style={{background:"#DC2626",color:"white",border:"none",padding:"5px 9px",cursor:"pointer",fontSize:11,fontFamily:ui.fontBody,borderRadius:4}}>
+                            {isSuper ? "تأكيد" : "إرسال للموافقة"}
+                          </button>
                           <button onClick={()=>setDelConfirm(null)} style={{background:"none",border:ui.border,padding:"5px 8px",cursor:"pointer",fontSize:11,color:ui.textSub,fontFamily:ui.fontBody,borderRadius:4}}>لا</button>
                         </div>
                       ) : (
-                        <button onClick={()=>setDelConfirm(p.id)} style={{background:"none",border:"1px solid rgba(220,38,38,.3)",color:"#DC2626",padding:"5px 9px",cursor:"pointer",fontSize:11.5,fontFamily:ui.fontBody,borderRadius:4}}>حذف</button>
+                        <button onClick={()=>setDelConfirm(p.id)}
+                          title={isSuper ? "حذف نهائي" : "طلب الحذف من Super Admin"}
+                          style={{background:"none",border:"1px solid rgba(220,38,38,.3)",color:"#DC2626",padding:"5px 9px",cursor:"pointer",fontSize:11.5,fontFamily:ui.fontBody,borderRadius:4}}>
+                          {isSuper ? "حذف" : "طلب حذف"}
+                        </button>
                       )}
                     </div>
                   </div>
@@ -2242,8 +2456,8 @@ function AdminDash({ go }) {
                       </Field>
                       <div style={{display:"grid",gridTemplateColumns:mob?"1fr":"1fr 1fr",gap:12}}>
                         <Field label="الفئة">
-                          {/* "__add__" is a sentinel that opens an inline input
-                              for creating a new category. Avoids a modal. */}
+                          {/* Custom dropdown: each row is the category name, with a
+                              delete × next to non-default categories. */}
                           {pForm._addCat ? (
                             <div style={{display:"flex",gap:6}}>
                               <input style={{...inputStyle, flex:1}}
@@ -2253,7 +2467,7 @@ function AdminDash({ go }) {
                                   if (e.key === "Enter") {
                                     e.preventDefault();
                                     const added = await addCategory(pForm._newCat);
-                                    if (added) setPForm({...pForm, category:added, _addCat:false, _newCat:""});
+                                    if (added) setPForm({...pForm, category:added, _addCat:false, _newCat:"", _openCat:false});
                                   } else if (e.key === "Escape") {
                                     setPForm({...pForm, _addCat:false, _newCat:""});
                                   }
@@ -2262,7 +2476,7 @@ function AdminDash({ go }) {
                               <button type="button"
                                 onClick={async () => {
                                   const added = await addCategory(pForm._newCat);
-                                  if (added) setPForm({...pForm, category:added, _addCat:false, _newCat:""});
+                                  if (added) setPForm({...pForm, category:added, _addCat:false, _newCat:"", _openCat:false});
                                 }}
                                 style={{padding:"0 12px",background:ui.text,color:"#fff",border:"none",borderRadius:6,fontSize:18,cursor:"pointer"}}>✓</button>
                               <button type="button"
@@ -2270,15 +2484,60 @@ function AdminDash({ go }) {
                                 style={{padding:"0 12px",background:"transparent",color:ui.textSub,border:ui.border,borderRadius:6,fontSize:18,cursor:"pointer"}}>×</button>
                             </div>
                           ) : (
-                            <select style={inputStyle} value={pForm.category}
-                              onChange={e => {
-                                if (e.target.value === "__add__") setPForm({...pForm, _addCat:true});
-                                else setPForm({...pForm, category:e.target.value});
-                              }}>
-                              {PRODUCT_CATEGORIES.map(c => <option key={c} value={c}>{c}</option>)}
-                              <option disabled>──────────</option>
-                              <option value="__add__">+ إضافة فئة جديدة</option>
-                            </select>
+                            <div style={{position:"relative"}}>
+                              <button type="button" onClick={()=>setPForm({...pForm, _openCat: !pForm._openCat})}
+                                style={{...inputStyle, cursor:"pointer", textAlign:"right", display:"flex", justifyContent:"space-between", alignItems:"center", width:"100%"}}>
+                                <span>{pForm.category || "اختر فئة..."}</span>
+                                <span style={{color:ui.textSub, fontSize:11, marginInlineStart:8}}>▼</span>
+                              </button>
+                              {pForm._openCat && (
+                                <>
+                                  <div onClick={()=>setPForm({...pForm, _openCat:false})}
+                                    style={{position:"fixed", inset:0, zIndex:30}}/>
+                                  <div style={{position:"absolute", top:"100%", insetInlineStart:0, right:0, marginTop:4,
+                                    background:ui.cardBg, border:ui.border, borderRadius:6, boxShadow:"0 4px 14px rgba(0,0,0,.08)",
+                                    zIndex:31, maxHeight:240, overflow:"auto"}}>
+                                    {categories.length === 0 && FALLBACK_CATEGORIES.map(name => (
+                                      <div key={name} onClick={()=>setPForm({...pForm, category:name, _openCat:false})}
+                                        style={{padding:"8px 12px",cursor:"pointer",fontSize:13,color:ui.text,fontFamily:ui.fontBody,
+                                          background: pForm.category===name ? "#F3F4F6" : "transparent"}}>{name}</div>
+                                    ))}
+                                    {categories.map(cat => {
+                                      const def = isDefaultCategory(cat);
+                                      const sel = pForm.category === cat.name;
+                                      return (
+                                        <div key={cat.id}
+                                          style={{display:"flex",alignItems:"center",justifyContent:"space-between",
+                                            background: sel ? "#F3F4F6" : "transparent"}}>
+                                          <div onClick={()=>setPForm({...pForm, category:cat.name, _openCat:false})}
+                                            style={{flex:1, padding:"8px 12px", cursor:"pointer", fontSize:13, color:ui.text, fontFamily:ui.fontBody}}>
+                                            {cat.name}
+                                            {def && <span style={{fontSize:10, color:ui.textSub, marginInlineStart:6}}>(افتراضي)</span>}
+                                          </div>
+                                          {!def && (
+                                            <button type="button"
+                                              onClick={async (e)=>{
+                                                e.stopPropagation();
+                                                const ok = await deleteCategory(cat.id, cat.name);
+                                                // If the deleted category was selected, reset to first default
+                                                if (ok && sel) setPForm({...pForm, category: FALLBACK_CATEGORIES[0], _openCat:false});
+                                              }}
+                                              title="حذف الفئة"
+                                              style={{background:"none",border:"none",color:"#DC2626",cursor:"pointer",
+                                                padding:"6px 10px",fontSize:14,fontFamily:ui.fontBody,lineHeight:1}}>×</button>
+                                          )}
+                                        </div>
+                                      );
+                                    })}
+                                    <div onClick={()=>setPForm({...pForm, _addCat:true, _openCat:false})}
+                                      style={{padding:"9px 12px",cursor:"pointer",fontSize:12.5,color:ui.text,fontFamily:ui.fontBody,
+                                        borderTop:"0.5px solid #EEE",fontWeight:500}}>
+                                      + إضافة فئة جديدة
+                                    </div>
+                                  </div>
+                                </>
+                              )}
+                            </div>
                           )}
                         </Field>
                         <Field label="الماركة">
@@ -2618,10 +2877,17 @@ function AdminDash({ go }) {
                               <td style={{padding:"11px 14px",fontSize:11.5,color:ui.textSub,fontFamily:ui.fontBody,whiteSpace:"nowrap"}}>
                                 {p.updated_at ? new Date(p.updated_at.replace(" ","T")+"Z").toLocaleDateString("ar-EG",{day:"2-digit",month:"2-digit"}) : "—"}
                               </td>
-                              {/* Edit button (jumps to add-product with prefill in a future iteration) */}
+                              {/* Edit — opens deep-edit modal that requires
+                                  a reason when stock is being reduced. */}
                               <td style={{padding:"11px 14px",textAlign:"left"}}>
-                                <button onClick={()=>setDetailOrderId(null) /* placeholder until edit modal */}
-                                  title="ميزة التعديل الكامل قريباً"
+                                <button onClick={()=>setEditProdModal({
+                                    id: p.id, name: p.name,
+                                    origStock: p.stock||0,
+                                    stock: String(p.stock||0),
+                                    origThreshold: p.alert_threshold||0,
+                                    alert_threshold: String(p.alert_threshold||0),
+                                    reason: ""
+                                  })}
                                   style={{background:"transparent",border:ui.border,padding:"5px 10px",cursor:"pointer",fontFamily:ui.fontBody,fontSize:11.5,color:ui.text,borderRadius:4}}>
                                   تعديل
                                 </button>
@@ -2633,6 +2899,115 @@ function AdminDash({ go }) {
                     </table>
                   </div>
                 )}
+
+                {/* Deep-edit modal — quantity + threshold, with reason
+                    required when reducing stock. */}
+                {editProdModal && (() => {
+                  const newQty = Number(editProdModal.stock) || 0;
+                  const newThr = Number(editProdModal.alert_threshold) || 0;
+                  const reducing = newQty < editProdModal.origStock;
+                  const reasonOK = !reducing || (editProdModal.reason || "").trim().length >= 5;
+                  return (
+                    <div onClick={()=>setEditProdModal(null)}
+                      style={{position:"fixed",inset:0,background:"rgba(0,0,0,.55)",zIndex:500,display:"flex",alignItems:"center",justifyContent:"center",padding:16,direction:"rtl"}}>
+                      <div onClick={e=>e.stopPropagation()}
+                        style={{background:ui.cardBg,maxWidth:480,width:"100%",padding:22,borderRadius:8,boxShadow:"0 12px 48px rgba(0,0,0,.25)"}}>
+                        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:14,paddingBottom:10,borderBottom:`0.5px solid #EEE`}}>
+                          <div>
+                            <h2 style={{fontSize:15,fontWeight:600,color:ui.text,fontFamily:ui.fontBody,margin:0}}>تعديل المنتج</h2>
+                            <div style={{fontSize:12,color:ui.textSub,fontFamily:ui.fontBody,marginTop:3}}>{editProdModal.name}</div>
+                          </div>
+                          <button onClick={()=>setEditProdModal(null)}
+                            style={{background:"none",border:"none",fontSize:22,color:ui.textSub,cursor:"pointer",lineHeight:1,padding:4}}>✕</button>
+                        </div>
+
+                        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12,marginBottom:14}}>
+                          <div>
+                            <label style={{display:"block",fontSize:12,color:ui.text,fontFamily:ui.fontBody,marginBottom:5}}>الكمية المتاحة</label>
+                            <input type="text" inputMode="numeric" pattern="[0-9]*"
+                              value={editProdModal.stock}
+                              onChange={e=>setEditProdModal({...editProdModal, stock: e.target.value.replace(/[^0-9]/g, "")})}
+                              style={{padding:"8px 12px",border:ui.border,borderRadius:6,background:ui.cardBg,fontFamily:ui.fontBody,fontSize:13,color:ui.text,outline:"none",width:"100%",direction:"ltr",textAlign:"left"}}/>
+                            <div style={{fontSize:11,color:ui.textSub,fontFamily:ui.fontBody,marginTop:4}}>كانت: {editProdModal.origStock}</div>
+                          </div>
+                          <div>
+                            <label style={{display:"block",fontSize:12,color:ui.text,fontFamily:ui.fontBody,marginBottom:5}}>حد التنبيه</label>
+                            <input type="text" inputMode="numeric" pattern="[0-9]*"
+                              value={editProdModal.alert_threshold}
+                              onChange={e=>setEditProdModal({...editProdModal, alert_threshold: e.target.value.replace(/[^0-9]/g, "")})}
+                              style={{padding:"8px 12px",border:ui.border,borderRadius:6,background:ui.cardBg,fontFamily:ui.fontBody,fontSize:13,color:ui.text,outline:"none",width:"100%",direction:"ltr",textAlign:"left"}}/>
+                            <div style={{fontSize:11,color:ui.textSub,fontFamily:ui.fontBody,marginTop:4}}>كان: {editProdModal.origThreshold}</div>
+                          </div>
+                        </div>
+
+                        {reducing && (
+                          <div style={{marginBottom:14}}>
+                            <label style={{display:"block",fontSize:12,color:"#B91C1C",fontFamily:ui.fontBody,marginBottom:5,fontWeight:500}}>
+                              ⚠ سبب التقليل (إلزامي)
+                            </label>
+                            <textarea rows={3}
+                              value={editProdModal.reason}
+                              onChange={e=>setEditProdModal({...editProdModal, reason:e.target.value})}
+                              placeholder="مثال: تالف، تم استرجاعه، خطأ في الجرد..."
+                              style={{padding:"8px 12px",border:`1px solid #FCA5A5`,borderRadius:6,background:"#FEF2F2",fontFamily:ui.fontBody,fontSize:13,color:ui.text,outline:"none",width:"100%",direction:"rtl",resize:"vertical",minHeight:70}}/>
+                            <div style={{fontSize:11,color:ui.textSub,fontFamily:ui.fontBody,marginTop:4}}>
+                              تقليل: {editProdModal.origStock} → {newQty} (—{editProdModal.origStock - newQty} قطعة).
+                              السبب هيتسجل في سجل التغييرات وهيوصل Super Admin.
+                            </div>
+                          </div>
+                        )}
+
+                        <div style={{display:"flex",gap:8,justifyContent:"flex-end"}}>
+                          <button onClick={()=>setEditProdModal(null)}
+                            style={{padding:"9px 18px",background:"transparent",border:ui.border,borderRadius:6,fontSize:12.5,color:ui.textSub,fontFamily:ui.fontBody,cursor:"pointer"}}>إلغاء</button>
+                          <button
+                            disabled={!reasonOK}
+                            onClick={async () => {
+                              const patch = { stock: newQty, alert_threshold: newThr };
+                              // Persist to DB first
+                              await patchProduct(editProdModal.id, patch);
+                              if (reducing) {
+                                // Log the reduction
+                                try {
+                                  await fetch("/api/stock-changes", {
+                                    method:"POST", headers:{"Content-Type":"application/json"},
+                                    body: JSON.stringify({
+                                      product_id: editProdModal.id,
+                                      product_name: editProdModal.name,
+                                      old_qty: editProdModal.origStock,
+                                      new_qty: newQty,
+                                      reason: editProdModal.reason,
+                                      actor: activeRole
+                                    })
+                                  });
+                                } catch {}
+                                // Notify super admin via approvals feed (auto-approved
+                                // for trail purposes — it's a notification, not a gate)
+                                try {
+                                  await fetch("/api/approvals", {
+                                    method:"POST", headers:{"Content-Type":"application/json"},
+                                    body: JSON.stringify({
+                                      type: "stock_reduce",
+                                      target_id: editProdModal.id,
+                                      target_label: editProdModal.name,
+                                      requester: activeRole,
+                                      reason: editProdModal.reason,
+                                      payload: { old_qty: editProdModal.origStock, new_qty: newQty }
+                                    })
+                                  });
+                                  refreshApprovals();
+                                } catch {}
+                              }
+                              setEditProdModal(null);
+                            }}
+                            style={{padding:"9px 18px",background: reasonOK ? ui.text : "#9CA3AF",color:"#fff",border:"none",borderRadius:6,fontSize:12.5,fontFamily:ui.fontBody,cursor: reasonOK ? "pointer" : "not-allowed"}}>
+                            حفظ التعديل
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })()}
               </div>
             );
           })()}
@@ -2818,11 +3193,23 @@ function AdminDash({ go }) {
                   <div style={{marginTop:12,display:"grid",gridTemplateColumns:mob?"1fr":"1fr auto",gap:10,alignItems:"end"}}>
                     <div>
                       <label style={{display:"block",fontSize:12,color:ui.text,fontFamily:ui.fontBody,marginBottom:5}}>الحد الأدنى للطلب (جنيه)</label>
-                      <input type="number" style={{...inputSm, padding:"8px 12px", width:"100%"}}
-                        value={shipping.free_shipping_min_order}
-                        onChange={e=>setShipping({...shipping, free_shipping_min_order: Number(e.target.value)||0})} />
+                      {/* Keep the visible value as a string so the user can type
+                          intermediate states like "" or "1" without it being
+                          coerced to 0 mid-typing. We only parse on save. */}
+                      <input type="text" inputMode="numeric" pattern="[0-9]*"
+                        style={{...inputSm, padding:"8px 12px", width:"100%", direction:"ltr", textAlign:"left", letterSpacing:".5px"}}
+                        value={String(shipping.free_shipping_min_order ?? "")}
+                        onChange={e=>{
+                          // strip non-digits so paste/IME junk doesn't sneak in
+                          const cleaned = e.target.value.replace(/[^0-9]/g, "");
+                          setShipping({...shipping, free_shipping_min_order: cleaned === "" ? "" : parseInt(cleaned, 10) });
+                        }}
+                        placeholder="مثال: 500" />
                     </div>
-                    <button onClick={()=>saveSetting("shipping", shipping)}
+                    <button onClick={()=>saveSetting("shipping", {
+                      ...shipping,
+                      free_shipping_min_order: Number(shipping.free_shipping_min_order) || 0
+                    })}
                       style={{background:ui.text,color:"#fff",border:"none",padding:"9px 18px",cursor:"pointer",fontSize:12.5,borderRadius:6,fontFamily:ui.fontBody}}>حفظ</button>
                   </div>
                 </Section>
@@ -3153,21 +3540,32 @@ function AdminDash({ go }) {
                           <input style={inputAr} value={accountCfg.admin_name} onChange={e=>setAccountCfg({...accountCfg, admin_name:e.target.value})}/>
                         </div>
                         <div>
-                          <label style={labelStyle}>البريد الإلكتروني</label>
-                          <input style={{...inputStyle, textAlign:"left"}} value={accountCfg.admin_email} onChange={e=>setAccountCfg({...accountCfg, admin_email:e.target.value})}/>
+                          <label style={labelStyle}>البريد الإلكتروني (Super Admin)</label>
+                          <input style={{...inputStyle, textAlign:"left"}} value={accountCfg.admin_email} disabled
+                            title="بريد الـ Super Admin غير قابل للتعديل"/>
                         </div>
                       </div>
+                      <button onClick={()=>{
+                        const { pw_current, pw_new, pw_confirm, ...persist } = accountCfg;
+                        saveSetting("account", persist);
+                      }}
+                        style={{marginTop:14,background:ui.text,color:"#fff",border:"none",padding:"10px 22px",cursor:"pointer",fontSize:13,fontFamily:ui.fontBody,fontWeight:500,borderRadius:6}}>
+                        حفظ البيانات
+                      </button>
                     </div>
 
                     <div style={sectionCard}>
                       <div style={sectionTitle}>تغيير كلمة المرور</div>
+                      <div style={{fontSize:11.5,color:ui.textSub,fontFamily:ui.fontBody,marginBottom:12,padding:"8px 12px",background:"#FAFAFA",borderRadius:6}}>
+                        🔐 ميزة مخصصة لـ Super Admin فقط — تستخدم خوارزمية scrypt للتشفير على الخادم.
+                      </div>
                       <div style={{display:"grid",gridTemplateColumns:mob?"1fr":"repeat(3,1fr)",gap:12}}>
                         <div>
-                          <label style={labelStyle}>الحالية</label>
+                          <label style={labelStyle}>كلمة المرور الحالية</label>
                           <input type="password" style={inputStyle} value={accountCfg.pw_current} onChange={e=>setAccountCfg({...accountCfg, pw_current:e.target.value})}/>
                         </div>
                         <div>
-                          <label style={labelStyle}>الجديدة</label>
+                          <label style={labelStyle}>الجديدة (8 أحرف على الأقل)</label>
                           <input type="password" style={inputStyle} value={accountCfg.pw_new} onChange={e=>setAccountCfg({...accountCfg, pw_new:e.target.value})}/>
                         </div>
                         <div>
@@ -3175,19 +3573,30 @@ function AdminDash({ go }) {
                           <input type="password" style={inputStyle} value={accountCfg.pw_confirm} onChange={e=>setAccountCfg({...accountCfg, pw_confirm:e.target.value})}/>
                         </div>
                       </div>
-                      <div style={{fontSize:11.5,color:ui.textSub,fontFamily:ui.fontBody,marginTop:8}}>
-                        ملاحظة: تغيير كلمة المرور بالكامل يحتاج لتفعيل المصادقة في الخادم. حالياً البيانات بتتخزن في الإعدادات فقط.
-                      </div>
+                      <button
+                        onClick={async ()=>{
+                          if (!accountCfg.pw_current || !accountCfg.pw_new) { alert("كل الحقول مطلوبة"); return; }
+                          if (accountCfg.pw_new !== accountCfg.pw_confirm) { alert("كلمتا المرور غير متطابقتين"); return; }
+                          if (accountCfg.pw_new.length < 8) { alert("كلمة المرور الجديدة لازم تكون 8 أحرف على الأقل"); return; }
+                          try {
+                            const r = await fetch("/api/auth/change-password", {
+                              method:"POST", headers:{"Content-Type":"application/json"},
+                              body: JSON.stringify({ current_password: accountCfg.pw_current, new_password: accountCfg.pw_new })
+                            });
+                            const data = await r.json();
+                            if (r.ok) {
+                              setAccountCfg({...accountCfg, pw_current:"", pw_new:"", pw_confirm:""});
+                              setSavedToast("تم تغيير كلمة المرور بنجاح");
+                              setTimeout(()=>setSavedToast(""), 2500);
+                            } else {
+                              alert(data.error || "فشل تغيير كلمة المرور");
+                            }
+                          } catch (e) { alert("خطأ في الشبكة: " + e.message); }
+                        }}
+                        style={{marginTop:14,background:ui.text,color:"#fff",border:"none",padding:"10px 22px",cursor:"pointer",fontSize:13,fontFamily:ui.fontBody,fontWeight:500,borderRadius:6}}>
+                        تغيير كلمة المرور
+                      </button>
                     </div>
-
-                    <button onClick={()=>{
-                      const { pw_current, pw_new, pw_confirm, ...persist } = accountCfg;
-                      if (pw_new && pw_new !== pw_confirm) { alert("كلمتا المرور غير متطابقتين"); return; }
-                      saveSetting("account", persist);
-                    }}
-                      style={{background:ui.text,color:"#fff",border:"none",padding:"11px 22px",cursor:"pointer",fontSize:13,fontFamily:ui.fontBody,fontWeight:500,borderRadius:6}}>
-                      حفظ بيانات الحساب
-                    </button>
                   </div>
                 )}
 
@@ -3364,6 +3773,7 @@ function AdminDash({ go }) {
                     shipping_admin:  "موظف شحن",
                   };
                   const PERM_LABELS = {
+                    overview:"نظرة عامة",
                     orders:"الطلبات", products:"المنتجات", inventory:"المخزون",
                     customers:"العملاء", returns:"المرتجعات", shipping:"الشحن",
                     coupons:"الكوبونات", settings:"الإعدادات",
@@ -4288,27 +4698,49 @@ function OrderTimeline({ status }) {
 }
 
 // ─── Order Detail Modal (used by AdminDash) ───────────────────────────────────
-// Inject print-only CSS once. When the user clicks "طباعة", we toggle the
-// `nawra-print-mode` class on <body>, which the @media print rules pick up to
-// hide every chrome element except the modal's `.order-print` block.
+// Inject print-only CSS once. The modal renders deep inside the React tree
+// (not as a direct child of <body>), so `body > *:not(.x)` won't work — every
+// ancestor of the modal would also be hidden, including the modal itself.
+// Visibility-based isolation is the safe approach: hide everything, then
+// re-show only the target subtree + force it to fill the page.
 function injectPrintStyles() {
   if (document.getElementById("nawra-print-styles")) return;
   const s = document.createElement("style");
   s.id = "nawra-print-styles";
   s.textContent = `
     @media print {
-      @page { margin: 14mm; }
-      body.nawra-print-mode { background:#fff !important; }
-      body.nawra-print-mode > *:not(.order-print-overlay) { display:none !important; }
-      .order-print-overlay {
-        position:static !important; inset:auto !important; background:#fff !important;
-        padding:0 !important; overflow:visible !important;
+      @page { margin: 14mm; size: A4; }
+      body.nawra-print-mode { background: #fff !important; }
+      /* hide everything */
+      body.nawra-print-mode * { visibility: hidden !important; }
+      /* re-show the print card and all its descendants */
+      body.nawra-print-mode .order-print-card,
+      body.nawra-print-mode .order-print-card * { visibility: visible !important; }
+      /* fully hide the dim overlay backdrop and any .no-print element */
+      body.nawra-print-mode .order-print-overlay {
+        background: #fff !important;
+        position: static !important;
+        inset: auto !important;
+        padding: 0 !important;
+        overflow: visible !important;
       }
-      .order-print-overlay > .order-print-card {
-        box-shadow:none !important; max-height:none !important; max-width:none !important;
-        width:100% !important; padding:0 !important; overflow:visible !important;
+      body.nawra-print-mode .no-print,
+      body.nawra-print-mode .no-print * { visibility: hidden !important; display: none !important; }
+      /* pull the card to the top-left of the page */
+      body.nawra-print-mode .order-print-card {
+        position: absolute !important;
+        top: 0 !important; left: 0 !important; right: 0 !important;
+        margin: 0 !important;
+        width: 100% !important; max-width: 100% !important;
+        max-height: none !important;
+        box-shadow: none !important;
+        border: none !important;
+        padding: 0 !important;
+        overflow: visible !important;
+        background: #fff !important;
       }
-      .no-print { display:none !important; }
+      /* nice link colour for the map URL when printed */
+      body.nawra-print-mode .order-print-card a { color: #000 !important; text-decoration: underline; }
     }
   `;
   document.head.appendChild(s);

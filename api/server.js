@@ -5,6 +5,7 @@ const cors       = require('cors');
 const Database   = require('better-sqlite3');
 const path       = require('path');
 const nodemailer = require('nodemailer');
+const crypto     = require('crypto');
 
 const app  = express();
 const PORT = 3001;
@@ -106,11 +107,89 @@ db.exec(`
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
   )
 `);
-// Seed default product categories (idempotent)
+// Seed default product categories (idempotent). Use id prefix `cat_default_`
+// so the admin UI can recognise them as undeletable defaults.
 {
   const seedCats = ["سيروم", "غسول", "مرطب", "واقي شمس"];
   const ins = db.prepare("INSERT OR IGNORE INTO categories (id, name) VALUES (?, ?)");
-  seedCats.forEach((n, i) => ins.run(`cat_seed_${i}`, n));
+  seedCats.forEach((n, i) => ins.run(`cat_default_${i}`, n));
+}
+
+db.exec(`
+  CREATE TABLE IF NOT EXISTS approvals (
+    id           TEXT PRIMARY KEY,
+    type         TEXT NOT NULL,
+    target_id    TEXT,
+    target_label TEXT,
+    requester    TEXT,
+    payload      TEXT DEFAULT '{}',
+    reason       TEXT,
+    status       TEXT DEFAULT 'pending',
+    resolution_note TEXT,
+    created_at   DATETIME DEFAULT CURRENT_TIMESTAMP,
+    resolved_at  DATETIME
+  )
+`);
+
+db.exec(`
+  CREATE TABLE IF NOT EXISTS stock_changes (
+    id          TEXT PRIMARY KEY,
+    product_id  TEXT,
+    product_name TEXT,
+    old_qty     INTEGER,
+    new_qty     INTEGER,
+    reason      TEXT,
+    actor       TEXT,
+    created_at  DATETIME DEFAULT CURRENT_TIMESTAMP
+  )
+`);
+
+// ── Super-admin credentials bootstrap ─────────────────────────────────────────
+// On first launch (or whenever the `admin_credentials` setting is empty), we
+// generate a strong random password, hash it with scrypt, save the hash under
+// the `admin_credentials` setting key, and print the plaintext ONCE so the
+// operator can capture it from the deploy log. The plaintext is never stored.
+function hashPassword(plain, salt = crypto.randomBytes(16)) {
+  const buf = crypto.scryptSync(String(plain), salt, 64);
+  return { salt: salt.toString('hex'), hash: buf.toString('hex') };
+}
+function verifyPassword(plain, salt, hash) {
+  try {
+    const buf = crypto.scryptSync(String(plain), Buffer.from(salt, 'hex'), 64);
+    return crypto.timingSafeEqual(buf, Buffer.from(hash, 'hex'));
+  } catch { return false; }
+}
+function generatePassword() {
+  // 4 groups of 4 alphanumerics, e.g. "Nwra-Xa12-7Pq9-Kb3M". Easy to read,
+  // hard to brute-force at ~10^21 combos.
+  const ABC = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghjkmnpqrstuvwxyz23456789';
+  const grp = () => Array.from({length:4}, () => ABC[crypto.randomInt(0, ABC.length)]).join('');
+  return `Nwra-${grp()}-${grp()}-${grp()}`;
+}
+{
+  const row = db.prepare('SELECT value FROM settings WHERE key = ?').get('admin_credentials');
+  let needBootstrap = !row;
+  if (row) {
+    try { const v = JSON.parse(row.value); if (!v || !v.hash || !v.email) needBootstrap = true; }
+    catch { needBootstrap = true; }
+  }
+  if (needBootstrap) {
+    const email = 'nawraskincare@gmail.com';
+    const plain = generatePassword();
+    const { salt, hash } = hashPassword(plain);
+    db.prepare(`
+      INSERT INTO settings (key, value, updated_at)
+      VALUES (?, ?, datetime('now'))
+      ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = datetime('now')
+    `).run('admin_credentials', JSON.stringify({ email, salt, hash, role: 'super_admin', created_at: new Date().toISOString() }));
+    console.log('');
+    console.log('═══════════════════════════════════════════════════════════════');
+    console.log('  🔐  SUPER ADMIN CREDENTIALS (seed — store securely!)');
+    console.log('  Email:    ' + email);
+    console.log('  Password: ' + plain);
+    console.log('═══════════════════════════════════════════════════════════════');
+    console.log('');
+  }
 }
 db.exec(`
   CREATE TABLE IF NOT EXISTS products (
@@ -752,6 +831,128 @@ app.put('/api/settings/:key', (req, res) => {
       ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = datetime('now')
     `).run(req.params.key, json);
     res.json({ ok: true });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// ── AUTH (super-admin only at the moment) ─────────────────────────────────────
+function loadAdminCreds() {
+  const row = db.prepare('SELECT value FROM settings WHERE key = ?').get('admin_credentials');
+  if (!row) return null;
+  try { return JSON.parse(row.value); } catch { return null; }
+}
+function saveAdminCreds(creds) {
+  db.prepare(`
+    INSERT INTO settings (key, value, updated_at)
+    VALUES (?, ?, datetime('now'))
+    ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = datetime('now')
+  `).run('admin_credentials', JSON.stringify(creds));
+}
+
+app.post('/api/auth/login', (req, res) => {
+  try {
+    const { email, password } = req.body || {};
+    const creds = loadAdminCreds();
+    if (!creds) return res.status(500).json({ error: 'admin not configured' });
+    if (String(email||'').trim().toLowerCase() !== creds.email.toLowerCase())
+      return res.status(401).json({ error: 'بيانات الدخول غير صحيحة' });
+    if (!verifyPassword(password, creds.salt, creds.hash))
+      return res.status(401).json({ error: 'بيانات الدخول غير صحيحة' });
+    res.json({ ok: true, email: creds.email, role: creds.role || 'super_admin', name: 'Super Admin' });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.post('/api/auth/change-password', (req, res) => {
+  try {
+    const { current_password, new_password } = req.body || {};
+    if (!new_password || String(new_password).length < 8)
+      return res.status(400).json({ error: 'كلمة المرور الجديدة لازم تكون 8 أحرف على الأقل' });
+    const creds = loadAdminCreds();
+    if (!creds) return res.status(500).json({ error: 'admin not configured' });
+    if (!verifyPassword(current_password, creds.salt, creds.hash))
+      return res.status(401).json({ error: 'كلمة المرور الحالية غير صحيحة' });
+    const { salt, hash } = hashPassword(new_password);
+    saveAdminCreds({ ...creds, salt, hash, updated_at: new Date().toISOString() });
+    res.json({ ok: true });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// ── APPROVALS ─────────────────────────────────────────────────────────────────
+// type values currently used by the UI:
+//   'product_delete' | 'product_add' | 'stock_reduce'
+app.get('/api/approvals', (req, res) => {
+  try {
+    const { status, type } = req.query;
+    let sql = 'SELECT * FROM approvals WHERE 1=1';
+    const params = [];
+    if (status) { sql += ' AND status = ?'; params.push(status); }
+    if (type)   { sql += ' AND type   = ?'; params.push(type);   }
+    sql += ' ORDER BY created_at DESC LIMIT 100';
+    const rows = db.prepare(sql).all(...params).map(r => {
+      try { r.payload = JSON.parse(r.payload || '{}'); } catch { r.payload = {}; }
+      return r;
+    });
+    res.json(rows);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.post('/api/approvals', (req, res) => {
+  try {
+    const a = req.body || {};
+    if (!a.type) return res.status(400).json({ error: 'type required' });
+    const id = a.id || `ap_${Date.now().toString(36)}_${Math.random().toString(36).slice(2,5)}`;
+    db.prepare(`
+      INSERT INTO approvals (id, type, target_id, target_label, requester, payload, reason, status)
+      VALUES (?,?,?,?,?,?,?, 'pending')
+    `).run(id, a.type, a.target_id || null, a.target_label || null, a.requester || null,
+           JSON.stringify(a.payload || {}), a.reason || null);
+    res.json({ ok: true, id });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.patch('/api/approvals/:id', (req, res) => {
+  try {
+    const { status, resolution_note } = req.body || {};
+    if (!['approved','rejected'].includes(status))
+      return res.status(400).json({ error: 'status must be approved or rejected' });
+    const cur = db.prepare('SELECT * FROM approvals WHERE id = ?').get(req.params.id);
+    if (!cur) return res.status(404).json({ error: 'not found' });
+    if (cur.status !== 'pending') return res.status(409).json({ error: 'already resolved' });
+
+    // When a product-delete request is approved, actually delete the product.
+    if (status === 'approved' && cur.type === 'product_delete' && cur.target_id) {
+      try { db.prepare('DELETE FROM products WHERE id = ?').run(cur.target_id); } catch {}
+    }
+
+    db.prepare(`
+      UPDATE approvals SET status = ?, resolution_note = ?, resolved_at = datetime('now')
+      WHERE id = ?
+    `).run(status, resolution_note || null, req.params.id);
+    const fresh = db.prepare('SELECT * FROM approvals WHERE id = ?').get(req.params.id);
+    try { fresh.payload = JSON.parse(fresh.payload || '{}'); } catch { fresh.payload = {}; }
+    res.json(fresh);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// ── STOCK CHANGES (audit log) ─────────────────────────────────────────────────
+app.post('/api/stock-changes', (req, res) => {
+  try {
+    const r = req.body || {};
+    if (!r.product_id) return res.status(400).json({ error: 'product_id required' });
+    const id = `sc_${Date.now().toString(36)}_${Math.random().toString(36).slice(2,5)}`;
+    db.prepare(`
+      INSERT INTO stock_changes (id, product_id, product_name, old_qty, new_qty, reason, actor)
+      VALUES (?,?,?,?,?,?,?)
+    `).run(id, r.product_id, r.product_name||null,
+           Number.isFinite(+r.old_qty)?+r.old_qty:null,
+           Number.isFinite(+r.new_qty)?+r.new_qty:null,
+           r.reason||null, r.actor||null);
+    res.json({ ok: true, id });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+app.get('/api/stock-changes', (_req, res) => {
+  try {
+    const rows = db.prepare('SELECT * FROM stock_changes ORDER BY created_at DESC LIMIT 100').all();
+    res.json(rows);
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
