@@ -961,6 +961,32 @@ function LoginPage({ go }) {
 }
 
 // ─── Admin Dashboard ──────────────────────────────────────────────────────────
+// Inline SVG icon helper (mirrors Tabler Icons line style)
+function AdmIcon({ name, size = 16 }) {
+  const paths = {
+    "chart-bar":     <><path d="M3 12h3v9H3z"/><path d="M9 3h3v18H9z"/><path d="M15 8h3v13h-3z"/></>,
+    "shopping-cart": <><circle cx="9" cy="20" r="1.5"/><circle cx="17" cy="20" r="1.5"/><path d="M3 3h2l2.5 12h11l2-8H6"/></>,
+    "box":           <><path d="M21 8l-9-5-9 5 9 5 9-5z"/><path d="M3 8v8l9 5 9-5V8"/><path d="M12 13v8"/></>,
+    "users":         <><circle cx="9" cy="8" r="3.5"/><path d="M3 21v-1a6 6 0 0 1 12 0v1"/><path d="M16 11a3 3 0 0 0 0-6"/><path d="M21 21v-1a5 5 0 0 0-4-4.9"/></>,
+    "truck":         <><path d="M3 6h11v9H3z"/><path d="M14 9h4l3 3v3h-7z"/><circle cx="7" cy="18" r="2"/><circle cx="17" cy="18" r="2"/></>,
+    "discount":      <><path d="M4 12l8-8h6v6l-8 8z"/><circle cx="15" cy="9" r="1.3"/><path d="M9 15l-3 3"/></>,
+    "settings":      <><circle cx="12" cy="12" r="3"/><path d="M19 12a7 7 0 0 0-.13-1.35l2-1.55-2-3.46-2.36.95a7 7 0 0 0-2.34-1.36L13.8 3h-3.6l-.37 2.23a7 7 0 0 0-2.34 1.36l-2.36-.95-2 3.46 2 1.55A7 7 0 0 0 5 12c0 .46.04.92.13 1.35l-2 1.55 2 3.46 2.36-.95a7 7 0 0 0 2.34 1.36L10.2 21h3.6l.37-2.23a7 7 0 0 0 2.34-1.36l2.36.95 2-3.46-2-1.55c.09-.43.13-.89.13-1.35z"/></>,
+    "arrow-up":      <><path d="M12 19V5"/><path d="M5 12l7-7 7 7"/></>,
+    "arrow-down":    <><path d="M12 5v14"/><path d="M5 12l7 7 7-7"/></>,
+    "droplet":       <><path d="M12 3s-6 7-6 11a6 6 0 0 0 12 0c0-4-6-11-6-11z"/></>,
+    "sun":           <><circle cx="12" cy="12" r="4"/><path d="M12 3v2M12 19v2M3 12h2M19 12h2M5.6 5.6l1.4 1.4M17 17l1.4 1.4M5.6 18.4L7 17M17 7l1.4-1.4"/></>,
+    "package":       <><path d="M21 8l-9-5-9 5 9 5 9-5z"/><path d="M3 8v8l9 5 9-5V8"/></>,
+    "refresh":       <><path d="M21 12a9 9 0 1 1-3-6.7"/><path d="M21 4v5h-5"/></>,
+    "logout":        <><path d="M14 8V6a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h7a2 2 0 0 0 2-2v-2"/><path d="M9 12h12"/><path d="M17 8l4 4-4 4"/></>,
+    "plus":          <><path d="M12 5v14"/><path d="M5 12h14"/></>
+  };
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" style={{flexShrink:0,verticalAlign:"middle"}}>
+      {paths[name] || null}
+    </svg>
+  );
+}
+
 function AdminDash({ go }) {
   const { prods, addProd, delProd, editProd } = useProds();
   const { t } = useLang();
@@ -1096,251 +1122,489 @@ function AdminDash({ go }) {
     } catch {}
   };
   useEffect(() => { loadUsers(); }, [orderList.length]); // eslint-disable-line
-  const tabs = [["overview","📊 نظرة عامة"],["products","📦 المنتجات"],["orders","🧾 الطلبات"],["customers","👥 العملاء"]];
 
-  return (
-    <div style={{direction:"rtl",minHeight:"80vh",background:"#F8F6F3"}}>
-      {/* Header */}
-      <div style={{background:C.dk2,padding:mob?"14px 16px":"16px 40px",display:"flex",alignItems:"center",justifyContent:"space-between"}}>
-        <div>
-          <div style={{fontFamily:C.fe,fontSize:mob?14:18,color:C.cr,letterSpacing:"0.22em"}}>NAWRA ADMIN</div>
-          <div style={{fontFamily:C.fe,fontSize:10,color:C.go,letterSpacing:"0.18em",fontStyle:"italic",marginTop:2}}>لوحة التحكم</div>
+  // ── Computed analytics (all from REAL API/order data) ───────────────────────
+  // Parse order date — supports both ISO strings and the "d/m/yyyy" Arabic-style
+  // strings produced by the cart sidebar. Falls back to created_at if needed.
+  const parseOrderDate = (o) => {
+    const raw = o.created_at || o.date;
+    if (!raw) return null;
+    const d = new Date(raw);
+    if (!isNaN(d)) return d;
+    // try "DD/MM/YYYY" or "D/M/YYYY"
+    const m = String(raw).match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2,4})/);
+    if (m) {
+      const yr = m[3].length === 2 ? 2000 + Number(m[3]) : Number(m[3]);
+      return new Date(yr, Number(m[2]) - 1, Number(m[1]));
+    }
+    return null;
+  };
+
+  const now = new Date();
+  const startOfDay = (d) => { const x = new Date(d); x.setHours(0,0,0,0); return x; };
+  const today0 = startOfDay(now);
+
+  // 7-day series: index 0 = 6 days ago, index 6 = today
+  const dayLabels = ["الأحد","الاثنين","الثلاثاء","الأربعاء","الخميس","الجمعة","السبت"];
+  const last7 = Array.from({length:7}, (_,i) => {
+    const d = new Date(today0); d.setDate(d.getDate() - (6-i));
+    return { date: d, total: 0, label: dayLabels[d.getDay()] };
+  });
+  orderList.forEach(o => {
+    const d = parseOrderDate(o); if (!d) return;
+    const day0 = startOfDay(d);
+    const diff = Math.round((today0 - day0) / 86400000);
+    if (diff >= 0 && diff <= 6) last7[6-diff].total += Number(o.total)||0;
+  });
+  const maxDay = Math.max(1, ...last7.map(d=>d.total));
+
+  // Month-over-month sales % change
+  const thisMonth = now.getMonth(), thisYear = now.getFullYear();
+  const lastMonth = thisMonth === 0 ? 11 : thisMonth - 1;
+  const lastMonthYear = thisMonth === 0 ? thisYear - 1 : thisYear;
+  let salesThisMonth = 0, salesLastMonth = 0;
+  orderList.forEach(o => {
+    const d = parseOrderDate(o); if (!d) return;
+    if (d.getFullYear() === thisYear && d.getMonth() === thisMonth) salesThisMonth += Number(o.total)||0;
+    else if (d.getFullYear() === lastMonthYear && d.getMonth() === lastMonth) salesLastMonth += Number(o.total)||0;
+  });
+  const salesChangePct = salesLastMonth ? Math.round(((salesThisMonth - salesLastMonth)/salesLastMonth)*100) : (salesThisMonth ? 100 : 0);
+
+  // Orders this month / last month
+  let ordersThisMonth = 0, ordersLastMonth = 0;
+  orderList.forEach(o => {
+    const d = parseOrderDate(o); if (!d) return;
+    if (d.getFullYear() === thisYear && d.getMonth() === thisMonth) ordersThisMonth++;
+    else if (d.getFullYear() === lastMonthYear && d.getMonth() === lastMonth) ordersLastMonth++;
+  });
+  const ordersChangePct = ordersLastMonth ? Math.round(((ordersThisMonth - ordersLastMonth)/ordersLastMonth)*100) : (ordersThisMonth ? 100 : 0);
+
+  // New customers this month (firstOrder within current month)
+  const newCustomersThisMonth = allUsers.filter(u => {
+    if (!u.firstOrder) return false;
+    const d = new Date(u.firstOrder);
+    return !isNaN(d) && d.getFullYear() === thisYear && d.getMonth() === thisMonth;
+  }).length;
+
+  // Avg order — % change vs last month
+  const avgThis = ordersThisMonth ? salesThisMonth/ordersThisMonth : 0;
+  const avgLast = ordersLastMonth ? salesLastMonth/ordersLastMonth : 0;
+  const avgChangePct = avgLast ? Math.round(((avgThis - avgLast)/avgLast)*100) : 0;
+
+  // Top selling products — aggregated from every order's items
+  const productAgg = new Map();
+  orderList.forEach(o => (o.items||[]).forEach(it => {
+    const key = it.name || it.nameAr || "—";
+    const prev = productAgg.get(key) || { name: key, qty: 0, rev: 0, icon: it.icon || null, brand: it.brand || "" };
+    prev.qty += Number(it.qty) || 0;
+    prev.rev += (Number(it.price) || 0) * (Number(it.qty) || 0);
+    productAgg.set(key, prev);
+  }));
+  const topProducts = Array.from(productAgg.values()).sort((a,b)=>b.qty-a.qty).slice(0,5);
+  // Fallback: if no orders yet, show products from catalogue (qty=0) so the card is never empty
+  const topProductsForRender = topProducts.length ? topProducts
+    : prods.slice(0,3).map(p => ({ name: p.nameAr || p.name, qty:0, rev:0, icon: p.icon, brand: p.brand }));
+
+  // Localized current-month label (e.g. "مايو 2026")
+  const monthLabel = new Intl.DateTimeFormat("ar-EG", { month:"long", year:"numeric" }).format(now);
+
+  // Status → badge style
+  const badgeStyle = (status) => {
+    if (status === "مكتمل")  return { bg:"#DCFCE7", fg:"#15803D" };
+    if (status === "ملغي")   return { bg:"#FEE2E2", fg:"#B91C1C" };
+    if (status === "شحن" || status === "قيد الشحن" || status === "تم الشحن") return { bg:"#FEF3C7", fg:"#92400E" };
+    return { bg:"#DBEAFE", fg:"#1D4ED8" }; // "جديد" / default
+  };
+
+  // ── Nav items for sidebar ──────────────────────────────────────────────────
+  const navItems = [
+    { k:"overview",  l:"نظرة عامة", icon:"chart-bar" },
+    { k:"orders",    l:"الطلبات",   icon:"shopping-cart" },
+    { k:"products",  l:"المنتجات",  icon:"box" },
+    { k:"customers", l:"العملاء",   icon:"users" },
+    { k:"shipping",  l:"الشحن",     icon:"truck" },
+    { k:"coupons",   l:"الكوبونات", icon:"discount" },
+    { k:"settings",  l:"الإعدادات", icon:"settings" },
+  ];
+
+  const topbarTitle = navItems.find(n=>n.k===tab)?.l || "نظرة عامة";
+
+  // ── Reusable style tokens ──────────────────────────────────────────────────
+  const ui = {
+    border:    "0.5px solid #E5E5E5",
+    cardBg:    "#FFFFFF",
+    pageBg:    "#F5F5F5",
+    sideBg:    "#FAFAFA",
+    text:      "#1A1A1A",
+    textSub:   "#737373",
+    radius:    8,
+    fontHead:  C.fa,
+    fontBody:  C.fb,
+  };
+
+  // ── Sidebar nav button ─────────────────────────────────────────────────────
+  const NavBtn = ({ item }) => {
+    const active = tab === item.k;
+    return (
+      <button onClick={()=>setTab(item.k)}
+        style={{
+          display:"flex", alignItems:"center", gap:10, width:"100%",
+          padding:"10px 16px",
+          fontSize:13, fontFamily:ui.fontBody, fontWeight: active?500:400,
+          color: active ? ui.text : ui.textSub,
+          background: active ? ui.cardBg : "transparent",
+          border:"none",
+          borderRight: active ? `2px solid ${ui.text}` : "2px solid transparent",
+          cursor:"pointer", textAlign:"right",
+          transition:"all .15s"
+        }}>
+        <AdmIcon name={item.icon} size={17} />
+        <span>{item.l}</span>
+      </button>
+    );
+  };
+
+  // ── Metric card ────────────────────────────────────────────────────────────
+  const Metric = ({ label, value, changePct, suffix, hint }) => {
+    const up = changePct > 0, down = changePct < 0;
+    const showChange = changePct !== undefined && changePct !== null;
+    return (
+      <div style={{background:ui.cardBg,border:ui.border,borderRadius:ui.radius,padding:"14px 16px"}}>
+        <div style={{fontSize:11.5,color:ui.textSub,fontFamily:ui.fontBody,marginBottom:6}}>{label}</div>
+        <div style={{fontSize:mob?20:24,color:ui.text,fontFamily:ui.fontHead,fontWeight:500,lineHeight:1.1}}>
+          {value}{suffix && <span style={{fontSize:13,color:ui.textSub,marginInlineStart:5,fontFamily:ui.fontBody}}>{suffix}</span>}
         </div>
-        <button onClick={()=>go("#home")} style={{background:"none",border:"1px solid rgba(196,149,106,.3)",color:C.cr,padding:"7px 16px",cursor:"pointer",fontFamily:C.fb,fontSize:12,letterSpacing:"0.04em"}}>← الموقع</button>
+        {showChange ? (
+          <div style={{display:"flex",alignItems:"center",gap:4,marginTop:5,fontSize:11,fontFamily:ui.fontBody,
+            color: up?"#16A34A":down?"#DC2626":ui.textSub}}>
+            <AdmIcon name={up?"arrow-up":"arrow-down"} size={12} />
+            <span>{Math.abs(changePct)}% {hint || "هذا الشهر"}</span>
+          </div>
+        ) : hint ? (
+          <div style={{fontSize:11,color:"#16A34A",marginTop:5,fontFamily:ui.fontBody}}>{hint}</div>
+        ) : null}
+      </div>
+    );
+  };
+
+  // ── Overview tab content ───────────────────────────────────────────────────
+  const Overview = () => (
+    <div>
+      {/* 4 Metric cards */}
+      <div style={{display:"grid",gridTemplateColumns:mob?"1fr 1fr":"repeat(4,1fr)",gap:10,marginBottom:14}}>
+        <Metric label="إجمالي المبيعات" value={salesThisMonth.toLocaleString()} suffix="ج" changePct={salesChangePct} />
+        <Metric label="عدد الطلبات"     value={ordersThisMonth} changePct={ordersChangePct} />
+        <Metric label="العملاء"          value={allUsers.length} hint={newCustomersThisMonth ? `${newCustomersThisMonth} جدد` : "—"} />
+        <Metric label="متوسط قيمة الطلب" value={Math.round(avgThis).toLocaleString()} suffix="ج" changePct={avgChangePct} hint="عن الشهر السابق" />
       </div>
 
-      {/* Tabs */}
-      <div style={{background:C.wh,borderBottom:"1px solid rgba(196,149,106,.12)",padding:mob?"0 16px":"0 40px",display:"flex",gap:0,overflowX:"auto"}}>
-        {tabs.map(([k,l])=>(
-          <button key={k} onClick={()=>setTab(k)} style={{padding:mob?"12px 14px":"14px 20px",background:"none",border:"none",borderBottom:tab===k?`2px solid ${C.dk}`:"2px solid transparent",cursor:"pointer",fontFamily:C.fb,fontSize:mob?12:13,color:tab===k?C.dk:C.mu,whiteSpace:"nowrap",fontWeight:tab===k?500:400}}>{l}</button>
+      {/* Row: bar chart + latest orders */}
+      <div style={{display:"grid",gridTemplateColumns:mob?"1fr":"1fr 1fr",gap:10,marginBottom:10}}>
+        {/* Bar chart */}
+        <div style={{background:ui.cardBg,border:ui.border,borderRadius:ui.radius,padding:"14px 16px"}}>
+          <h3 style={{fontSize:13,fontWeight:500,color:ui.text,marginBottom:14,fontFamily:ui.fontBody}}>المبيعات — آخر 7 أيام</h3>
+          <div style={{display:"flex",alignItems:"flex-end",gap:6,height:110,paddingTop:8,direction:"ltr"}}>
+            {last7.map((d,i)=>{
+              const h = Math.max(4, Math.round((d.total / maxDay) * 90));
+              return (
+                <div key={i} style={{flex:1,display:"flex",flexDirection:"column",alignItems:"center",gap:5,position:"relative"}}>
+                  <div title={`${d.total.toLocaleString()} ج`}
+                    style={{width:"100%",height:`${h}%`,background:"#3B82F6",borderRadius:"3px 3px 0 0",transition:"height .3s"}} />
+                  <span style={{fontSize:10,color:ui.textSub,fontFamily:ui.fontBody}}>{d.label.slice(0,3)}</span>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+
+        {/* Latest orders */}
+        <div style={{background:ui.cardBg,border:ui.border,borderRadius:ui.radius,padding:"14px 16px"}}>
+          <h3 style={{fontSize:13,fontWeight:500,color:ui.text,marginBottom:10,fontFamily:ui.fontBody}}>أحدث الطلبات</h3>
+          {orderList.length===0 ? (
+            <p style={{color:ui.textSub,fontFamily:ui.fontBody,fontSize:12,textAlign:"center",padding:"20px 0"}}>مفيش طلبات لحد دلوقتي</p>
+          ) : orderList.slice(0,5).map(o=>{
+            const b = badgeStyle(o.status);
+            return (
+              <div key={o.id} onClick={()=>setDetailOrderId(o.id)}
+                style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"8px 0",
+                  borderBottom:`0.5px solid ${ui.border.replace("0.5px solid ","")}`,fontSize:12,cursor:"pointer"}}>
+                <span style={{color:ui.text,fontFamily:ui.fontBody,flex:1,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{o.name}</span>
+                <span style={{fontSize:10,padding:"2px 9px",borderRadius:20,background:b.bg,color:b.fg,fontFamily:ui.fontBody,margin:"0 8px"}}>{o.status}</span>
+                <span style={{fontWeight:500,color:ui.text,fontFamily:ui.fontBody}}>{(o.total||0).toLocaleString()} ج</span>
+              </div>
+            );
+          })}
+        </div>
+      </div>
+
+      {/* Top selling products */}
+      <div style={{background:ui.cardBg,border:ui.border,borderRadius:ui.radius,padding:"14px 16px"}}>
+        <h3 style={{fontSize:13,fontWeight:500,color:ui.text,marginBottom:10,fontFamily:ui.fontBody}}>أكثر المنتجات مبيعاً</h3>
+        {topProductsForRender.length === 0 ? (
+          <p style={{color:ui.textSub,fontFamily:ui.fontBody,fontSize:12,textAlign:"center",padding:"20px 0"}}>لا توجد بيانات بعد</p>
+        ) : topProductsForRender.map((p,i)=>(
+          <div key={i} style={{display:"flex",alignItems:"center",gap:10,padding:"8px 0",
+            borderBottom: i < topProductsForRender.length-1 ? `0.5px solid #E5E5E5` : "none"}}>
+            <div style={{width:36,height:36,borderRadius:6,background:ui.sideBg,display:"flex",alignItems:"center",justifyContent:"center",fontSize:18,flexShrink:0}}>
+              {p.icon || <AdmIcon name="droplet" size={18} />}
+            </div>
+            <div style={{flex:1,minWidth:0}}>
+              <div style={{fontSize:13,fontWeight:500,color:ui.text,fontFamily:ui.fontBody,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{p.name}</div>
+              <div style={{fontSize:11,color:ui.textSub,fontFamily:ui.fontBody,marginTop:2}}>{p.qty} مبيعة</div>
+            </div>
+            <div style={{fontSize:13,fontWeight:500,color:ui.text,fontFamily:ui.fontBody,whiteSpace:"nowrap"}}>{p.rev.toLocaleString()} ج</div>
+          </div>
         ))}
       </div>
+    </div>
+  );
 
-      <div style={{padding:mob?"16px":"24px 40px",maxWidth:1100,margin:"0 auto"}}>
+  // ── Placeholder tab for future features ────────────────────────────────────
+  const Placeholder = ({ icon, title, body }) => (
+    <div style={{background:ui.cardBg,border:ui.border,borderRadius:ui.radius,padding:mob?"30px 20px":"60px 40px",textAlign:"center"}}>
+      <div style={{marginBottom:14,color:ui.textSub,display:"flex",justifyContent:"center"}}><AdmIcon name={icon} size={42} /></div>
+      <h3 style={{fontFamily:ui.fontHead,fontSize:18,fontWeight:500,color:ui.text,marginBottom:8}}>{title}</h3>
+      <p style={{fontFamily:ui.fontBody,fontSize:13,color:ui.textSub,maxWidth:380,margin:"0 auto",lineHeight:1.7}}>{body}</p>
+    </div>
+  );
 
-        {/* OVERVIEW */}
-        {tab==="overview" && (
-          <div>
-            <div style={{display:"grid",gridTemplateColumns:mob?"1fr 1fr":"repeat(4,1fr)",gap:mob?12:16,marginBottom:24}}>
-              {statCard("إجمالي المبيعات", totalRev.toLocaleString()+" جنيه", C.go)}
-              {statCard("عدد الطلبات", totalOrders)}
-              {statCard("متوسط الطلب", avgOrder+" جنيه")}
-              {statCard("المنتجات", prods.length)}
+  return (
+    <div style={{direction:"rtl",minHeight:"100vh",background:ui.pageBg,fontFamily:ui.fontBody}}>
+      <div style={{display:"grid",gridTemplateColumns:mob?"1fr":"200px 1fr",minHeight:"100vh"}}>
+
+        {/* SIDEBAR */}
+        <aside style={{background:ui.sideBg,borderInlineEnd:ui.border,padding:"16px 0",display:"flex",flexDirection:"column"}}>
+          <div style={{padding:"0 16px 14px",borderBottom:ui.border,marginBottom:10}}>
+            <div style={{fontFamily:ui.fontHead,fontSize:16,fontWeight:600,color:ui.text}}>نوّرَة</div>
+            <div style={{fontSize:11,color:ui.textSub,fontFamily:ui.fontBody,marginTop:2}}>لوحة التحكم</div>
+          </div>
+          {mob ? (
+            // On mobile: scroll-x bar of nav buttons
+            <div style={{display:"flex",overflowX:"auto",gap:4,padding:"0 10px"}}>
+              {navItems.map(n => (
+                <button key={n.k} onClick={()=>setTab(n.k)} style={{
+                  flexShrink:0, display:"flex", alignItems:"center", gap:6, padding:"7px 12px",
+                  fontSize:12, fontFamily:ui.fontBody, fontWeight: tab===n.k?500:400,
+                  color: tab===n.k?ui.text:ui.textSub,
+                  background: tab===n.k?ui.cardBg:"transparent",
+                  border:`0.5px solid ${tab===n.k?"#D4D4D4":"transparent"}`,
+                  borderRadius:20, cursor:"pointer", whiteSpace:"nowrap"
+                }}><AdmIcon name={n.icon} size={14}/>{n.l}</button>
+              ))}
             </div>
-            {/* Recent orders */}
-            <div style={{background:C.wh,padding:mob?"16px":"20px",boxShadow:"0 2px 8px rgba(0,0,0,.07)"}}>
-              <h3 style={{fontFamily:C.fa,fontSize:18,fontWeight:600,color:C.dk,marginBottom:16}}>آخر الطلبات</h3>
+          ) : navItems.map(n => <NavBtn key={n.k} item={n} />)}
+          <div style={{flex:1}} />
+          <button onClick={()=>go("#home")} style={{
+            display:"flex",alignItems:"center",gap:8,padding:"10px 16px",
+            fontSize:12,fontFamily:ui.fontBody,color:ui.textSub,
+            background:"transparent",border:"none",cursor:"pointer",textAlign:"right",
+            borderTop:ui.border,marginTop:6
+          }}>
+            <AdmIcon name="logout" size={15}/>
+            <span>الرجوع للموقع</span>
+          </button>
+        </aside>
+
+        {/* MAIN */}
+        <main style={{padding:mob?"14px":"20px 24px",overflow:"auto"}}>
+          {/* Topbar */}
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:14}}>
+            <h2 style={{fontSize:17,fontWeight:500,color:ui.text,fontFamily:ui.fontHead,margin:0}}>{topbarTitle}</h2>
+            <span style={{fontSize:12,color:ui.textSub,fontFamily:ui.fontBody}}>{monthLabel}</span>
+          </div>
+
+          {tab === "overview" && <Overview />}
+
+          {/* ORDERS */}
+          {tab === "orders" && (
+            <div>
+              <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:12}}>
+                <span style={{fontSize:13,color:ui.textSub,fontFamily:ui.fontBody}}>الإجمالي: {orderList.length} طلب</span>
+                <button onClick={refreshOrders}
+                  style={{display:"flex",alignItems:"center",gap:5,background:ui.cardBg,color:ui.text,
+                    border:ui.border,padding:"6px 12px",cursor:"pointer",fontFamily:ui.fontBody,
+                    fontSize:12,borderRadius:6}}>
+                  <AdmIcon name="refresh" size={13}/> تحديث
+                </button>
+              </div>
               {orderList.length===0 ? (
-                <p style={{color:C.mu,fontFamily:C.fb,fontSize:13,textAlign:"center",padding:"24px 0"}}>مفيش طلبات لحد دلوقتي</p>
-              ) : orderList.slice(0,5).map(o=>(
-                <div key={o.id} style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"10px 0",borderBottom:"1px solid rgba(0,0,0,.06)"}}>
-                  <div>
-                    <div style={{fontSize:14,color:C.dk,fontFamily:C.fb}}>{o.name} — {o.city}</div>
-                    <div style={{fontSize:11,color:C.mu,fontFamily:C.fb,marginTop:2}}>{o.date} | {o.phone}</div>
-                  </div>
-                  <div style={{textAlign:"left"}}>
-                    <div style={{fontFamily:C.fa,fontSize:16,color:C.dk}}>{(o.total||0)} جنيه</div>
-                    <div style={{fontSize:10,padding:"2px 8px",background:o.status==="مكتمل"?"#D1FAE5":o.status==="ملغي"?"#FEE2E2":"#FEF3C7",color:o.status==="مكتمل"?"#065F46":o.status==="ملغي"?"#DC2626":"#92400E",borderRadius:10,marginTop:3,fontFamily:C.fb,textAlign:"center"}}>{o.status}</div>
-                  </div>
+                <Placeholder icon="shopping-cart" title="مفيش طلبات لحد دلوقتي" body="هتبان الطلبات هنا أول ما عميل يكمّل عملية الشراء." />
+              ) : (
+                <div style={{background:ui.cardBg,border:ui.border,borderRadius:ui.radius,overflow:"hidden"}}>
+                  {orderList.map((o,i)=>{
+                    const b = badgeStyle(o.status);
+                    return (
+                      <div key={o.id} onClick={()=>setDetailOrderId(o.id)}
+                        style={{display:"grid",gridTemplateColumns:mob?"1fr":"1.5fr 1fr 1fr auto auto",
+                          gap:10,alignItems:"center",padding:"12px 16px",
+                          borderTop: i>0 ? `0.5px solid #EEE` : "none",cursor:"pointer",
+                          transition:"background .15s"}}
+                        onMouseEnter={e=>e.currentTarget.style.background="#FAFAFA"}
+                        onMouseLeave={e=>e.currentTarget.style.background="transparent"}>
+                        <div>
+                          <div style={{fontSize:13.5,color:ui.text,fontFamily:ui.fontBody,fontWeight:500}}>{o.name}</div>
+                          <div style={{fontSize:11,color:ui.textSub,fontFamily:ui.fontBody,marginTop:2}}>{o.phone} · {o.city}</div>
+                        </div>
+                        {!mob && <div style={{fontSize:12,color:ui.textSub,fontFamily:ui.fontBody}}>{o.date}</div>}
+                        {!mob && <div style={{fontSize:11,color:ui.textSub,fontFamily:ui.fontBody}}>{(o.items||[]).length} منتجات</div>}
+                        <span style={{fontSize:10,padding:"3px 10px",borderRadius:20,background:b.bg,color:b.fg,fontFamily:ui.fontBody,justifySelf:"start"}}>{o.status}</span>
+                        <div style={{fontSize:13.5,fontWeight:500,color:ui.text,fontFamily:ui.fontBody,textAlign:"left"}}>{(o.total||0).toLocaleString()} ج</div>
+                      </div>
+                    );
+                  })}
                 </div>
-              ))}
+              )}
+              <OrderDetailModal
+                order={detailOrder}
+                onClose={()=>setDetailOrderId(null)}
+                onStatusChange={(id, status)=>updateOrderStatus(id, status)}
+              />
             </div>
-          </div>
-        )}
+          )}
 
-        {/* PRODUCTS */}
-        {tab==="products" && (
-          <div>
-            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:16}}>
-              <h3 style={{fontFamily:C.fa,fontSize:18,fontWeight:400,color:C.dk,margin:0}}>المنتجات ({prods.length})</h3>
-              <button onClick={()=>{setShowAdd(!showAdd);setEditId(null);setNewP({name:"",brand:"",desc:"",price:"",icon:"✨",badge:"",bg:COLORS[0]});}}
-                style={{background:C.dk,color:C.cr,border:"none",padding:"9px 18px",cursor:"pointer",fontFamily:C.fb,fontSize:13}}>
-                {showAdd?"إلغاء":"+ إضافة منتج"}
-              </button>
-            </div>
+          {/* PRODUCTS */}
+          {tab === "products" && (
+            <div>
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:12}}>
+                <span style={{fontSize:13,color:ui.textSub,fontFamily:ui.fontBody}}>الإجمالي: {prods.length} منتج</span>
+                <button onClick={()=>{setShowAdd(!showAdd);setEditId(null);setNewP({name:"",brand:"",desc:"",price:"",icon:"✨",badge:"",bg:COLORS[0]});}}
+                  style={{display:"flex",alignItems:"center",gap:5,background:ui.text,color:"#fff",
+                    border:"none",padding:"7px 14px",cursor:"pointer",fontFamily:ui.fontBody,fontSize:12,borderRadius:6}}>
+                  <AdmIcon name="plus" size={13}/> {showAdd?"إلغاء":"إضافة منتج"}
+                </button>
+              </div>
 
-            {/* Add/Edit Form */}
-            {showAdd && (
-              <div style={{background:C.wh,padding:mob?"16px":"20px",marginBottom:20,boxShadow:"0 2px 8px rgba(0,0,0,.07)"}}>
-                <h4 style={{fontFamily:C.fa,fontSize:16,fontWeight:400,color:C.dk,marginBottom:16}}>{editId?"تعديل المنتج":"إضافة منتج جديد"}</h4>
-                <div style={{display:"grid",gridTemplateColumns:mob?"1fr":"1fr 1fr",gap:mob?0:16}}>
-                  <div>{pInp("name","اسم المنتج","مثال: سيروم النياسيناميد")}{pInp("brand","البراند","مثال: THE ORDINARY")}{pInp("price","السعر (جنيه)","280","number")}{pInp("stock","الكمية في المخزون","10","number")}</div>
-                  <div>{pInp("desc","الوصف","وصف مختصر للمنتج")}{pInp("badge","Badge (اختياري)","مثال: جديد")}
-                    <div style={{marginBottom:11}}>
-                      <label style={{display:"block",fontSize:10,letterSpacing:2,color:C.mu,marginBottom:5,fontFamily:C.fb}}>الأيقونة</label>
-                      <div style={{display:"flex",flexWrap:"wrap",gap:6}}>
-                        {ICONS.map(ic=><button key={ic} onClick={()=>setNewP({...newP,icon:ic})} style={{fontSize:20,background:newP.icon===ic?C.bl:"none",border:newP.icon===ic?`1px solid ${C.go}`:"1px solid rgba(0,0,0,.1)",width:36,height:36,cursor:"pointer",borderRadius:4}}>{ic}</button>)}
+              {showAdd && (
+                <div style={{background:ui.cardBg,border:ui.border,borderRadius:ui.radius,padding:mob?"14px":"18px",marginBottom:12}}>
+                  <h4 style={{fontFamily:ui.fontHead,fontSize:15,fontWeight:500,color:ui.text,marginBottom:14}}>{editId?"تعديل المنتج":"إضافة منتج جديد"}</h4>
+                  <div style={{display:"grid",gridTemplateColumns:mob?"1fr":"1fr 1fr",gap:mob?0:16}}>
+                    <div>{pInp("name","اسم المنتج","مثال: سيروم النياسيناميد")}{pInp("brand","البراند","مثال: THE ORDINARY")}{pInp("price","السعر (جنيه)","280","number")}{pInp("stock","الكمية في المخزون","10","number")}</div>
+                    <div>{pInp("desc","الوصف","وصف مختصر للمنتج")}{pInp("badge","Badge (اختياري)","مثال: جديد")}
+                      <div style={{marginBottom:11}}>
+                        <label style={{display:"block",fontSize:10,letterSpacing:2,color:ui.textSub,marginBottom:5,fontFamily:ui.fontBody}}>الأيقونة</label>
+                        <div style={{display:"flex",flexWrap:"wrap",gap:6}}>
+                          {ICONS.map(ic=><button key={ic} onClick={()=>setNewP({...newP,icon:ic})} style={{fontSize:18,background:newP.icon===ic?"#F3F4F6":"none",border:newP.icon===ic?`1px solid ${ui.text}`:"1px solid #E5E5E5",width:34,height:34,cursor:"pointer",borderRadius:4}}>{ic}</button>)}
+                        </div>
+                      </div>
+                      <div>
+                        <label style={{display:"block",fontSize:10,letterSpacing:2,color:ui.textSub,marginBottom:5,fontFamily:ui.fontBody}}>لون الخلفية</label>
+                        <div style={{display:"flex",gap:6,flexWrap:"wrap"}}>
+                          {COLORS.map(c=><div key={c} onClick={()=>setNewP({...newP,bg:c})} style={{width:26,height:26,background:c,cursor:"pointer",border:newP.bg===c?`2px solid ${ui.text}`:"2px solid transparent",borderRadius:3}}/>)}
+                        </div>
                       </div>
                     </div>
+                  </div>
+                  <div style={{marginTop:14,padding:14,background:newP.bg,display:"flex",alignItems:"center",gap:14,borderRadius:6}}>
+                    <span style={{fontSize:32}}>{newP.icon}</span>
                     <div>
-                      <label style={{display:"block",fontSize:10,letterSpacing:2,color:C.mu,marginBottom:5,fontFamily:C.fb}}>لون الخلفية</label>
-                      <div style={{display:"flex",gap:6,flexWrap:"wrap"}}>
-                        {COLORS.map(c=><div key={c} onClick={()=>setNewP({...newP,bg:c})} style={{width:28,height:28,background:c,cursor:"pointer",border:newP.bg===c?`2px solid ${C.dk}`:"2px solid transparent",borderRadius:3}}/>)}
+                      <div style={{fontSize:10,color:"#5C4A2A",letterSpacing:2,fontFamily:ui.fontBody}}>{newP.brand}</div>
+                      <div style={{fontFamily:ui.fontHead,fontSize:14,color:ui.text}}>{newP.name||"اسم المنتج"}</div>
+                      <div style={{fontFamily:ui.fontHead,fontSize:16,color:ui.text,marginTop:4}}>{newP.price||"0"} جنيه</div>
+                    </div>
+                  </div>
+                  <div style={{display:"flex",gap:10,marginTop:14}}>
+                    <button onClick={saveProduct} style={{flex:1,background:ui.text,color:"#fff",border:"none",padding:11,cursor:"pointer",fontFamily:ui.fontBody,fontSize:12.5,borderRadius:6}}>
+                      {editId?"حفظ التعديلات":"إضافة المنتج"}
+                    </button>
+                    <button onClick={()=>{setShowAdd(false);setEditId(null);}} style={{padding:"11px 16px",background:"none",border:ui.border,cursor:"pointer",color:ui.textSub,fontFamily:ui.fontBody,fontSize:12,borderRadius:6}}>إلغاء</button>
+                  </div>
+                </div>
+              )}
+
+              <div style={{display:"grid",gridTemplateColumns:mob?"1fr":"1fr 1fr",gap:10}}>
+                {prods.map(p=>(
+                  <div key={p.id} style={{background:ui.cardBg,border:ui.border,borderRadius:ui.radius,display:"flex",gap:12,padding:12,alignItems:"center"}}>
+                    <div style={{width:52,height:52,flexShrink:0,borderRadius:6,overflow:"hidden",background:p.bg}}>
+                      {p.img
+                        ? <img src={p.img} alt="" style={{width:"100%",height:"100%",objectFit:"cover"}} />
+                        : <span style={{fontSize:22,display:"flex",alignItems:"center",justifyContent:"center",height:"100%"}}>{p.icon}</span>}
+                    </div>
+                    <div style={{flex:1,minWidth:0}}>
+                      <div style={{fontSize:9,color:C.go,letterSpacing:2,fontFamily:ui.fontBody}}>{p.brand}</div>
+                      <div style={{fontFamily:ui.fontHead,fontSize:13.5,color:ui.text,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{p.nameAr || p.name}</div>
+                      <div style={{fontSize:12.5,color:ui.text,fontFamily:ui.fontBody,marginTop:2}}>{p.price} جنيه</div>
+                      <div style={{fontSize:10.5,fontFamily:ui.fontBody,marginTop:2,color:p.stock===0?"#DC2626":p.stock<=3?"#D97706":"#16A34A"}}>
+                        {p.stock===0?"نفد المخزون":p.stock<=3?`آخر ${p.stock} قطع`:`${p.stock} قطعة`}
                       </div>
                     </div>
-                  </div>
-                </div>
-                {/* Preview */}
-                <div style={{marginTop:14,padding:14,background:newP.bg,display:"flex",alignItems:"center",gap:14}}>
-                  <span style={{fontSize:36}}>{newP.icon}</span>
-                  <div>
-                    <div style={{fontSize:10,color:"#5C4A2A",letterSpacing:2}}>{newP.brand}</div>
-                    <div style={{fontFamily:C.fa,fontSize:16,color:C.dk}}>{newP.name||"اسم المنتج"}</div>
-                    <div style={{fontFamily:C.fa,fontSize:18,color:C.dk,marginTop:4}}>{newP.price||"0"} جنيه</div>
-                  </div>
-                </div>
-                <div style={{display:"flex",gap:10,marginTop:14}}>
-                  <button onClick={saveProduct} style={{flex:1,background:C.dk,color:C.cr,border:"none",padding:12,cursor:"pointer",fontFamily:C.fb,fontSize:13}}>
-                    {editId?"حفظ التعديلات":"إضافة المنتج"}
-                  </button>
-                  <button onClick={()=>{setShowAdd(false);setEditId(null);}} style={{padding:"12px 18px",background:"none",border:"1px solid rgba(0,0,0,.15)",cursor:"pointer",color:C.mu,fontFamily:C.fb,fontSize:12}}>إلغاء</button>
-                </div>
-              </div>
-            )}
-
-            {/* Products list */}
-            <div style={{display:"grid",gridTemplateColumns:mob?"1fr":"1fr 1fr",gap:12}}>
-              {prods.map(p=>(
-                <div key={p.id} style={{background:C.wh,display:"flex",gap:12,padding:14,boxShadow:"0 2px 6px rgba(0,0,0,.06)",alignItems:"center"}}>
-                  <div style={{width:56,height:56,flexShrink:0,borderRadius:4,overflow:"hidden",background:p.bg}}>
-                    {p.img
-                      ? <img src={p.img} alt="" style={{width:"100%",height:"100%",objectFit:"cover"}} />
-                      : <span style={{fontSize:24,display:"flex",alignItems:"center",justifyContent:"center",height:"100%"}}>{p.icon}</span>}
-                  </div>
-                  <div style={{flex:1,minWidth:0}}>
-                    <div style={{fontSize:9,color:C.go,letterSpacing:2,fontFamily:C.fb}}>{p.brand}</div>
-                    <div style={{fontFamily:C.fa,fontSize:14,color:C.dk,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{p.nameAr || p.name}</div>
-                    <div style={{fontSize:13,color:C.dk,fontFamily:C.fb,marginTop:2}}>{p.price} جنيه</div>
-                    <div style={{fontSize:11,fontFamily:C.fb,marginTop:2,color:p.stock===0?"#EF4444":p.stock<=3?"#F59E0B":"#10B981"}}>
-                      {p.stock===0?"نفد المخزون":p.stock<=3?`آخر ${p.stock} قطع`:`${p.stock} قطعة`}
+                    <div style={{display:"flex",gap:6,flexShrink:0}}>
+                      <button onClick={()=>startEdit(p)} style={{background:"#F3F4F6",border:"none",padding:"5px 10px",cursor:"pointer",fontSize:11.5,fontFamily:ui.fontBody,color:ui.text,borderRadius:4}}>تعديل</button>
+                      {delConfirm===p.id ? (
+                        <div style={{display:"flex",gap:4}}>
+                          <button onClick={()=>{delProd(p.id);setDelConfirm(null);}} style={{background:"#DC2626",color:"white",border:"none",padding:"5px 9px",cursor:"pointer",fontSize:11,fontFamily:ui.fontBody,borderRadius:4}}>تأكيد</button>
+                          <button onClick={()=>setDelConfirm(null)} style={{background:"none",border:ui.border,padding:"5px 8px",cursor:"pointer",fontSize:11,color:ui.textSub,fontFamily:ui.fontBody,borderRadius:4}}>لا</button>
+                        </div>
+                      ) : (
+                        <button onClick={()=>setDelConfirm(p.id)} style={{background:"none",border:"1px solid rgba(220,38,38,.3)",color:"#DC2626",padding:"5px 9px",cursor:"pointer",fontSize:11.5,fontFamily:ui.fontBody,borderRadius:4}}>حذف</button>
+                      )}
                     </div>
                   </div>
-                  <div style={{display:"flex",gap:6,flexShrink:0}}>
-                    <button onClick={()=>startEdit(p)} style={{background:C.bl,border:"none",padding:"6px 12px",cursor:"pointer",fontSize:12,fontFamily:C.fb,color:C.dk}}>تعديل</button>
-                    {delConfirm===p.id ? (
-                      <div style={{display:"flex",gap:4}}>
-                        <button onClick={()=>{delProd(p.id);setDelConfirm(null);}} style={{background:"#DC2626",color:"white",border:"none",padding:"6px 10px",cursor:"pointer",fontSize:11,fontFamily:C.fb}}>تأكيد</button>
-                        <button onClick={()=>setDelConfirm(null)} style={{background:"none",border:"1px solid rgba(0,0,0,.15)",padding:"6px 8px",cursor:"pointer",fontSize:11,color:C.mu,fontFamily:C.fb}}>لا</button>
-                      </div>
-                    ) : (
-                      <button onClick={()=>setDelConfirm(p.id)} style={{background:"none",border:"1px solid rgba(220,38,38,.3)",color:"#DC2626",padding:"6px 10px",cursor:"pointer",fontSize:12,fontFamily:C.fb}}>حذف</button>
-                    )}
-                  </div>
-                </div>
-              ))}
+                ))}
+              </div>
             </div>
-          </div>
-        )}
+          )}
 
-        {/* ORDERS */}
-        {tab==="orders" && (
-          <div>
-            <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:16}}>
-              <h3 style={{fontFamily:C.fa,fontSize:18,fontWeight:600,color:C.dk,margin:0}}>الطلبات ({orderList.length})</h3>
-              <button onClick={refreshOrders}
-                style={{background:C.go,color:"#fff",border:"none",padding:"7px 16px",cursor:"pointer",
-                  fontFamily:C.fb,fontSize:12,borderRadius:4,display:"flex",alignItems:"center",gap:5}}>
-                🔄 تحديث
-              </button>
-            </div>
-            {orderList.length===0 ? (
-              <div style={{background:C.wh,padding:"40px",textAlign:"center",color:C.mu,fontFamily:C.fb}}>
-                <div style={{fontSize:40,marginBottom:12}}>🧾</div>
-                <p>مفيش طلبات لحد دلوقتي</p>
+          {/* CUSTOMERS */}
+          {tab === "customers" && (
+            <div>
+              <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:12}}>
+                <span style={{fontSize:13,color:ui.textSub,fontFamily:ui.fontBody}}>الإجمالي: {allUsers.length} عميل</span>
+                <button onClick={loadUsers}
+                  style={{display:"flex",alignItems:"center",gap:5,background:ui.cardBg,color:ui.text,
+                    border:ui.border,padding:"6px 12px",cursor:"pointer",fontFamily:ui.fontBody,fontSize:12,borderRadius:6}}>
+                  <AdmIcon name="refresh" size={13}/> تحديث
+                </button>
               </div>
-            ) : orderList.map(o=>(
-              <div key={o.id} style={{background:C.wh,padding:mob?"14px":"18px",marginBottom:10,boxShadow:"0 2px 6px rgba(0,0,0,.06)",cursor:"pointer",transition:"box-shadow .2s"}}
-                onClick={()=>setDetailOrderId(o.id)}
-                onMouseEnter={e=>e.currentTarget.style.boxShadow="0 4px 14px rgba(196,149,106,.18)"}
-                onMouseLeave={e=>e.currentTarget.style.boxShadow="0 2px 6px rgba(0,0,0,.06)"}>
-                <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",flexWrap:"wrap",gap:8}}>
-                  <div style={{flex:1,minWidth:0}}>
-                    <div style={{fontSize:15,color:C.dk,fontFamily:C.fb,fontWeight:500}}>{o.name}</div>
-                    <div style={{fontSize:12,color:C.mu,fontFamily:C.fb,marginTop:3}}>{o.phone} | {o.city} | {o.date}</div>
-                    <div style={{fontSize:12,color:C.mu,fontFamily:C.fb,marginTop:2}}>{o.address}</div>
-                    <div style={{marginTop:8}}>
-                      {(o.items||[]).map((item,i)=>(
-                        <span key={i} style={{display:"inline-block",background:C.bl,padding:"2px 8px",fontSize:11,color:C.dk,fontFamily:C.fb,marginLeft:4,marginBottom:3}}>{item.name} × {item.qty}</span>
-                      ))}
-                    </div>
-                  </div>
-                  <div style={{textAlign:"left",flexShrink:0}}>
-                    <div style={{fontFamily:C.fa,fontSize:18,color:C.dk}}>{o.total||0} جنيه</div>
-                    <div style={{marginTop:6,display:"flex",gap:6,alignItems:"center",flexWrap:"wrap",justifyContent:"flex-end"}}>
-                      <span style={{fontSize:11,padding:"3px 10px",background:o.status==="مكتمل"?"#D1FAE5":o.status==="ملغي"?"#FEE2E2":"#FEF3C7",color:o.status==="مكتمل"?"#065F46":o.status==="ملغي"?"#DC2626":"#92400E",fontFamily:C.fb}}>{o.status}</span>
-                      <button onClick={(e)=>{e.stopPropagation();setDetailOrderId(o.id);}}
-                        style={{background:C.go,color:"#fff",border:"none",padding:"4px 11px",cursor:"pointer",fontSize:11,fontFamily:C.fb,letterSpacing:".04em"}}>
-                        {t("detailViewBtn")} →
-                      </button>
-                    </div>
-                  </div>
-                </div>
-              </div>
-            ))}
-            <OrderDetailModal
-              order={detailOrder}
-              onClose={()=>setDetailOrderId(null)}
-              onStatusChange={(id, status)=>updateOrderStatus(id, status)}
-            />
-          </div>
-        )}
-
-        {/* CUSTOMERS */}
-        {tab==="customers" && (
-          <div>
-            <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:16}}>
-              <h3 style={{fontFamily:C.fa,fontSize:18,fontWeight:600,color:C.dk,margin:0}}>العملاء ({allUsers.length})</h3>
-              <button onClick={loadUsers}
-                style={{background:C.go,color:"#fff",border:"none",padding:"7px 16px",cursor:"pointer",fontFamily:C.fb,fontSize:12,borderRadius:4}}>
-                🔄 تحديث
-              </button>
-            </div>
-            {allUsers.length===0 ? (
-              <div style={{background:C.wh,padding:"40px",textAlign:"center",color:C.mu,fontFamily:C.fb,boxShadow:"0 2px 8px rgba(0,0,0,.06)"}}>
-                <div style={{fontSize:40,marginBottom:12}}>👥</div>
-                <p>مفيش عملاء لحد دلوقتي</p>
-              </div>
-            ) : (
-              <div style={{background:C.wh,boxShadow:"0 2px 8px rgba(0,0,0,.06)",overflowX:"auto"}}>
-                <table style={{width:"100%",borderCollapse:"collapse",direction:"rtl",fontFamily:C.fb}}>
-                  <thead>
-                    <tr style={{background:C.bl,borderBottom:`2px solid rgba(184,150,62,.2)`}}>
-                      {["#","الاسم","البريد","الهاتف","آخر طلب","عدد الطلبات","إجمالي الإنفاق"].map(h=>(
-                        <th key={h} style={{padding:mob?"10px 10px":"12px 16px",textAlign:"right",fontSize:11,letterSpacing:1,color:C.mu,fontWeight:500,whiteSpace:"nowrap"}}>{h}</th>
-                      ))}
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {allUsers.map((u,i)=>(
-                      <tr key={u.email} style={{borderBottom:"1px solid rgba(0,0,0,.06)",background:i%2===0?C.wh:C.cr}}>
-                        <td style={{padding:mob?"10px 10px":"12px 16px",fontSize:12,color:C.mu}}>{i+1}</td>
-                        <td style={{padding:mob?"10px 10px":"12px 16px"}}>
-                          <div style={{display:"flex",alignItems:"center",gap:8}}>
-                            <div style={{width:32,height:32,borderRadius:"50%",background:C.bl,display:"flex",alignItems:"center",justifyContent:"center",fontSize:14,color:C.go,fontWeight:600,flexShrink:0}}>{(u.name||u.email||"?")[0].toUpperCase()}</div>
-                            <span style={{fontSize:14,color:C.dk}}>{u.name||"—"}</span>
-                          </div>
-                        </td>
-                        <td style={{padding:mob?"10px 10px":"12px 16px",fontSize:13,color:C.mu}}>{u.email}</td>
-                        <td style={{padding:mob?"10px 10px":"12px 16px",fontSize:13,color:C.mu,fontFamily:"monospace"}}>{u.phone||"—"}</td>
-                        <td style={{padding:mob?"10px 10px":"12px 16px",fontSize:12,color:C.mu,whiteSpace:"nowrap"}}>{u.lastOrder ? new Date(u.lastOrder).toLocaleDateString("ar-EG") : "—"}</td>
-                        <td style={{padding:mob?"10px 10px":"12px 16px",textAlign:"center"}}>
-                          <span style={{background:u.totalOrders>0?"#D1FAE5":"#F3F4F6",color:u.totalOrders>0?"#065F46":"#6B7280",fontSize:12,padding:"2px 10px",borderRadius:10}}>{u.totalOrders||0}</span>
-                        </td>
-                        <td style={{padding:mob?"10px 10px":"12px 16px",whiteSpace:"nowrap"}}>
-                          <span style={{fontFamily:C.fa,fontSize:15,color:C.dk}}>{(u.totalSpent||0).toLocaleString()} <span style={{fontSize:11,color:C.mu,fontFamily:"sans-serif"}}>جنيه</span></span>
-                        </td>
+              {allUsers.length===0 ? (
+                <Placeholder icon="users" title="مفيش عملاء لحد دلوقتي" body="هتبان قائمة العملاء هنا بعد أول طلب." />
+              ) : (
+                <div style={{background:ui.cardBg,border:ui.border,borderRadius:ui.radius,overflow:"hidden",overflowX:"auto"}}>
+                  <table style={{width:"100%",borderCollapse:"collapse",direction:"rtl",fontFamily:ui.fontBody}}>
+                    <thead>
+                      <tr style={{background:ui.sideBg,borderBottom:`0.5px solid #E5E5E5`}}>
+                        {["#","الاسم","البريد","الهاتف","آخر طلب","عدد الطلبات","إجمالي الإنفاق"].map(h=>(
+                          <th key={h} style={{padding:mob?"9px 10px":"11px 14px",textAlign:"right",fontSize:11,color:ui.textSub,fontWeight:500,whiteSpace:"nowrap"}}>{h}</th>
+                        ))}
                       </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            )}
-          </div>
-        )}
+                    </thead>
+                    <tbody>
+                      {allUsers.map((u,i)=>(
+                        <tr key={u.email} style={{borderTop:"0.5px solid #EEE"}}>
+                          <td style={{padding:mob?"9px 10px":"11px 14px",fontSize:11.5,color:ui.textSub}}>{i+1}</td>
+                          <td style={{padding:mob?"9px 10px":"11px 14px"}}>
+                            <div style={{display:"flex",alignItems:"center",gap:8}}>
+                              <div style={{width:28,height:28,borderRadius:"50%",background:ui.sideBg,display:"flex",alignItems:"center",justifyContent:"center",fontSize:13,color:ui.text,fontWeight:600,flexShrink:0}}>{(u.name||u.email||"?")[0].toUpperCase()}</div>
+                              <span style={{fontSize:13,color:ui.text}}>{u.name||"—"}</span>
+                            </div>
+                          </td>
+                          <td style={{padding:mob?"9px 10px":"11px 14px",fontSize:12,color:ui.textSub}}>{u.email}</td>
+                          <td style={{padding:mob?"9px 10px":"11px 14px",fontSize:12,color:ui.textSub,fontFamily:"monospace"}}>{u.phone||"—"}</td>
+                          <td style={{padding:mob?"9px 10px":"11px 14px",fontSize:11.5,color:ui.textSub,whiteSpace:"nowrap"}}>{u.lastOrder ? new Date(u.lastOrder).toLocaleDateString("ar-EG") : "—"}</td>
+                          <td style={{padding:mob?"9px 10px":"11px 14px",textAlign:"center"}}>
+                            <span style={{background:u.totalOrders>0?"#DCFCE7":"#F3F4F6",color:u.totalOrders>0?"#15803D":"#737373",fontSize:11.5,padding:"2px 9px",borderRadius:20}}>{u.totalOrders||0}</span>
+                          </td>
+                          <td style={{padding:mob?"9px 10px":"11px 14px",whiteSpace:"nowrap"}}>
+                            <span style={{fontSize:13,color:ui.text,fontWeight:500}}>{(u.totalSpent||0).toLocaleString()} <span style={{fontSize:10.5,color:ui.textSub}}>ج</span></span>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </div>
+          )}
+
+          {tab === "shipping" && <Placeholder icon="truck" title="إدارة الشحن" body="هنا هتقدر تتابع وتحدّث حالات شحن الطلبات. هنضيف الميزة دي قريباً." />}
+          {tab === "coupons"  && <Placeholder icon="discount" title="الكوبونات والعروض" body="إنشاء أكواد خصم وعروض ترويجية. قريباً." />}
+          {tab === "settings" && <Placeholder icon="settings" title="إعدادات المتجر" body="معلومات المتجر، طرق الدفع، اللغة، والإعدادات العامة. قريباً." />}
+
+        </main>
       </div>
     </div>
   );
 }
+
 
 // ─── WhatsApp Float ───────────────────────────────────────────────────────────
 function WAFloat() {
