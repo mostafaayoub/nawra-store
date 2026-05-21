@@ -785,11 +785,21 @@ app.post('/api/categories', (req, res) => {
 });
 app.delete('/api/categories/:id', (req, res) => {
   try {
-    const info = db.prepare('DELETE FROM categories WHERE id = ?').run(req.params.id);
+    const id = String(req.params.id);
+    // Default seeded categories are immutable. Two prefixes exist for
+    // historical reasons (cat_seed_* and cat_default_*).
+    if (id.startsWith('cat_seed_') || id.startsWith('cat_default_'))
+      return res.status(403).json({ error: 'الفئة الافتراضية لا يمكن حذفها' });
+    const info = db.prepare('DELETE FROM categories WHERE id = ?').run(id);
     if (!info.changes) return res.status(404).json({ error: 'not found' });
     res.json({ ok: true });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
+
+// Keys that must NEVER be returned by the public unified GET because they
+// contain secrets (password hashes, API tokens, etc.). The per-key GET also
+// refuses to serve them.
+const SECRET_SETTINGS_KEYS = new Set(['admin_credentials']);
 
 // Unified settings endpoints — return / update all keys at once.
 app.get('/api/settings', (_req, res) => {
@@ -797,6 +807,7 @@ app.get('/api/settings', (_req, res) => {
     const rows = db.prepare('SELECT key, value FROM settings').all();
     const out = {};
     rows.forEach(r => {
+      if (SECRET_SETTINGS_KEYS.has(r.key)) return; // never expose secrets
       try { out[r.key] = JSON.parse(r.value); }
       catch { out[r.key] = r.value; }
     });
@@ -812,22 +823,30 @@ app.post('/api/settings', (req, res) => {
       VALUES (?, ?, datetime('now'))
       ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = datetime('now')
     `);
+    const guard = (k) => {
+      if (SECRET_SETTINGS_KEYS.has(k))
+        throw new Error(`setting "${k}" is protected and cannot be set via this endpoint`);
+    };
     if (body.key) {
+      guard(body.key);
       const json = typeof body.value === 'string' ? body.value : JSON.stringify(body.value);
       upsert.run(body.key, json);
     } else {
       Object.keys(body).forEach(k => {
+        guard(k);
         const v = body[k];
         const json = typeof v === 'string' ? v : JSON.stringify(v);
         upsert.run(k, json);
       });
     }
     res.json({ ok: true });
-  } catch (e) { res.status(500).json({ error: e.message }); }
+  } catch (e) { res.status(400).json({ error: e.message }); }
 });
 
 app.get('/api/settings/:key', (req, res) => {
   try {
+    if (SECRET_SETTINGS_KEYS.has(req.params.key))
+      return res.status(403).json({ error: 'protected setting' });
     const row = db.prepare('SELECT value FROM settings WHERE key=?').get(req.params.key);
     if (!row) return res.json({ value: null });
     try { res.json({ value: JSON.parse(row.value) }); }
@@ -837,6 +856,8 @@ app.get('/api/settings/:key', (req, res) => {
 
 app.put('/api/settings/:key', (req, res) => {
   try {
+    if (SECRET_SETTINGS_KEYS.has(req.params.key))
+      return res.status(403).json({ error: 'protected setting; use /api/auth/change-password' });
     const v = req.body && Object.prototype.hasOwnProperty.call(req.body, 'value') ? req.body.value : req.body;
     const json = typeof v === 'string' ? v : JSON.stringify(v);
     db.prepare(`
