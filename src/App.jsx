@@ -254,22 +254,49 @@ function LangProvider({ children }) {
 }
 
 // ─── Auth ─────────────────────────────────────────────────────────────────────
-const ADMIN_USER = "nawra_admin";
-const ADMIN_PASS = "Nawra@2025";
-
+// Super-admin login goes through the backend (/api/auth/login → scrypt-hashed
+// password). Customer accounts still live in localStorage. The legacy
+// `nawra_admin` shortcut was removed — `nawraskincare@gmail.com` (or whichever
+// email is configured in admin_credentials) is the only admin login now.
 const AuthCtx = createContext(null);
 const useAuth = () => useContext(AuthCtx);
+
+// Heuristic: anything that looks like the team-config role keys (or the
+// historical "admin") gets admin access. Customer accounts use "user".
+const isAdminRole = (role) => role && role !== "user";
 
 function AuthProvider({ children }) {
   const [user, setUser] = useState(() => {
     try { return JSON.parse(localStorage.getItem("nawra_user")) || null; } catch { return null; }
   });
-  const login = (u, p) => {
-    if (u === ADMIN_USER && p === ADMIN_PASS) {
-      const admin = { name: "Admin", role: "admin" };
-      localStorage.setItem("nawra_user", JSON.stringify(admin));
-      setUser(admin); return { ok: true };
-    }
+  const login = async (u, p) => {
+    // 1) Try the API as the super admin (only nawraskincare@gmail.com etc.)
+    try {
+      const r = await fetch("/api/auth/login", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email: u, password: p })
+      });
+      if (r.ok) {
+        const data = await r.json();
+        // Determine the actual role for this user from the team settings if
+        // it's not the super admin. Falls back to "super_admin" when the
+        // login endpoint returns it.
+        let role = data.role || "super_admin";
+        if (role !== "super_admin") {
+          try {
+            const ts = await fetch("/api/settings/team");
+            const team = ts.ok ? (await ts.json()).value : null;
+            const member = team && team.members && team.members.find(m => (m.email||"").toLowerCase() === (data.email||"").toLowerCase());
+            if (member) role = member.role;
+          } catch {}
+        }
+        const admin = { name: data.name || "Admin", email: data.email, role };
+        localStorage.setItem("nawra_user", JSON.stringify(admin));
+        setUser(admin);
+        return { ok: true };
+      }
+    } catch {}
+    // 2) Fall through to local customer login
     const users = JSON.parse(localStorage.getItem("nawra_users") || "[]");
     const found = users.find(x => x.email === u && x.password === p);
     if (found) {
@@ -661,7 +688,7 @@ function Nav({ r, go, openCart, user, onLogout }) {
           {user ? (
             <div style={{display:"flex",alignItems:"center",gap:8}}>
               {!mob && <span style={{fontSize:12,color:C.mu,fontFamily:C.fb}}>{t("navGreeting")} {user.name} 👋</span>}
-              {user.role==="admin" && <Btn onClick={()=>go("#admin")} style={{background:C.go,color:"white",padding:"5px 12px",fontSize:11,letterSpacing:"0.06em",fontFamily:C.fb,border:"none"}}>Admin</Btn>}
+              {isAdminRole(user.role) && <Btn onClick={()=>go("#admin")} style={{background:C.go,color:"white",padding:"5px 12px",fontSize:11,letterSpacing:"0.06em",fontFamily:C.fb,border:"none"}}>Admin</Btn>}
               {user.role==="user" && !mob && <Btn onClick={()=>go("#myorders")} style={{background:"none",border:`1.5px solid rgba(42,31,14,.4)`,color:C.dk,padding:"5px 11px",fontSize:11,fontFamily:C.fb,letterSpacing:"0.04em"}}>{t("navMyOrders")}</Btn>}
               {user.role==="user" && !mob && <Btn onClick={()=>go("#addresses")} style={{background:"none",border:`1.5px solid rgba(42,31,14,.4)`,color:C.dk,padding:"5px 11px",fontSize:11,fontFamily:C.fb,letterSpacing:"0.04em"}}>📍 {t("navAddresses")}</Btn>}
               <Btn onClick={onLogout} style={{background:"none",border:"1px solid rgba(196,149,106,.3)",color:C.mu,padding:"5px 11px",fontSize:11,fontFamily:C.fb}}>{t("navLogout")}</Btn>
@@ -945,19 +972,26 @@ function LoginPage({ go }) {
 
   const submit = () => {
     setErr(""); setLoading(true);
-    setTimeout(() => {
-      setLoading(false);
+    (async () => {
       if (tab === "login") {
-        const r = login(f.email, f.pass);
-        if (r.ok) go("#home"); else setErr(r.err);
+        const r = await login(f.email, f.pass);
+        setLoading(false);
+        // Admin accounts land on the dashboard; customers go home.
+        if (r.ok) {
+          try {
+            const u = JSON.parse(localStorage.getItem("nawra_user") || "{}");
+            go(u.role && u.role !== "user" ? "#admin" : "#home");
+          } catch { go("#home"); }
+        } else setErr(r.err);
       } else {
-        if (!f.name || !f.email || !f.pass) return setErr(t("loginErrFields"));
-        if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(f.email)) return setErr(t("loginErrEmail"));
-        if (f.pass !== f.pass2) return setErr(t("loginErrPass"));
+        if (!f.name || !f.email || !f.pass)  { setLoading(false); return setErr(t("loginErrFields")); }
+        if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(f.email)) { setLoading(false); return setErr(t("loginErrEmail")); }
+        if (f.pass !== f.pass2) { setLoading(false); return setErr(t("loginErrPass")); }
         const r = register(f.name, f.email, f.pass);
+        setLoading(false);
         if (r.ok) go("#home"); else setErr(r.err);
       }
-    }, 400);
+    })();
   };
 
   const inp = (k, lbl, ph, type="text") => (
@@ -1107,12 +1141,19 @@ function AdminDash({ go }) {
   const [invNotice, setInvNotice]   = useState(null); // one-time auto-import banner
   const importedRef = useRef(false); // make sure auto-import runs at most once per session
 
-  // ── Active role (for the approval workflow) ────────────────────────────────
-  // Persisted to localStorage. Super admin sees the approval inbox; non-super
-  // admins see "request" buttons instead of destructive actions.
-  const [activeRole, setActiveRole] = useState(() => localStorage.getItem("nawra_admin_role") || "super_admin");
-  useEffect(() => { localStorage.setItem("nawra_admin_role", activeRole); }, [activeRole]);
-  const isSuper = activeRole === "super_admin";
+  // Inline reason-capture modal for every stock reduction.
+  // Shape: { product, fromQty, toQty, reason, onConfirm: () => void }
+  const [reduceAsk, setReduceAsk] = useState(null);
+
+  // ── Active role ────────────────────────────────────────────────────────────
+  // Derived strictly from the logged-in user (set by AuthProvider after the
+  // /api/auth/login round-trip). No client-side switcher — the role on the
+  // user object dictates what the dashboard exposes.
+  const { user: authUser } = useAuth() || {};
+  const activeRole = (authUser && authUser.role) || "super_admin";
+  // Legacy localStorage sessions stored role as "admin"; treat them as super
+  // until they log out & back in (which will fetch the proper role).
+  const isSuper = activeRole === "super_admin" || activeRole === "admin";
 
   // ── Approvals (product delete / stock reduce / etc.) + Notifications ───────
   const [approvals, setApprovals] = useState([]);
@@ -1285,50 +1326,23 @@ function AdminDash({ go }) {
     tags:     p.brand ? [p.brand] : [],
   });
 
-  const refreshProducts = async ({ allowImport = true } = {}) => {
+  const refreshProducts = async (_opts) => {
+    // Auto-import on first load is disabled. The DB is the single source of
+    // truth now; re-importing from legacy localStorage would create dupes
+    // and could clobber edits made on the live store. The "استيراد"
+    // button in the empty-state remains available for explicit migrations.
     try {
       const res = await fetch("/api/products");
       if (!res.ok) return;
-      let list = await res.json();
-
-      // One-time auto-import: if API is empty (or missing some) AND legacy
-      // localStorage has products, sync them up so the inventory page works
-      // immediately for existing stores. After this runs, the API is the
-      // single source of truth — future edits go straight through PATCH.
-      if (allowImport && !importedRef.current && Array.isArray(prods) && prods.length) {
-        const apiNames = new Set(list.map(p => (p.name || "").trim().toLowerCase()));
-        const missing  = prods.filter(p => {
-          const key = (p.nameAr || p.name || "").trim().toLowerCase();
-          return key && !apiNames.has(key);
-        });
-        if (missing.length) {
-          importedRef.current = true;
-          setInvImporting(true);
-          let imported = 0;
-          for (const lp of missing) {
-            try {
-              const r = await fetch("/api/products", {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify(legacyToApi(lp))
-              });
-              if (r.ok) imported++;
-            } catch {}
-          }
-          // Re-fetch after the import batch
-          try {
-            const res2 = await fetch("/api/products");
-            if (res2.ok) list = await res2.json();
-          } catch {}
-          setInvImporting(false);
-          if (imported) {
-            setInvNotice(`تم استيراد ${imported} منتج من المتجر تلقائياً`);
-            setTimeout(() => setInvNotice(null), 6000);
-          }
-        }
-      }
-
-      setDbProducts(list);
+      const list = await res.json();
+      // Preserve any row that has an in-flight PATCH so the GET response
+      // can't overwrite an optimistic update with stale data.
+      setDbProducts(prev => {
+        const prevById = new Map(prev.map(p => [p.id, p]));
+        return list.map(p => (inFlightRef.current && inFlightRef.current.has(p.id) && prevById.has(p.id))
+          ? prevById.get(p.id)
+          : p);
+      });
     } catch {}
   };
 
@@ -1570,22 +1584,90 @@ function AdminDash({ go }) {
     } finally { setPSaving(false); }
   };
 
-  // Inventory: update stock or threshold immediately via PATCH
+  // Inventory: update stock or threshold immediately via PATCH.
+  // Maintains a set of in-flight product ids so concurrent refreshes can't
+  // overwrite optimistic updates with stale GET responses. The PATCH itself
+  // hits `WHERE id = ?` on the server, so it only ever touches one row.
+  const inFlightRef = useRef(new Set());
   const patchProduct = async (id, patch) => {
+    inFlightRef.current.add(id);
     setInvEditing(id);
-    // optimistic
+    // Optimistic — only the targeted row is mutated. Others are passed
+    // through by reference, so React-keyed rows for other products won't
+    // re-render due to identity changes.
     setDbProducts(prev => prev.map(p => p.id === id ? { ...p, ...patch } : p));
     try {
       const res = await fetch(`/api/products/${id}`, {
-        method:"PATCH", headers:{ "Content-Type":"application/json" },
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify(patch)
       });
       if (res.ok) {
         const updated = await res.json();
         setDbProducts(prev => prev.map(p => p.id === id ? updated : p));
+      } else {
+        // On failure, refetch only this product (still won't touch others).
+        try {
+          const r = await fetch(`/api/products/${id}`);
+          if (r.ok) {
+            const fresh = await r.json();
+            setDbProducts(prev => prev.map(p => p.id === id ? fresh : p));
+          }
+        } catch {}
       }
     } catch {}
-    finally { setInvEditing(null); }
+    finally {
+      inFlightRef.current.delete(id);
+      setInvEditing(null);
+    }
+  };
+
+  // Single entry-point for changing a product's stock. Any reduction routes
+  // through the inline reason modal — no path bypasses it. Increases go
+  // straight to the API. Also writes to /api/stock-changes (audit) and posts
+  // a stock_reduce notification when reducing.
+  const applyStockChange = (product, newQty, opts = {}) => {
+    const id   = product.id;
+    const name = product.name || "—";
+    const from = Number(product.stock) || 0;
+    const to   = Math.max(0, Number(newQty) || 0);
+    if (from === to) return;
+
+    const commit = async (reason) => {
+      await patchProduct(id, { stock: to });
+      if (to < from) {
+        try {
+          await fetch("/api/stock-changes", {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              product_id: id, product_name: name,
+              old_qty: from, new_qty: to,
+              reason, actor: activeRole
+            })
+          });
+          await fetch("/api/approvals", {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              type: "stock_reduce",
+              target_id: String(id), target_label: name,
+              requester: activeRole, reason,
+              payload: { old_qty: from, new_qty: to }
+            })
+          });
+          refreshApprovals();
+        } catch {}
+      }
+      if (opts.onDone) opts.onDone();
+    };
+
+    // Increase → no reason needed
+    if (to > from) { commit(""); return; }
+
+    // Decrease → require reason via the inline modal
+    setReduceAsk({
+      product, fromQty: from, toQty: to, reason: "",
+      onConfirm: (reason) => { setReduceAsk(null); commit(reason); },
+    });
   };
 
   // Refresh helper — tries API first, falls back to localStorage
@@ -1800,9 +1882,16 @@ function AdminDash({ go }) {
     : (ovFrom && ovTo)  ? `${ovFrom} → ${ovTo}` : "مخصص";
 
   const exportOrdersCsv = () => {
-    const rows = ovSeries.inRange;
+    // Use orders inside the selected window, falling back to the full
+    // orderList if the date-range filter excluded everything (e.g. because
+    // historical orders have unparseable date strings). This guarantees the
+    // user always gets the actual orders, not just chart aggregates.
+    let rows = ovSeries.inRange;
+    if (!rows.length) rows = orderList;
+    if (!rows.length) { alert("لا توجد طلبات لتصديرها."); return; }
+
     const head = ["رقم الطلب","التاريخ","العميل","الهاتف","المدينة","العنوان","عدد المنتجات","المنتجات","الإجمالي","الحالة","البريد"];
-    const escape = (v) => {
+    const esc = (v) => {
       const s = v == null ? "" : String(v);
       return /[",\n]/.test(s) ? `"${s.replace(/"/g,'""')}"` : s;
     };
@@ -1813,7 +1902,7 @@ function AdminDash({ go }) {
         o.id, o.created_at || o.date || "", o.name || "", o.phone || "",
         o.city || "", o.address || "", (o.items||[]).length, items,
         o.total || 0, o.status || "", o.userEmail || ""
-      ].map(escape).join(","));
+      ].map(esc).join(","));
     });
     // BOM so Excel opens UTF-8 Arabic correctly
     const blob = new Blob(["﻿" + lines.join("\n")], { type: "text/csv;charset=utf-8;" });
@@ -1976,13 +2065,17 @@ function AdminDash({ go }) {
         <div style={{background:ui.cardBg,border:ui.border,borderRadius:ui.radius,padding:"14px 16px"}}>
           <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:10,flexWrap:"wrap",gap:8}}>
             <h3 style={{fontSize:13,fontWeight:500,color:ui.text,margin:0,fontFamily:ui.fontBody}}>المبيعات — {ovRangeLabel}</h3>
-            <button onClick={exportOrdersCsv} disabled={ovSeries.inRange.length===0}
-              title={ovSeries.inRange.length===0 ? "لا توجد طلبات في النطاق" : `تصدير ${ovSeries.inRange.length} طلب`}
+            <button onClick={exportOrdersCsv} disabled={orderList.length===0}
+              title={ovSeries.inRange.length > 0
+                ? `تصدير ${ovSeries.inRange.length} طلب في النطاق`
+                : orderList.length > 0
+                  ? `تصدير كل الطلبات (${orderList.length}) — النطاق المحدد فارغ`
+                  : "لا توجد طلبات لتصديرها"}
               style={{display:"flex",alignItems:"center",gap:5,
-                background: ovSeries.inRange.length===0 ? "transparent" : ui.text,
-                color: ovSeries.inRange.length===0 ? ui.textSub : "#fff",
-                border: ovSeries.inRange.length===0 ? ui.border : "none",
-                padding:"5px 11px",cursor: ovSeries.inRange.length===0 ? "not-allowed":"pointer",
+                background: orderList.length===0 ? "transparent" : ui.text,
+                color: orderList.length===0 ? ui.textSub : "#fff",
+                border: orderList.length===0 ? ui.border : "none",
+                padding:"5px 11px",cursor: orderList.length===0 ? "not-allowed":"pointer",
                 fontSize:11,fontFamily:ui.fontBody,borderRadius:5}}>
               تصدير CSV
             </button>
@@ -2215,19 +2308,11 @@ function AdminDash({ go }) {
             </div>
           ) : navItems.map(n => <NavBtn key={n.k} item={n} />)}
           <div style={{flex:1}} />
-          {/* Active-role switcher — drives whether destructive actions go
-              through the approval workflow or execute immediately. */}
-          {!mob && (
-            <div style={{padding:"10px 16px",borderTop:ui.border}}>
-              <div style={{fontSize:10.5,color:ui.textSub,fontFamily:ui.fontBody,marginBottom:5,letterSpacing:".04em"}}>وضع الدور (للاختبار)</div>
-              <select value={activeRole} onChange={e=>setActiveRole(e.target.value)}
-                style={{width:"100%",padding:"6px 8px",border:ui.border,borderRadius:5,
-                  background:ui.cardBg,fontFamily:ui.fontBody,fontSize:12,color:ui.text,outline:"none",direction:"rtl"}}>
-                <option value="super_admin">Super Admin</option>
-                <option value="orders_admin">مشرف طلبات</option>
-                <option value="inventory_admin">مشرف مخزون</option>
-                <option value="shipping_admin">موظف شحن</option>
-              </select>
+          {/* Show the active super-admin's name as a quiet footer label. */}
+          {!mob && authUser && (
+            <div style={{padding:"10px 16px",borderTop:ui.border,fontSize:11,color:ui.textSub,fontFamily:ui.fontBody,lineHeight:1.5}}>
+              <div style={{color:ui.text,fontWeight:500}}>{authUser.name || "Super Admin"}</div>
+              <div style={{fontSize:10.5,direction:"ltr",textAlign:"right"}}>{authUser.email || "—"}</div>
             </div>
           )}
           <button onClick={()=>go("#home")} style={{
@@ -2946,22 +3031,22 @@ function AdminDash({ go }) {
                               <td style={{padding:"11px 14px"}}>
                                 <span style={{fontSize:10.5,padding:"3px 10px",borderRadius:20,background:b.bg,color:b.fg,fontFamily:ui.fontBody,whiteSpace:"nowrap"}}>{b.l}</span>
                               </td>
-                              {/* Quantity with +/- */}
+                              {/* Quantity with +/-  — every reduction triggers the reason modal.
+                                  The middle cell is a READ-ONLY display to keep the
+                                  +/- buttons the only mutation path. Use the تعديل
+                                  modal for arbitrary edits. */}
                               <td style={{padding:"11px 14px"}}>
                                 <div style={{display:"inline-flex",alignItems:"center",gap:4,border:ui.border,borderRadius:6,padding:"2px"}}>
-                                  <button onClick={()=>patchProduct(p.id, { stock: Math.max(0, (p.stock||0) - 1) })}
+                                  <button onClick={()=>applyStockChange(p, (p.stock||0) - 1)}
                                     disabled={invEditing===p.id || (p.stock||0)<=0}
-                                    style={{width:24,height:24,border:"none",background:"transparent",cursor:"pointer",fontSize:16,color:ui.textSub,borderRadius:4}}>−</button>
-                                  <input type="number" value={p.stock||0}
-                                    onChange={e=>{
-                                      const v = Math.max(0, Number(e.target.value)||0);
-                                      setDbProducts(prev => prev.map(x => x.id===p.id ? { ...x, stock:v } : x));
-                                    }}
-                                    onBlur={e=>patchProduct(p.id, { stock: Math.max(0, Number(e.target.value)||0) })}
-                                    style={{width:46,textAlign:"center",border:"none",background:"transparent",fontFamily:ui.fontBody,fontSize:13,color:ui.text,outline:"none",padding:0}}/>
-                                  <button onClick={()=>patchProduct(p.id, { stock: (p.stock||0) + 1 })}
+                                    title="تقليل الكمية (سيُطلب منك سبب)"
+                                    style={{width:24,height:24,border:"none",background:"transparent",cursor: ((p.stock||0)<=0 || invEditing===p.id) ? "not-allowed" : "pointer",fontSize:16,color:ui.textSub,borderRadius:4}}>−</button>
+                                  <span style={{minWidth:46,textAlign:"center",fontFamily:ui.fontBody,fontSize:13,color:ui.text,padding:"0 4px"}}>
+                                    {p.stock||0}
+                                  </span>
+                                  <button onClick={()=>applyStockChange(p, (p.stock||0) + 1)}
                                     disabled={invEditing===p.id}
-                                    style={{width:24,height:24,border:"none",background:"transparent",cursor:"pointer",fontSize:16,color:ui.textSub,borderRadius:4}}>+</button>
+                                    style={{width:24,height:24,border:"none",background:"transparent",cursor: invEditing===p.id ? "not-allowed" : "pointer",fontSize:16,color:ui.textSub,borderRadius:4}}>+</button>
                                 </div>
                               </td>
                               {/* Threshold (editable) */}
@@ -3072,45 +3157,83 @@ function AdminDash({ go }) {
                           <button
                             disabled={!reasonOK}
                             onClick={async () => {
-                              const patch = { stock: newQty, alert_threshold: newThr };
-                              // Persist to DB first
-                              await patchProduct(editProdModal.id, patch);
-                              if (reducing) {
-                                // Log the reduction
-                                try {
-                                  await fetch("/api/stock-changes", {
-                                    method:"POST", headers:{"Content-Type":"application/json"},
-                                    body: JSON.stringify({
-                                      product_id: editProdModal.id,
-                                      product_name: editProdModal.name,
-                                      old_qty: editProdModal.origStock,
-                                      new_qty: newQty,
-                                      reason: editProdModal.reason,
-                                      actor: activeRole
-                                    })
-                                  });
-                                } catch {}
-                                // Notify super admin via approvals feed (auto-approved
-                                // for trail purposes — it's a notification, not a gate)
-                                try {
-                                  await fetch("/api/approvals", {
-                                    method:"POST", headers:{"Content-Type":"application/json"},
-                                    body: JSON.stringify({
-                                      type: "stock_reduce",
-                                      target_id: editProdModal.id,
-                                      target_label: editProdModal.name,
-                                      requester: activeRole,
-                                      reason: editProdModal.reason,
-                                      payload: { old_qty: editProdModal.origStock, new_qty: newQty }
-                                    })
-                                  });
-                                  refreshApprovals();
-                                } catch {}
+                              // Always update threshold first (no reason needed).
+                              if (newThr !== editProdModal.origThreshold) {
+                                await patchProduct(editProdModal.id, { alert_threshold: newThr });
+                              }
+                              // For stock changes, route through the central helper
+                              // so audit log + approvals fire consistently (with the
+                              // reason captured inline by this modal).
+                              if (newQty !== editProdModal.origStock) {
+                                // Manually mirror what applyStockChange's commit does,
+                                // using the reason captured in this modal.
+                                await patchProduct(editProdModal.id, { stock: newQty });
+                                if (reducing) {
+                                  try {
+                                    await fetch("/api/stock-changes", {
+                                      method:"POST", headers:{"Content-Type":"application/json"},
+                                      body: JSON.stringify({
+                                        product_id: editProdModal.id, product_name: editProdModal.name,
+                                        old_qty: editProdModal.origStock, new_qty: newQty,
+                                        reason: editProdModal.reason, actor: activeRole
+                                      })
+                                    });
+                                    await fetch("/api/approvals", {
+                                      method:"POST", headers:{"Content-Type":"application/json"},
+                                      body: JSON.stringify({
+                                        type: "stock_reduce",
+                                        target_id: String(editProdModal.id), target_label: editProdModal.name,
+                                        requester: activeRole, reason: editProdModal.reason,
+                                        payload: { old_qty: editProdModal.origStock, new_qty: newQty }
+                                      })
+                                    });
+                                    refreshApprovals();
+                                  } catch {}
+                                }
                               }
                               setEditProdModal(null);
                             }}
                             style={{padding:"9px 18px",background: reasonOK ? ui.text : "#9CA3AF",color:"#fff",border:"none",borderRadius:6,fontSize:12.5,fontFamily:ui.fontBody,cursor: reasonOK ? "pointer" : "not-allowed"}}>
                             حفظ التعديل
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })()}
+
+                {/* Reason-required modal for any inline stock REDUCTION
+                    (− button). Gates the action — save is disabled until 5+
+                    chars of reason are typed. */}
+                {reduceAsk && (() => {
+                  const reasonOk = (reduceAsk.reason || "").trim().length >= 5;
+                  return (
+                    <div onClick={()=>setReduceAsk(null)}
+                      style={{position:"fixed",inset:0,background:"rgba(0,0,0,.55)",zIndex:500,display:"flex",alignItems:"center",justifyContent:"center",padding:16,direction:"rtl"}}>
+                      <div onClick={e=>e.stopPropagation()}
+                        style={{background:ui.cardBg,maxWidth:420,width:"100%",padding:22,borderRadius:8,boxShadow:"0 12px 48px rgba(0,0,0,.25)"}}>
+                        <h3 style={{fontSize:14.5,fontWeight:600,color:ui.text,fontFamily:ui.fontBody,margin:"0 0 6px"}}>
+                          ⚠ سبب تقليل الكمية
+                        </h3>
+                        <div style={{fontSize:12.5,color:ui.textSub,fontFamily:ui.fontBody,marginBottom:14}}>
+                          {reduceAsk.product.name} · {reduceAsk.fromQty} → {reduceAsk.toQty}
+                          {" "}(—{reduceAsk.fromQty - reduceAsk.toQty} قطعة)
+                        </div>
+                        <textarea rows={3} autoFocus
+                          value={reduceAsk.reason}
+                          onChange={e=>setReduceAsk({...reduceAsk, reason:e.target.value})}
+                          placeholder="مثال: تالف، استرجاع عميل، خطأ في الجرد... (5 أحرف على الأقل)"
+                          style={{padding:"8px 12px",border:`1px solid #FCA5A5`,borderRadius:6,background:"#FEF2F2",fontFamily:ui.fontBody,fontSize:13,color:ui.text,outline:"none",width:"100%",direction:"rtl",resize:"vertical",minHeight:80,boxSizing:"border-box"}}/>
+                        <div style={{display:"flex",gap:8,justifyContent:"flex-end",marginTop:12}}>
+                          <button onClick={()=>setReduceAsk(null)}
+                            style={{padding:"8px 16px",background:"transparent",border:ui.border,borderRadius:6,fontSize:12.5,color:ui.textSub,fontFamily:ui.fontBody,cursor:"pointer"}}>
+                            إلغاء
+                          </button>
+                          <button
+                            disabled={!reasonOk}
+                            onClick={()=>reduceAsk.onConfirm(reduceAsk.reason.trim())}
+                            style={{padding:"8px 18px",background: reasonOk ? "#DC2626" : "#9CA3AF",color:"#fff",border:"none",borderRadius:6,fontSize:12.5,fontFamily:ui.fontBody,cursor: reasonOk ? "pointer" : "not-allowed"}}>
+                            تأكيد التقليل
                           </button>
                         </div>
                       </div>
@@ -5890,7 +6013,7 @@ function AppInner() {
   const page = () => {
     if (route === "#login") return <LoginPage go={go} />;
     if (route === "#admin") {
-      if (!user || user.role !== "admin") { go("#login"); return null; }
+      if (!user || !isAdminRole(user.role)) { go("#login"); return null; }
       return <AdminDash go={go} />;
     }
     if (pid) return <ProdDetail id={pid} go={go} allProds={(prods&&prods.length)?prods:PRODS} />;
