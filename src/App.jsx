@@ -1068,8 +1068,14 @@ function AdminDash({ go }) {
     } catch {}
     return null;
   };
-  // Default seeded categories live under `cat_default_*` ids and cannot be deleted
-  const isDefaultCategory = (cat) => !!(cat && cat.id && String(cat.id).startsWith("cat_default_"));
+  // Default seeded categories cannot be deleted. Two prefixes are honoured
+  // because earlier builds used `cat_seed_*` and the rename to `cat_default_*`
+  // came later — existing DBs still have the old ids.
+  const isDefaultCategory = (cat) => {
+    if (!cat || !cat.id) return false;
+    const id = String(cat.id);
+    return id.startsWith("cat_default_") || id.startsWith("cat_seed_");
+  };
   const deleteCategory = async (id, name) => {
     if (!confirm(`متأكد من حذف الفئة "${name}"؟`)) return false;
     try {
