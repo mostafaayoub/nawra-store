@@ -100,6 +100,19 @@ db.exec(`
   )
 `);
 db.exec(`
+  CREATE TABLE IF NOT EXISTS categories (
+    id         TEXT PRIMARY KEY,
+    name       TEXT UNIQUE NOT NULL,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+  )
+`);
+// Seed default product categories (idempotent)
+{
+  const seedCats = ["سيروم", "غسول", "مرطب", "واقي شمس"];
+  const ins = db.prepare("INSERT OR IGNORE INTO categories (id, name) VALUES (?, ?)");
+  seedCats.forEach((n, i) => ins.run(`cat_seed_${i}`, n));
+}
+db.exec(`
   CREATE TABLE IF NOT EXISTS products (
     id              TEXT PRIMARY KEY,
     sku             TEXT,
@@ -659,6 +672,67 @@ app.patch('/api/returns/:id', (req, res) => {
 
 // ── SETTINGS (key/value JSON blobs) ───────────────────────────────────────────
 // keys we use: 'shipping', 'payment', 'seo'
+// ── CATEGORIES ────────────────────────────────────────────────────────────────
+app.get('/api/categories', (_req, res) => {
+  try {
+    const rows = db.prepare('SELECT * FROM categories ORDER BY created_at ASC').all();
+    res.json(rows);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+app.post('/api/categories', (req, res) => {
+  try {
+    const name = (req.body && req.body.name || '').trim();
+    if (!name) return res.status(400).json({ error: 'name required' });
+    const exists = db.prepare('SELECT * FROM categories WHERE name = ?').get(name);
+    if (exists) return res.json(exists); // idempotent
+    const id = `cat_${Date.now().toString(36)}_${Math.random().toString(36).slice(2,5)}`;
+    db.prepare('INSERT INTO categories (id, name) VALUES (?, ?)').run(id, name);
+    res.json({ id, name });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+app.delete('/api/categories/:id', (req, res) => {
+  try {
+    const info = db.prepare('DELETE FROM categories WHERE id = ?').run(req.params.id);
+    if (!info.changes) return res.status(404).json({ error: 'not found' });
+    res.json({ ok: true });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// Unified settings endpoints — return / update all keys at once.
+app.get('/api/settings', (_req, res) => {
+  try {
+    const rows = db.prepare('SELECT key, value FROM settings').all();
+    const out = {};
+    rows.forEach(r => {
+      try { out[r.key] = JSON.parse(r.value); }
+      catch { out[r.key] = r.value; }
+    });
+    res.json(out);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+// Accept either `{ key, value }` or a multi-key object `{ shipping:{...}, seo:{...} }`.
+app.post('/api/settings', (req, res) => {
+  try {
+    const body = req.body || {};
+    const upsert = db.prepare(`
+      INSERT INTO settings (key, value, updated_at)
+      VALUES (?, ?, datetime('now'))
+      ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = datetime('now')
+    `);
+    if (body.key) {
+      const json = typeof body.value === 'string' ? body.value : JSON.stringify(body.value);
+      upsert.run(body.key, json);
+    } else {
+      Object.keys(body).forEach(k => {
+        const v = body[k];
+        const json = typeof v === 'string' ? v : JSON.stringify(v);
+        upsert.run(k, json);
+      });
+    }
+    res.json({ ok: true });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 app.get('/api/settings/:key', (req, res) => {
   try {
     const row = db.prepare('SELECT value FROM settings WHERE key=?').get(req.params.key);

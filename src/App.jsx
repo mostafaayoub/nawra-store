@@ -470,14 +470,49 @@ function CartProvider({ children }) {
     window.addEventListener("nawra-logout", onLogout);
     return () => window.removeEventListener("nawra-logout", onLogout);
   }, []);
+
+  // ── Shipping policy (fetched live from /api/settings/shipping) ─────────────
+  // Cached in localStorage so the cart UI doesn't flash before the network
+  // resolves. Refetched on every page load + when the admin saves changes
+  // (admin dispatches the `nawra-shipping-saved` event below).
+  const [shipCfg, setShipCfg] = useState(() => {
+    try { return JSON.parse(localStorage.getItem("nawra_shipping_cfg")) || null; }
+    catch { return null; }
+  });
+  const reloadShipCfg = async () => {
+    try {
+      const r = await fetch("/api/settings/shipping");
+      if (!r.ok) return;
+      const { value } = await r.json();
+      if (value && typeof value === "object") {
+        setShipCfg(value);
+        try { localStorage.setItem("nawra_shipping_cfg", JSON.stringify(value)); } catch {}
+      }
+    } catch {}
+  };
+  useEffect(() => {
+    reloadShipCfg();
+    const h = () => reloadShipCfg();
+    window.addEventListener("nawra-shipping-saved", h);
+    return () => window.removeEventListener("nawra-shipping-saved", h);
+  }, []);
+
   const add = p => setCart(prev => { const ex = prev.find(i => i.id === p.id); return ex ? prev.map(i => i.id === p.id ? { ...i, qty: i.qty + 1 } : i) : [...prev, { ...p, qty: 1 }]; });
   const rem = id => setCart(prev => prev.filter(i => i.id !== id));
   const upd = (id, q) => q <= 0 ? rem(id) : setCart(prev => prev.map(i => i.id === id ? { ...i, qty: q } : i));
   const clr = () => setCart([]);
   const tot = cart.reduce((s, i) => s + i.price * i.qty, 0);
   const cnt = cart.reduce((s, i) => s + i.qty, 0);
-  const ship = tot > 0 && tot < 500 ? 50 : 0;
-  return <Ctx.Provider value={{ cart, add, rem, upd, clr, tot, cnt, ship }}>{children}</Ctx.Provider>;
+
+  // Resolve free-shipping threshold + flat ship fee from the live settings,
+  // falling back to historical defaults if the backend never had a record.
+  const freeShipMin   = (shipCfg && shipCfg.free_shipping_enabled && Number(shipCfg.free_shipping_min_order)) || 500;
+  const defaultZoneFee = (() => {
+    const z = shipCfg && Array.isArray(shipCfg.zones) ? shipCfg.zones[0] : null;
+    return z ? Number(z.price) || 50 : 50;
+  })();
+  const ship = tot > 0 && tot < freeShipMin ? defaultZoneFee : 0;
+  return <Ctx.Provider value={{ cart, add, rem, upd, clr, tot, cnt, ship, freeShipMin, defaultZoneFee, shipCfg }}>{children}</Ctx.Provider>;
 }
 
 // ─── Router ──────────────────────────────────────────────────────────────────
@@ -654,7 +689,7 @@ function Nav({ r, go, openCart, user, onLogout }) {
 
 // ─── Cart Sidebar ─────────────────────────────────────────────────────────────
 function CartSide({ open, close, go }) {
-  const { cart, rem, upd, tot, ship, clr } = useCart();
+  const { cart, rem, upd, tot, ship, clr, freeShipMin } = useCart();
   const { user } = useAuth();
   const { t, lang, dir } = useLang();
   const mob = useMob();
@@ -883,7 +918,7 @@ function CartSide({ open, close, go }) {
                   <span style={{ fontFamily: C.fb, fontSize: 11, color: C.mu, letterSpacing: "0.04em" }}>{t("cartTotal")}</span>
                   <span style={{ fontFamily: C.fe, fontSize: 20, fontWeight: 500, color: C.dk }}>{tot} {t("egp")}</span>
                 </div>
-                {ship > 0 && <div style={{ fontSize: 11, color: C.mu, marginBottom: 6, fontFamily: C.fb }}>+ {ship} {t("egp")} | {500 - tot} {t("cartShipAdd")}</div>}
+                {ship > 0 && <div style={{ fontSize: 11, color: C.mu, marginBottom: 6, fontFamily: C.fb }}>+ {ship} {t("egp")} | {Math.max(0, freeShipMin - tot)} {t("cartShipAdd")}</div>}
                 {ship === 0 && <div style={{ fontSize: 11, color: "#2E6B3E", marginBottom: 6, fontFamily: C.fb }}>{t("cartShipFree")}</div>}
                 <div style={{ background: C.cr2, padding: "9px 13px", fontSize: 11, color: C.wa, marginBottom: 12, fontFamily: C.fb }}>{t("cartCashOnly")}</div>
                 <Btn onClick={() => { if (!user) { close(); go("#login"); } else setStep(1); }}
@@ -1003,8 +1038,36 @@ function AdminDash({ go }) {
   });
   const [statusEdit, setStatusEdit] = useState({});
 
+  // Overview date range — controls the bar chart + the "export CSV" scope
+  // ranges: today | 7d | 30d | custom
+  const [ovRange, setOvRange] = useState("7d");
+  const [ovFrom, setOvFrom] = useState("");
+  const [ovTo, setOvTo]     = useState("");
+
   // ── DB-backed products (separate from the legacy useProds storefront cache) ──
-  const PRODUCT_CATEGORIES = ["سيروم","غسول","مرطب","واقي شمس"];
+  // Categories now come from /api/categories so the admin can add new ones.
+  const FALLBACK_CATEGORIES = ["سيروم","غسول","مرطب","واقي شمس"];
+  const [categories, setCategories] = useState([]);
+  const PRODUCT_CATEGORIES = categories.length ? categories.map(c => c.name) : FALLBACK_CATEGORIES;
+  const refreshCategories = async () => {
+    try {
+      const r = await fetch("/api/categories");
+      if (r.ok) setCategories(await r.json());
+    } catch {}
+  };
+  useEffect(() => { refreshCategories(); }, []);
+  const addCategory = async (name) => {
+    const n = String(name||"").trim();
+    if (!n) return null;
+    try {
+      const r = await fetch("/api/categories", {
+        method:"POST", headers:{"Content-Type":"application/json"},
+        body: JSON.stringify({ name: n })
+      });
+      if (r.ok) { await refreshCategories(); return n; }
+    } catch {}
+    return null;
+  };
   const blankProdForm = () => ({
     name: "", description: "", category: PRODUCT_CATEGORIES[0], brand: "",
     ingredients: "", images: [], price: "", price_before: "", cost: "",
@@ -1182,11 +1245,59 @@ function AdminDash({ go }) {
     description: "متجر نوّرَة — أفضل البراندات العالمية للعناية بالبشرة، أسعار حقيقية وشحن سريع لكل محافظات مصر.",
     keywords:    "نوّرَة, عناية بالبشرة, سيروم, واقي شمس, ذا أوردينري, سيتافيل, لاروش بوزيه",
   };
+  const DEFAULT_STORE = {
+    name: "نوّرَة",
+    description: "متجر العناية بالبشرة — أفضل البراندات العالمية",
+    email: "nawraskincare@gmail.com",
+    whatsapp: "01000000000",
+    address: "القاهرة، مصر",
+    social: { instagram: "", tiktok: "", facebook: "" },
+    logo_url: "",
+    brand_primary: "#2A1F0E",
+    brand_accent:  "#C4956A",
+    store_open: true,
+    registration_enabled: true,
+    guest_checkout: true,
+  };
+  const DEFAULT_ACCOUNT = {
+    admin_name: "Admin",
+    admin_email: "mostafaayoub.ms@gmail.com",
+    // password fields are not persisted — they're only used to submit a change
+  };
+  const DEFAULT_EMAILS = {
+    order_subject: "✅ تم استلام طلبك من نوّرَة #{{order_id}}",
+    order_body: "مرحباً {{customer_name}}،\n\nتم استلام طلبك بنجاح! 🎉\n\nرقم الطلب: #{{order_id}}\nالإجمالي: {{order_total}} جنيه\n\nجاري التجهيز وسيتم التواصل معك قريباً.\n\nشكراً لاختيارك نوّرَة 💕",
+  };
+  const DEFAULT_NOTIFICATIONS = {
+    email_enabled: true,
+    telegram_enabled: false,
+    telegram_bot_token: "",
+    telegram_chat_id: "",
+  };
+  const DEFAULT_TEAM = {
+    members: [
+      { id: "u_owner", name: "Admin", email: "mostafaayoub.ms@gmail.com", role: "super_admin" },
+    ],
+    permissions: {
+      super_admin:     { orders: true,  products: true,  inventory: true, customers: true, returns: true,  shipping: true,  coupons: true,  settings: true },
+      orders_admin:    { orders: true,  products: false, inventory: false, customers: true,  returns: true,  shipping: false, coupons: false, settings: false },
+      inventory_admin: { orders: false, products: true,  inventory: true, customers: false, returns: false, shipping: false, coupons: false, settings: false },
+      shipping_admin:  { orders: true,  products: false, inventory: false, customers: false, returns: false, shipping: true,  coupons: false, settings: false },
+    },
+  };
+
   const [shipping, setShipping] = useState(DEFAULT_SHIPPING);
   const [payment,  setPayment]  = useState(DEFAULT_PAYMENT);
   const [seoCfg,   setSeoCfg]   = useState(DEFAULT_SEO);
+  const [storeCfg,  setStoreCfg]  = useState(DEFAULT_STORE);
+  const [accountCfg, setAccountCfg] = useState({ ...DEFAULT_ACCOUNT, pw_current:"", pw_new:"", pw_confirm:"" });
+  const [emailsCfg, setEmailsCfg] = useState(DEFAULT_EMAILS);
+  const [notifyCfg, setNotifyCfg] = useState(DEFAULT_NOTIFICATIONS);
+  const [teamCfg,   setTeamCfg]   = useState(DEFAULT_TEAM);
+  const [newTeamMember, setNewTeamMember] = useState({ name:"", email:"", role:"orders_admin" });
+
   const [savedToast, setSavedToast] = useState("");
-  const [settingsTab, setSettingsTab] = useState("payment"); // payment | seo
+  const [settingsTab, setSettingsTab] = useState("store");
   const [shipZoneEdit, setShipZoneEdit] = useState(null);
 
   const loadSetting = async (key, fallback, setter) => {
@@ -1203,13 +1314,20 @@ function AdminDash({ go }) {
       await fetch(`/api/settings/${key}`, { method:"PUT", headers:{"Content-Type":"application/json"}, body: JSON.stringify({ value }) });
       setSavedToast("تم الحفظ");
       setTimeout(()=>setSavedToast(""), 1500);
+      // Cross-component sync: storefront cart listens to refresh shipping rules
+      if (key === "shipping") window.dispatchEvent(new Event("nawra-shipping-saved"));
     } catch {}
   };
   useEffect(() => {
     if (tab === "shipping") loadSetting("shipping", DEFAULT_SHIPPING, setShipping);
     if (tab === "settings") {
-      loadSetting("payment", DEFAULT_PAYMENT, setPayment);
-      loadSetting("seo",     DEFAULT_SEO,     setSeoCfg);
+      loadSetting("payment",       DEFAULT_PAYMENT,       setPayment);
+      loadSetting("seo",           DEFAULT_SEO,           setSeoCfg);
+      loadSetting("store",         DEFAULT_STORE,         setStoreCfg);
+      loadSetting("account",       DEFAULT_ACCOUNT,       (v) => setAccountCfg({ ...v, pw_current:"", pw_new:"", pw_confirm:"" }));
+      loadSetting("emails",        DEFAULT_EMAILS,        setEmailsCfg);
+      loadSetting("notifications", DEFAULT_NOTIFICATIONS, setNotifyCfg);
+      loadSetting("team",          DEFAULT_TEAM,          setTeamCfg);
     }
   }, [tab]); // eslint-disable-line
 
@@ -1467,19 +1585,74 @@ function AdminDash({ go }) {
   const startOfDay = (d) => { const x = new Date(d); x.setHours(0,0,0,0); return x; };
   const today0 = startOfDay(now);
 
-  // 7-day series: index 0 = 6 days ago, index 6 = today
+  // Day-name helpers — used both by the dynamic chart range and the legacy
+  // "last 7 days" data path that other parts of the page still use.
   const dayLabels = ["الأحد","الاثنين","الثلاثاء","الأربعاء","الخميس","الجمعة","السبت"];
-  const last7 = Array.from({length:7}, (_,i) => {
-    const d = new Date(today0); d.setDate(d.getDate() - (6-i));
-    return { date: d, total: 0, label: dayLabels[d.getDay()] };
-  });
-  orderList.forEach(o => {
-    const d = parseOrderDate(o); if (!d) return;
-    const day0 = startOfDay(d);
-    const diff = Math.round((today0 - day0) / 86400000);
-    if (diff >= 0 && diff <= 6) last7[6-diff].total += Number(o.total)||0;
-  });
+
+  // ── Dynamic chart series (based on ovRange / ovFrom / ovTo) ────────────────
+  // Computes [{date, total, label}], the chart's title, and the matching
+  // subset of orders (used by the CSV export button).
+  const ovSeries = (() => {
+    let from, to;
+    if (ovRange === "today")       { from = new Date(today0); to = new Date(today0); }
+    else if (ovRange === "7d")     { from = new Date(today0); from.setDate(from.getDate()-6); to = new Date(today0); }
+    else if (ovRange === "30d")    { from = new Date(today0); from.setDate(from.getDate()-29); to = new Date(today0); }
+    else if (ovRange === "custom" && ovFrom && ovTo) {
+      from = startOfDay(new Date(ovFrom)); to = startOfDay(new Date(ovTo));
+      if (from > to) { const x = from; from = to; to = x; }
+    } else { from = new Date(today0); from.setDate(from.getDate()-6); to = new Date(today0); }
+
+    const dayCount = Math.min(60, Math.max(1, Math.round((to - from) / 86400000) + 1));
+    const series = Array.from({length: dayCount}, (_, i) => {
+      const d = new Date(from); d.setDate(d.getDate() + i);
+      // For long ranges, show day/month instead of weekday for readability
+      const label = dayCount <= 7 ? dayLabels[d.getDay()].slice(0,3)
+        : `${d.getDate()}/${d.getMonth()+1}`;
+      return { date: d, total: 0, label };
+    });
+    const inRange = [];
+    orderList.forEach(o => {
+      const d = parseOrderDate(o); if (!d) return;
+      const day0 = startOfDay(d);
+      if (day0 < from || day0 > to) return;
+      inRange.push(o);
+      const idx = Math.round((day0 - from) / 86400000);
+      if (idx >= 0 && idx < series.length) series[idx].total += Number(o.total)||0;
+    });
+    return { from, to, series, inRange };
+  })();
+  const last7 = ovSeries.series; // alias kept so the existing render keeps working
   const maxDay = Math.max(1, ...last7.map(d=>d.total));
+  const ovRangeLabel = ovRange === "today" ? "اليوم"
+    : ovRange === "7d"  ? "آخر 7 أيام"
+    : ovRange === "30d" ? "آخر 30 يوم"
+    : (ovFrom && ovTo)  ? `${ovFrom} → ${ovTo}` : "مخصص";
+
+  const exportOrdersCsv = () => {
+    const rows = ovSeries.inRange;
+    const head = ["رقم الطلب","التاريخ","العميل","الهاتف","المدينة","العنوان","عدد المنتجات","المنتجات","الإجمالي","الحالة","البريد"];
+    const escape = (v) => {
+      const s = v == null ? "" : String(v);
+      return /[",\n]/.test(s) ? `"${s.replace(/"/g,'""')}"` : s;
+    };
+    const lines = [head.join(",")];
+    rows.forEach(o => {
+      const items = (o.items||[]).map(it => `${it.name} ×${it.qty}`).join(" | ");
+      lines.push([
+        o.id, o.created_at || o.date || "", o.name || "", o.phone || "",
+        o.city || "", o.address || "", (o.items||[]).length, items,
+        o.total || 0, o.status || "", o.userEmail || ""
+      ].map(escape).join(","));
+    });
+    // BOM so Excel opens UTF-8 Arabic correctly
+    const blob = new Blob(["﻿" + lines.join("\n")], { type: "text/csv;charset=utf-8;" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `orders_${ovRange}_${new Date().toISOString().slice(0,10)}.csv`;
+    document.body.appendChild(a); a.click(); a.remove();
+    URL.revokeObjectURL(url);
+  };
 
   // Month-over-month sales % change
   const thisMonth = now.getMonth(), thisYear = now.getFullYear();
@@ -1626,17 +1799,51 @@ function AdminDash({ go }) {
 
       {/* Row: bar chart + latest orders */}
       <div style={{display:"grid",gridTemplateColumns:mob?"1fr":"1fr 1fr",gap:10,marginBottom:10}}>
-        {/* Bar chart */}
+        {/* Bar chart with date-range controls + CSV export */}
         <div style={{background:ui.cardBg,border:ui.border,borderRadius:ui.radius,padding:"14px 16px"}}>
-          <h3 style={{fontSize:13,fontWeight:500,color:ui.text,marginBottom:14,fontFamily:ui.fontBody}}>المبيعات — آخر 7 أيام</h3>
-          <div style={{display:"flex",alignItems:"flex-end",gap:6,height:110,paddingTop:8,direction:"ltr"}}>
+          <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:10,flexWrap:"wrap",gap:8}}>
+            <h3 style={{fontSize:13,fontWeight:500,color:ui.text,margin:0,fontFamily:ui.fontBody}}>المبيعات — {ovRangeLabel}</h3>
+            <button onClick={exportOrdersCsv} disabled={ovSeries.inRange.length===0}
+              title={ovSeries.inRange.length===0 ? "لا توجد طلبات في النطاق" : `تصدير ${ovSeries.inRange.length} طلب`}
+              style={{display:"flex",alignItems:"center",gap:5,
+                background: ovSeries.inRange.length===0 ? "transparent" : ui.text,
+                color: ovSeries.inRange.length===0 ? ui.textSub : "#fff",
+                border: ovSeries.inRange.length===0 ? ui.border : "none",
+                padding:"5px 11px",cursor: ovSeries.inRange.length===0 ? "not-allowed":"pointer",
+                fontSize:11,fontFamily:ui.fontBody,borderRadius:5}}>
+              تصدير CSV
+            </button>
+          </div>
+
+          {/* Range chips */}
+          <div style={{display:"flex",gap:4,flexWrap:"wrap",marginBottom:10}}>
+            {[["today","اليوم"],["7d","7 أيام"],["30d","30 يوم"],["custom","مخصص"]].map(([k,l])=>(
+              <button key={k} onClick={()=>setOvRange(k)}
+                style={{padding:"4px 10px",borderRadius:14,fontSize:11,fontFamily:ui.fontBody,cursor:"pointer",
+                  background: ovRange===k ? ui.text : "transparent",
+                  color: ovRange===k ? "#fff" : ui.textSub,
+                  border: ovRange===k ? "none" : ui.border}}>{l}</button>
+            ))}
+          </div>
+          {ovRange === "custom" && (
+            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:6,marginBottom:10}}>
+              <input type="date" value={ovFrom} onChange={e=>setOvFrom(e.target.value)}
+                style={{padding:"5px 9px",border:ui.border,borderRadius:5,background:ui.cardBg,
+                  fontFamily:ui.fontBody,fontSize:12,color:ui.text}}/>
+              <input type="date" value={ovTo} onChange={e=>setOvTo(e.target.value)}
+                style={{padding:"5px 9px",border:ui.border,borderRadius:5,background:ui.cardBg,
+                  fontFamily:ui.fontBody,fontSize:12,color:ui.text}}/>
+            </div>
+          )}
+
+          <div style={{display:"flex",alignItems:"flex-end",gap:last7.length > 14 ? 3 : 6,height:110,paddingTop:8,direction:"ltr"}}>
             {last7.map((d,i)=>{
               const h = Math.max(4, Math.round((d.total / maxDay) * 90));
               return (
                 <div key={i} style={{flex:1,display:"flex",flexDirection:"column",alignItems:"center",gap:5,position:"relative"}}>
-                  <div title={`${d.total.toLocaleString()} ج`}
+                  <div title={`${d.label}: ${d.total.toLocaleString()} ج`}
                     style={{width:"100%",height:`${h}%`,background:"#3B82F6",borderRadius:"3px 3px 0 0",transition:"height .3s"}} />
-                  <span style={{fontSize:10,color:ui.textSub,fontFamily:ui.fontBody}}>{d.label.slice(0,3)}</span>
+                  {last7.length <= 14 && <span style={{fontSize:10,color:ui.textSub,fontFamily:ui.fontBody}}>{d.label}</span>}
                 </div>
               );
             })}
@@ -2035,10 +2242,44 @@ function AdminDash({ go }) {
                       </Field>
                       <div style={{display:"grid",gridTemplateColumns:mob?"1fr":"1fr 1fr",gap:12}}>
                         <Field label="الفئة">
-                          <select style={inputStyle} value={pForm.category}
-                            onChange={e=>setPForm({...pForm, category:e.target.value})}>
-                            {PRODUCT_CATEGORIES.map(c => <option key={c} value={c}>{c}</option>)}
-                          </select>
+                          {/* "__add__" is a sentinel that opens an inline input
+                              for creating a new category. Avoids a modal. */}
+                          {pForm._addCat ? (
+                            <div style={{display:"flex",gap:6}}>
+                              <input style={{...inputStyle, flex:1}}
+                                autoFocus value={pForm._newCat || ""}
+                                onChange={e=>setPForm({...pForm, _newCat:e.target.value})}
+                                onKeyDown={async e => {
+                                  if (e.key === "Enter") {
+                                    e.preventDefault();
+                                    const added = await addCategory(pForm._newCat);
+                                    if (added) setPForm({...pForm, category:added, _addCat:false, _newCat:""});
+                                  } else if (e.key === "Escape") {
+                                    setPForm({...pForm, _addCat:false, _newCat:""});
+                                  }
+                                }}
+                                placeholder="اسم الفئة الجديدة..."/>
+                              <button type="button"
+                                onClick={async () => {
+                                  const added = await addCategory(pForm._newCat);
+                                  if (added) setPForm({...pForm, category:added, _addCat:false, _newCat:""});
+                                }}
+                                style={{padding:"0 12px",background:ui.text,color:"#fff",border:"none",borderRadius:6,fontSize:18,cursor:"pointer"}}>✓</button>
+                              <button type="button"
+                                onClick={() => setPForm({...pForm, _addCat:false, _newCat:""})}
+                                style={{padding:"0 12px",background:"transparent",color:ui.textSub,border:ui.border,borderRadius:6,fontSize:18,cursor:"pointer"}}>×</button>
+                            </div>
+                          ) : (
+                            <select style={inputStyle} value={pForm.category}
+                              onChange={e => {
+                                if (e.target.value === "__add__") setPForm({...pForm, _addCat:true});
+                                else setPForm({...pForm, category:e.target.value});
+                              }}>
+                              {PRODUCT_CATEGORIES.map(c => <option key={c} value={c}>{c}</option>)}
+                              <option disabled>──────────</option>
+                              <option value="__add__">+ إضافة فئة جديدة</option>
+                            </select>
+                          )}
                         </Field>
                         <Field label="الماركة">
                           <input style={inputStyle} value={pForm.brand}
@@ -2756,15 +2997,243 @@ function AdminDash({ go }) {
                 )}
 
                 {/* Sub-tabs */}
-                <div style={{background:ui.cardBg,border:ui.border,borderRadius:ui.radius,padding:"6px 6px",marginBottom:12,display:"flex",gap:4}}>
-                  {[["payment","الدفع"],["seo","SEO"]].map(([k,l])=>(
+                <div style={{background:ui.cardBg,border:ui.border,borderRadius:ui.radius,padding:"6px 6px",marginBottom:12,display:"flex",gap:4,flexWrap:"wrap"}}>
+                  {[
+                    ["store","المتجر"],["account","الحساب"],["emails","الإيميلات"],
+                    ["payment","الدفع"],["notifications","الإشعارات"],
+                    ["team","الفريق"],["seo","SEO"]
+                  ].map(([k,l])=>(
                     <button key={k} onClick={()=>setSettingsTab(k)}
-                      style={{padding:"8px 18px",border:"none",cursor:"pointer",borderRadius:6,
+                      style={{padding:"8px 14px",border:"none",cursor:"pointer",borderRadius:6,
                         background: settingsTab===k ? ui.text : "transparent",
                         color: settingsTab===k ? "#fff" : ui.textSub,
-                        fontSize:12.5, fontFamily:ui.fontBody}}>{l}</button>
+                        fontSize:12.5, fontFamily:ui.fontBody, whiteSpace:"nowrap"}}>{l}</button>
                   ))}
                 </div>
+
+                {/* ── STORE ───────────────────────────────────────────── */}
+                {settingsTab === "store" && (
+                  <div>
+                    <div style={sectionCard}>
+                      <div style={sectionTitle}>معلومات المتجر</div>
+                      <div style={{display:"grid",gridTemplateColumns:mob?"1fr":"1fr 1fr",gap:12}}>
+                        <div>
+                          <label style={labelStyle}>اسم المتجر</label>
+                          <input style={inputAr} value={storeCfg.name} onChange={e=>setStoreCfg({...storeCfg, name:e.target.value})}/>
+                        </div>
+                        <div>
+                          <label style={labelStyle}>بريد التواصل</label>
+                          <input style={{...inputStyle, textAlign:"left"}} value={storeCfg.email} onChange={e=>setStoreCfg({...storeCfg, email:e.target.value})}/>
+                        </div>
+                        <div>
+                          <label style={labelStyle}>رقم الواتساب</label>
+                          <input style={{...inputStyle, textAlign:"left"}} value={storeCfg.whatsapp} onChange={e=>setStoreCfg({...storeCfg, whatsapp:e.target.value})} placeholder="01000000000"/>
+                        </div>
+                        <div>
+                          <label style={labelStyle}>العنوان</label>
+                          <input style={inputAr} value={storeCfg.address} onChange={e=>setStoreCfg({...storeCfg, address:e.target.value})}/>
+                        </div>
+                      </div>
+                      <div style={{marginTop:12}}>
+                        <label style={labelStyle}>وصف المتجر</label>
+                        <textarea rows={2} style={{...inputAr, minHeight:60, resize:"vertical"}}
+                          value={storeCfg.description} onChange={e=>setStoreCfg({...storeCfg, description:e.target.value})}/>
+                      </div>
+                    </div>
+
+                    <div style={sectionCard}>
+                      <div style={sectionTitle}>السوشيال ميديا</div>
+                      <div style={{display:"grid",gridTemplateColumns:mob?"1fr":"repeat(3,1fr)",gap:12}}>
+                        {[["instagram","Instagram"],["tiktok","TikTok"],["facebook","Facebook"]].map(([k,l])=>(
+                          <div key={k}>
+                            <label style={labelStyle}>{l}</label>
+                            <input style={{...inputStyle, textAlign:"left"}}
+                              value={storeCfg.social[k] || ""}
+                              onChange={e=>setStoreCfg({...storeCfg, social:{...storeCfg.social, [k]:e.target.value}})}
+                              placeholder={`https://${k}.com/...`}/>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+
+                    <div style={sectionCard}>
+                      <div style={sectionTitle}>الشعار والألوان</div>
+                      <div style={{display:"grid",gridTemplateColumns:mob?"1fr":"1fr 1fr 1fr",gap:12,alignItems:"end"}}>
+                        <div>
+                          <label style={labelStyle}>شعار المتجر</label>
+                          <div style={{display:"flex",alignItems:"center",gap:10}}>
+                            {storeCfg.logo_url ? (
+                              <img src={storeCfg.logo_url} alt="logo" style={{width:48,height:48,objectFit:"contain",borderRadius:6,border:ui.border,background:"#fff"}}/>
+                            ) : (
+                              <div style={{width:48,height:48,background:ui.sideBg,border:ui.border,borderRadius:6,display:"flex",alignItems:"center",justifyContent:"center"}}>
+                                <AdmIcon name="box" size={18}/>
+                              </div>
+                            )}
+                            <label style={{padding:"7px 12px",border:ui.border,borderRadius:6,fontSize:12,fontFamily:ui.fontBody,cursor:"pointer",color:ui.text}}>
+                              رفع شعار
+                              <input type="file" accept="image/*" style={{display:"none"}}
+                                onChange={async e=>{
+                                  const f = e.target.files && e.target.files[0]; if (!f) return;
+                                  if (f.size > 1024*1024) { alert("الشعار أكبر من 1MB"); return; }
+                                  const r = new FileReader();
+                                  r.onload = () => setStoreCfg({...storeCfg, logo_url: r.result});
+                                  r.readAsDataURL(f);
+                                  e.target.value = "";
+                                }}/>
+                            </label>
+                            {storeCfg.logo_url && (
+                              <button onClick={()=>setStoreCfg({...storeCfg, logo_url:""})}
+                                style={{background:"transparent",border:"1px solid rgba(220,38,38,.3)",color:"#DC2626",padding:"5px 9px",cursor:"pointer",fontSize:11,borderRadius:4,fontFamily:ui.fontBody}}>إزالة</button>
+                            )}
+                          </div>
+                        </div>
+                        <div>
+                          <label style={labelStyle}>اللون الرئيسي</label>
+                          <div style={{display:"flex",gap:6}}>
+                            <input type="color" value={storeCfg.brand_primary}
+                              onChange={e=>setStoreCfg({...storeCfg, brand_primary:e.target.value})}
+                              style={{width:40,height:36,border:ui.border,borderRadius:6,padding:2,background:ui.cardBg,cursor:"pointer"}}/>
+                            <input style={{...inputStyle, textAlign:"left", fontFamily:"monospace"}}
+                              value={storeCfg.brand_primary} onChange={e=>setStoreCfg({...storeCfg, brand_primary:e.target.value})}/>
+                          </div>
+                        </div>
+                        <div>
+                          <label style={labelStyle}>لون التمييز</label>
+                          <div style={{display:"flex",gap:6}}>
+                            <input type="color" value={storeCfg.brand_accent}
+                              onChange={e=>setStoreCfg({...storeCfg, brand_accent:e.target.value})}
+                              style={{width:40,height:36,border:ui.border,borderRadius:6,padding:2,background:ui.cardBg,cursor:"pointer"}}/>
+                            <input style={{...inputStyle, textAlign:"left", fontFamily:"monospace"}}
+                              value={storeCfg.brand_accent} onChange={e=>setStoreCfg({...storeCfg, brand_accent:e.target.value})}/>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+
+                    <div style={sectionCard}>
+                      <div style={sectionTitle}>سياسات المتجر</div>
+                      <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"10px 0",borderBottom:`0.5px solid #EEE`}}>
+                        <div>
+                          <div style={{fontSize:13,color:ui.text,fontWeight:500,fontFamily:ui.fontBody}}>المتجر مفتوح</div>
+                          <div style={{fontSize:11.5,color:ui.textSub,fontFamily:ui.fontBody,marginTop:2}}>عند الإغلاق، يظهر بانر للعملاء ويتم تعطيل الطلبات</div>
+                        </div>
+                        <Toggle value={storeCfg.store_open} onChange={v=>setStoreCfg({...storeCfg, store_open:v})}/>
+                      </div>
+                      <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"10px 0",borderBottom:`0.5px solid #EEE`}}>
+                        <div>
+                          <div style={{fontSize:13,color:ui.text,fontWeight:500,fontFamily:ui.fontBody}}>السماح بإنشاء حسابات جديدة</div>
+                          <div style={{fontSize:11.5,color:ui.textSub,fontFamily:ui.fontBody,marginTop:2}}>يقدر العملاء يسجّلوا حسابات لمتابعة طلباتهم</div>
+                        </div>
+                        <Toggle value={storeCfg.registration_enabled} onChange={v=>setStoreCfg({...storeCfg, registration_enabled:v})}/>
+                      </div>
+                      <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"10px 0"}}>
+                        <div>
+                          <div style={{fontSize:13,color:ui.text,fontWeight:500,fontFamily:ui.fontBody}}>الشراء كزائر</div>
+                          <div style={{fontSize:11.5,color:ui.textSub,fontFamily:ui.fontBody,marginTop:2}}>السماح بإتمام الطلب بدون تسجيل دخول</div>
+                        </div>
+                        <Toggle value={storeCfg.guest_checkout} onChange={v=>setStoreCfg({...storeCfg, guest_checkout:v})}/>
+                      </div>
+                    </div>
+
+                    <button onClick={()=>saveSetting("store", storeCfg)}
+                      style={{background:ui.text,color:"#fff",border:"none",padding:"11px 22px",cursor:"pointer",fontSize:13,fontFamily:ui.fontBody,fontWeight:500,borderRadius:6}}>
+                      حفظ إعدادات المتجر
+                    </button>
+                  </div>
+                )}
+
+                {/* ── ACCOUNT ─────────────────────────────────────────── */}
+                {settingsTab === "account" && (
+                  <div>
+                    <div style={sectionCard}>
+                      <div style={sectionTitle}>بيانات المسؤول</div>
+                      <div style={{display:"grid",gridTemplateColumns:mob?"1fr":"1fr 1fr",gap:12}}>
+                        <div>
+                          <label style={labelStyle}>الاسم</label>
+                          <input style={inputAr} value={accountCfg.admin_name} onChange={e=>setAccountCfg({...accountCfg, admin_name:e.target.value})}/>
+                        </div>
+                        <div>
+                          <label style={labelStyle}>البريد الإلكتروني</label>
+                          <input style={{...inputStyle, textAlign:"left"}} value={accountCfg.admin_email} onChange={e=>setAccountCfg({...accountCfg, admin_email:e.target.value})}/>
+                        </div>
+                      </div>
+                    </div>
+
+                    <div style={sectionCard}>
+                      <div style={sectionTitle}>تغيير كلمة المرور</div>
+                      <div style={{display:"grid",gridTemplateColumns:mob?"1fr":"repeat(3,1fr)",gap:12}}>
+                        <div>
+                          <label style={labelStyle}>الحالية</label>
+                          <input type="password" style={inputStyle} value={accountCfg.pw_current} onChange={e=>setAccountCfg({...accountCfg, pw_current:e.target.value})}/>
+                        </div>
+                        <div>
+                          <label style={labelStyle}>الجديدة</label>
+                          <input type="password" style={inputStyle} value={accountCfg.pw_new} onChange={e=>setAccountCfg({...accountCfg, pw_new:e.target.value})}/>
+                        </div>
+                        <div>
+                          <label style={labelStyle}>تأكيد الجديدة</label>
+                          <input type="password" style={inputStyle} value={accountCfg.pw_confirm} onChange={e=>setAccountCfg({...accountCfg, pw_confirm:e.target.value})}/>
+                        </div>
+                      </div>
+                      <div style={{fontSize:11.5,color:ui.textSub,fontFamily:ui.fontBody,marginTop:8}}>
+                        ملاحظة: تغيير كلمة المرور بالكامل يحتاج لتفعيل المصادقة في الخادم. حالياً البيانات بتتخزن في الإعدادات فقط.
+                      </div>
+                    </div>
+
+                    <button onClick={()=>{
+                      const { pw_current, pw_new, pw_confirm, ...persist } = accountCfg;
+                      if (pw_new && pw_new !== pw_confirm) { alert("كلمتا المرور غير متطابقتين"); return; }
+                      saveSetting("account", persist);
+                    }}
+                      style={{background:ui.text,color:"#fff",border:"none",padding:"11px 22px",cursor:"pointer",fontSize:13,fontFamily:ui.fontBody,fontWeight:500,borderRadius:6}}>
+                      حفظ بيانات الحساب
+                    </button>
+                  </div>
+                )}
+
+                {/* ── EMAILS ──────────────────────────────────────────── */}
+                {settingsTab === "emails" && (
+                  <div>
+                    <div style={sectionCard}>
+                      <div style={sectionTitle}>قالب إيميل تأكيد الطلب</div>
+                      <div style={{fontSize:11.5,color:ui.textSub,fontFamily:ui.fontBody,marginBottom:10,padding:"8px 12px",background:"#FAFAFA",borderRadius:6}}>
+                        المتغيرات المتاحة: <code>{"{{customer_name}}"}</code> · <code>{"{{order_id}}"}</code> · <code>{"{{order_total}}"}</code>
+                      </div>
+                      <div style={{marginBottom:12}}>
+                        <label style={labelStyle}>عنوان الإيميل (Subject)</label>
+                        <input style={inputAr} value={emailsCfg.order_subject} onChange={e=>setEmailsCfg({...emailsCfg, order_subject:e.target.value})}/>
+                      </div>
+                      <div style={{marginBottom:12}}>
+                        <label style={labelStyle}>نص الإيميل (Body)</label>
+                        <textarea rows={8} style={{...inputAr, minHeight:160, resize:"vertical", fontFamily:ui.fontBody}}
+                          value={emailsCfg.order_body} onChange={e=>setEmailsCfg({...emailsCfg, order_body:e.target.value})}/>
+                      </div>
+                    </div>
+
+                    <div style={sectionCard}>
+                      <div style={sectionTitle}>معاينة</div>
+                      <div style={{padding:"14px 16px",background:"#FAFAFA",border:"0.5px solid #EEE",borderRadius:6}}>
+                        <div style={{fontSize:13,fontWeight:600,color:ui.text,fontFamily:ui.fontBody,marginBottom:10,paddingBottom:8,borderBottom:`0.5px solid #DDD`}}>
+                          {emailsCfg.order_subject
+                            .replace("{{order_id}}", "12345")
+                            .replace("{{customer_name}}", "أحمد محمد")
+                            .replace("{{order_total}}", "640")}
+                        </div>
+                        <div style={{fontSize:12.5,color:ui.text,fontFamily:ui.fontBody,whiteSpace:"pre-wrap",lineHeight:1.8}}>
+                          {emailsCfg.order_body
+                            .replace(/{{order_id}}/g, "12345")
+                            .replace(/{{customer_name}}/g, "أحمد محمد")
+                            .replace(/{{order_total}}/g, "640")}
+                        </div>
+                      </div>
+                    </div>
+
+                    <button onClick={()=>saveSetting("emails", emailsCfg)}
+                      style={{background:ui.text,color:"#fff",border:"none",padding:"11px 22px",cursor:"pointer",fontSize:13,fontFamily:ui.fontBody,fontWeight:500,borderRadius:6}}>
+                      حفظ قوالب الإيميل
+                    </button>
+                  </div>
+                )}
 
                 {settingsTab === "payment" && (
                   <div>
@@ -2841,6 +3310,182 @@ function AdminDash({ go }) {
                     </button>
                   </div>
                 )}
+
+                {/* ── NOTIFICATIONS ───────────────────────────────────── */}
+                {settingsTab === "notifications" && (
+                  <div>
+                    <div style={sectionCard}>
+                      <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"6px 0"}}>
+                        <div>
+                          <div style={{fontSize:13,color:ui.text,fontWeight:600,fontFamily:ui.fontBody}}>إشعارات الإيميل</div>
+                          <div style={{fontSize:11.5,color:ui.textSub,fontFamily:ui.fontBody,marginTop:3}}>استلام إيميل لكل طلب جديد على {DEFAULT_STORE.email}</div>
+                        </div>
+                        <Toggle value={notifyCfg.email_enabled} onChange={v=>setNotifyCfg({...notifyCfg, email_enabled:v})}/>
+                      </div>
+                    </div>
+
+                    <div style={sectionCard}>
+                      <div style={sectionTitle}>
+                        <span>إشعارات Telegram</span>
+                        <Toggle value={notifyCfg.telegram_enabled} onChange={v=>setNotifyCfg({...notifyCfg, telegram_enabled:v})}/>
+                      </div>
+                      <div style={{marginBottom:10}}>
+                        <label style={labelStyle}>Bot Token</label>
+                        <input style={{...inputStyle, textAlign:"left", fontFamily:"monospace"}}
+                          value={notifyCfg.telegram_bot_token}
+                          onChange={e=>setNotifyCfg({...notifyCfg, telegram_bot_token:e.target.value})}
+                          placeholder="123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11"/>
+                      </div>
+                      <div style={{marginBottom:10}}>
+                        <label style={labelStyle}>Chat ID</label>
+                        <input style={{...inputStyle, textAlign:"left", fontFamily:"monospace"}}
+                          value={notifyCfg.telegram_chat_id}
+                          onChange={e=>setNotifyCfg({...notifyCfg, telegram_chat_id:e.target.value})}
+                          placeholder="-1001234567890"/>
+                      </div>
+                      <div style={{fontSize:11,color:ui.textSub,fontFamily:ui.fontBody,marginTop:6}}>
+                        أنشئ بوت من <code>@BotFather</code> واحصل على الـ Chat ID من <code>@userinfobot</code>.
+                      </div>
+                    </div>
+
+                    <button onClick={()=>saveSetting("notifications", notifyCfg)}
+                      style={{background:ui.text,color:"#fff",border:"none",padding:"11px 22px",cursor:"pointer",fontSize:13,fontFamily:ui.fontBody,fontWeight:500,borderRadius:6}}>
+                      حفظ الإشعارات
+                    </button>
+                  </div>
+                )}
+
+                {/* ── TEAM & PERMISSIONS ──────────────────────────────── */}
+                {settingsTab === "team" && (() => {
+                  const ROLE_LABELS = {
+                    super_admin:     "Super Admin",
+                    orders_admin:    "مشرف طلبات",
+                    inventory_admin: "مشرف مخزون",
+                    shipping_admin:  "موظف شحن",
+                  };
+                  const PERM_LABELS = {
+                    orders:"الطلبات", products:"المنتجات", inventory:"المخزون",
+                    customers:"العملاء", returns:"المرتجعات", shipping:"الشحن",
+                    coupons:"الكوبونات", settings:"الإعدادات",
+                  };
+                  const addMember = () => {
+                    if (!newTeamMember.name.trim() || !newTeamMember.email.trim()) return;
+                    setTeamCfg({...teamCfg, members:[...teamCfg.members, { ...newTeamMember, id:`u_${Date.now().toString(36)}` }]});
+                    setNewTeamMember({ name:"", email:"", role:"orders_admin" });
+                  };
+                  const removeMember = (id) => setTeamCfg({...teamCfg, members:teamCfg.members.filter(m=>m.id!==id)});
+                  return (
+                    <div>
+                      <div style={sectionCard}>
+                        <div style={sectionTitle}>أعضاء الفريق</div>
+                        <div style={{overflowX:"auto"}}>
+                          <table style={{width:"100%",borderCollapse:"collapse",fontFamily:ui.fontBody,minWidth:560}}>
+                            <thead>
+                              <tr style={{background:ui.sideBg,borderBottom:`0.5px solid #E5E5E5`}}>
+                                {["الاسم","البريد","الصلاحية",""].map(h=>(
+                                  <th key={h} style={{padding:"10px 12px",textAlign:"right",fontSize:11.5,color:ui.textSub,fontWeight:500}}>{h}</th>
+                                ))}
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {teamCfg.members.map(m => (
+                                <tr key={m.id} style={{borderTop:"0.5px solid #EEE"}}>
+                                  <td style={{padding:"10px 12px",fontSize:13,color:ui.text,fontWeight:500}}>{m.name}</td>
+                                  <td style={{padding:"10px 12px",fontSize:12,color:ui.textSub}}>{m.email}</td>
+                                  <td style={{padding:"10px 12px"}}>
+                                    <select value={m.role}
+                                      onChange={e=>setTeamCfg({...teamCfg, members:teamCfg.members.map(x=>x.id===m.id?{...x, role:e.target.value}:x)})}
+                                      style={{...inputStyle, padding:"5px 8px", width:"auto", direction:"rtl"}}>
+                                      {Object.keys(ROLE_LABELS).map(r => <option key={r} value={r}>{ROLE_LABELS[r]}</option>)}
+                                    </select>
+                                  </td>
+                                  <td style={{padding:"10px 12px",textAlign:"left"}}>
+                                    {m.role === "super_admin" && teamCfg.members.filter(x=>x.role==="super_admin").length === 1 ? (
+                                      <span style={{fontSize:11,color:ui.textSub}}>—</span>
+                                    ) : (
+                                      <button onClick={()=>removeMember(m.id)}
+                                        style={{background:"none",border:"1px solid rgba(220,38,38,.3)",color:"#DC2626",padding:"4px 9px",cursor:"pointer",fontSize:11,fontFamily:ui.fontBody,borderRadius:4}}>إزالة</button>
+                                    )}
+                                  </td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                      </div>
+
+                      <div style={sectionCard}>
+                        <div style={sectionTitle}>إضافة عضو جديد</div>
+                        <div style={{display:"grid",gridTemplateColumns:mob?"1fr":"1fr 1fr 1fr auto",gap:10,alignItems:"end"}}>
+                          <div>
+                            <label style={labelStyle}>الاسم</label>
+                            <input style={inputAr} value={newTeamMember.name} onChange={e=>setNewTeamMember({...newTeamMember, name:e.target.value})}/>
+                          </div>
+                          <div>
+                            <label style={labelStyle}>البريد</label>
+                            <input style={{...inputStyle, textAlign:"left"}} value={newTeamMember.email} onChange={e=>setNewTeamMember({...newTeamMember, email:e.target.value})}/>
+                          </div>
+                          <div>
+                            <label style={labelStyle}>الصلاحية</label>
+                            <select style={{...inputStyle, direction:"rtl"}} value={newTeamMember.role} onChange={e=>setNewTeamMember({...newTeamMember, role:e.target.value})}>
+                              {Object.keys(ROLE_LABELS).map(r => <option key={r} value={r}>{ROLE_LABELS[r]}</option>)}
+                            </select>
+                          </div>
+                          <button onClick={addMember}
+                            style={{background:ui.text,color:"#fff",border:"none",padding:"9px 16px",cursor:"pointer",fontSize:12.5,borderRadius:6,fontFamily:ui.fontBody}}>إضافة</button>
+                        </div>
+                      </div>
+
+                      <div style={sectionCard}>
+                        <div style={sectionTitle}>صلاحيات الأدوار</div>
+                        <div style={{overflowX:"auto"}}>
+                          <table style={{width:"100%",borderCollapse:"collapse",fontFamily:ui.fontBody,minWidth:600}}>
+                            <thead>
+                              <tr style={{background:ui.sideBg,borderBottom:`0.5px solid #E5E5E5`}}>
+                                <th style={{padding:"10px 12px",textAlign:"right",fontSize:11.5,color:ui.textSub,fontWeight:500,whiteSpace:"nowrap"}}>الدور</th>
+                                {Object.keys(PERM_LABELS).map(p => (
+                                  <th key={p} style={{padding:"10px 6px",textAlign:"center",fontSize:11,color:ui.textSub,fontWeight:500,whiteSpace:"nowrap"}}>{PERM_LABELS[p]}</th>
+                                ))}
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {Object.keys(ROLE_LABELS).map(role => (
+                                <tr key={role} style={{borderTop:"0.5px solid #EEE"}}>
+                                  <td style={{padding:"10px 12px",fontSize:13,color:ui.text,fontWeight:500,whiteSpace:"nowrap"}}>{ROLE_LABELS[role]}</td>
+                                  {Object.keys(PERM_LABELS).map(p => {
+                                    const allowed = !!(teamCfg.permissions[role] && teamCfg.permissions[role][p]);
+                                    const isSuper = role === "super_admin";
+                                    return (
+                                      <td key={p} style={{padding:"10px 6px",textAlign:"center"}}>
+                                        <input type="checkbox" checked={allowed} disabled={isSuper}
+                                          onChange={e=>setTeamCfg({
+                                            ...teamCfg,
+                                            permissions:{
+                                              ...teamCfg.permissions,
+                                              [role]: { ...(teamCfg.permissions[role]||{}), [p]: e.target.checked }
+                                            }
+                                          })}
+                                          style={{width:16,height:16,cursor:isSuper?"not-allowed":"pointer",accentColor:ui.text}}/>
+                                      </td>
+                                    );
+                                  })}
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                        <div style={{fontSize:11.5,color:ui.textSub,fontFamily:ui.fontBody,marginTop:8}}>
+                          Super Admin له صلاحية كاملة دائماً ولا يمكن تعديل صلاحياته من هنا.
+                        </div>
+                      </div>
+
+                      <button onClick={()=>saveSetting("team", teamCfg)}
+                        style={{background:ui.text,color:"#fff",border:"none",padding:"11px 22px",cursor:"pointer",fontSize:13,fontFamily:ui.fontBody,fontWeight:500,borderRadius:6}}>
+                        حفظ الفريق والصلاحيات
+                      </button>
+                    </div>
+                  );
+                })()}
 
                 {settingsTab === "seo" && (
                   <div>
@@ -3643,22 +4288,68 @@ function OrderTimeline({ status }) {
 }
 
 // ─── Order Detail Modal (used by AdminDash) ───────────────────────────────────
+// Inject print-only CSS once. When the user clicks "طباعة", we toggle the
+// `nawra-print-mode` class on <body>, which the @media print rules pick up to
+// hide every chrome element except the modal's `.order-print` block.
+function injectPrintStyles() {
+  if (document.getElementById("nawra-print-styles")) return;
+  const s = document.createElement("style");
+  s.id = "nawra-print-styles";
+  s.textContent = `
+    @media print {
+      @page { margin: 14mm; }
+      body.nawra-print-mode { background:#fff !important; }
+      body.nawra-print-mode > *:not(.order-print-overlay) { display:none !important; }
+      .order-print-overlay {
+        position:static !important; inset:auto !important; background:#fff !important;
+        padding:0 !important; overflow:visible !important;
+      }
+      .order-print-overlay > .order-print-card {
+        box-shadow:none !important; max-height:none !important; max-width:none !important;
+        width:100% !important; padding:0 !important; overflow:visible !important;
+      }
+      .no-print { display:none !important; }
+    }
+  `;
+  document.head.appendChild(s);
+}
+
 function OrderDetailModal({ order, onClose, onStatusChange }) {
   const { t, dir } = useLang();
+  useEffect(() => { injectPrintStyles(); }, []);
   if (!order) return null;
   const sectionTitle = { fontFamily:C.fa, fontSize:13.5, fontWeight:600, color:C.dk, marginBottom:8, paddingBottom:4, borderBottom:`1px solid rgba(196,149,106,.15)` };
   const row = { fontFamily:C.fb, fontSize:13, color:C.dk, lineHeight:1.85, marginBottom:3 };
   const label = { color:C.mu, marginInlineEnd:6, fontSize:11.5, letterSpacing:".04em" };
+
+  const handlePrint = () => {
+    document.body.classList.add("nawra-print-mode");
+    const cleanup = () => {
+      document.body.classList.remove("nawra-print-mode");
+      window.removeEventListener("afterprint", cleanup);
+    };
+    window.addEventListener("afterprint", cleanup);
+    // Safari fallback if afterprint never fires
+    setTimeout(cleanup, 3000);
+    window.print();
+  };
+
   return (
-    <div onClick={onClose} style={{ position:"fixed", inset:0, background:"rgba(0,0,0,.55)", zIndex:500, display:"flex", alignItems:"center", justifyContent:"center", padding:16, direction:dir, overflowY:"auto" }}>
-      <div onClick={e=>e.stopPropagation()} style={{ background:C.wh, maxWidth:680, width:"100%", maxHeight:"92vh", overflow:"auto", padding:"22px 26px", boxShadow:"0 12px 48px rgba(0,0,0,.25)" }}>
+    <div onClick={onClose} className="order-print-overlay" style={{ position:"fixed", inset:0, background:"rgba(0,0,0,.55)", zIndex:500, display:"flex", alignItems:"center", justifyContent:"center", padding:16, direction:dir, overflowY:"auto" }}>
+      <div onClick={e=>e.stopPropagation()} className="order-print-card" style={{ background:C.wh, maxWidth:680, width:"100%", maxHeight:"92vh", overflow:"auto", padding:"22px 26px", boxShadow:"0 12px 48px rgba(0,0,0,.25)" }}>
         {/* Header */}
         <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:18, paddingBottom:12, borderBottom:`1px solid rgba(196,149,106,.18)` }}>
           <div>
             <h2 style={{ fontFamily:C.fa, fontSize:19, fontWeight:600, color:C.dk, margin:0 }}>{t("detailTitle")}</h2>
             <div style={{ fontFamily:C.fe, fontSize:11, color:C.mu, letterSpacing:".1em", marginTop:3 }}>#{order.id}</div>
           </div>
-          <button onClick={onClose} style={{ background:"none", border:"none", fontSize:24, color:C.mu, cursor:"pointer", lineHeight:1, padding:4 }}>✕</button>
+          <div className="no-print" style={{display:"flex",alignItems:"center",gap:8}}>
+            <button onClick={handlePrint}
+              style={{ background:"transparent", border:`1px solid ${C.dk}`, color:C.dk, padding:"6px 14px", cursor:"pointer", fontFamily:C.fb, fontSize:12, borderRadius:4, display:"flex", alignItems:"center", gap:5 }}>
+              🖨 طباعة
+            </button>
+            <button onClick={onClose} style={{ background:"none", border:"none", fontSize:24, color:C.mu, cursor:"pointer", lineHeight:1, padding:4 }}>✕</button>
+          </div>
         </div>
 
         {/* Timeline */}
@@ -3709,7 +4400,7 @@ function OrderDetailModal({ order, onClose, onStatusChange }) {
 
         {/* Status change */}
         {onStatusChange && (
-          <section style={{ marginTop:18, paddingTop:14, borderTop:`1px solid rgba(196,149,106,.15)` }}>
+          <section className="no-print" style={{ marginTop:18, paddingTop:14, borderTop:`1px solid rgba(196,149,106,.15)` }}>
             <h3 style={sectionTitle}>{t("detailUpdateStatus")}</h3>
             <div style={{ display:"flex", gap:6, flexWrap:"wrap" }}>
               {ORDER_STATUSES.map(s => (
