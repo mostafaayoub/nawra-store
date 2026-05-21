@@ -1003,6 +1003,120 @@ function AdminDash({ go }) {
   });
   const [statusEdit, setStatusEdit] = useState({});
 
+  // ── DB-backed products (separate from the legacy useProds storefront cache) ──
+  const PRODUCT_CATEGORIES = ["سيروم","غسول","مرطب","واقي شمس"];
+  const blankProdForm = () => ({
+    name: "", description: "", category: PRODUCT_CATEGORIES[0], brand: "",
+    ingredients: "", images: [], price: "", price_before: "", cost: "",
+    stock: "0", alert_threshold: "5", status: "published",
+    in_stock: true, featured: false,
+    seo_title: "", seo_description: "", tags: [], tagInput: ""
+  });
+  const [pForm, setPForm] = useState(blankProdForm);
+  const [pSaving, setPSaving] = useState(false);
+  const [pSaveMsg, setPSaveMsg] = useState(null); // { kind:"ok"|"err", text }
+  const [dbProducts, setDbProducts] = useState([]);
+  const [invSearch, setInvSearch] = useState("");
+  const [invStatusFil, setInvStatusFil] = useState("all"); // all|available|low|out
+  const [invCatFil, setInvCatFil] = useState("all");
+  const [invEditing, setInvEditing] = useState(null); // product id currently saving
+
+  const refreshProducts = async () => {
+    try {
+      const res = await fetch("/api/products");
+      if (res.ok) setDbProducts(await res.json());
+    } catch {}
+  };
+  useEffect(() => {
+    if (tab === "inventory" || tab === "overview") refreshProducts();
+  }, [tab]); // eslint-disable-line
+
+  // Convert one file to a data URL (base64) — used by the multi-image uploader
+  const fileToDataUrl = (file) => new Promise((resolve, reject) => {
+    const r = new FileReader();
+    r.onload  = () => resolve(r.result);
+    r.onerror = reject;
+    r.readAsDataURL(file);
+  });
+
+  const handleImagesPick = async (files) => {
+    const arr = Array.from(files || []);
+    if (!arr.length) return;
+    // Cap each file at ~3MB to keep request bodies reasonable
+    const ok = []; const tooBig = [];
+    for (const f of arr) {
+      if (f.size > 3 * 1024 * 1024) { tooBig.push(f.name); continue; }
+      try { ok.push(await fileToDataUrl(f)); } catch {}
+    }
+    setPForm(p => ({ ...p, images: [...p.images, ...ok] }));
+    if (tooBig.length) setPSaveMsg({ kind:"err", text:`تم تجاهل صور أكبر من 3MB: ${tooBig.join("، ")}` });
+  };
+
+  const removeImg = (i) => setPForm(p => ({ ...p, images: p.images.filter((_,j)=>j!==i) }));
+
+  const submitProduct = async (asDraft = false) => {
+    if (!pForm.name.trim()) { setPSaveMsg({ kind:"err", text:"اسم المنتج مطلوب" }); return; }
+    if (!asDraft && (!pForm.price || Number(pForm.price) <= 0)) {
+      setPSaveMsg({ kind:"err", text:"السعر مطلوب للنشر" }); return;
+    }
+    setPSaving(true); setPSaveMsg(null);
+    try {
+      const body = {
+        name: pForm.name.trim(),
+        description: pForm.description.trim(),
+        category: pForm.category,
+        brand: pForm.brand.trim(),
+        ingredients: pForm.ingredients.trim(),
+        images: pForm.images,
+        price: Number(pForm.price)||0,
+        price_before: Number(pForm.price_before)||0,
+        cost: Number(pForm.cost)||0,
+        stock: Number(pForm.stock)||0,
+        alert_threshold: Number(pForm.alert_threshold)||5,
+        status: asDraft ? "draft" : (pForm.status || "published"),
+        in_stock: !!pForm.in_stock,
+        featured: !!pForm.featured,
+        seo_title: pForm.seo_title.trim(),
+        seo_description: pForm.seo_description.trim(),
+        tags: pForm.tags,
+      };
+      const res = await fetch("/api/products", {
+        method:"POST", headers:{ "Content-Type":"application/json" },
+        body: JSON.stringify(body)
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(()=>({}));
+        throw new Error(err.error || `HTTP ${res.status}`);
+      }
+      const saved = await res.json();
+      setPSaveMsg({ kind:"ok", text: asDraft
+        ? `تم حفظ المسودة • SKU: ${saved.sku}`
+        : `تم نشر المنتج بنجاح • SKU: ${saved.sku}` });
+      setPForm(blankProdForm());
+      refreshProducts();
+    } catch (e) {
+      setPSaveMsg({ kind:"err", text:`فشل الحفظ: ${e.message}` });
+    } finally { setPSaving(false); }
+  };
+
+  // Inventory: update stock or threshold immediately via PATCH
+  const patchProduct = async (id, patch) => {
+    setInvEditing(id);
+    // optimistic
+    setDbProducts(prev => prev.map(p => p.id === id ? { ...p, ...patch } : p));
+    try {
+      const res = await fetch(`/api/products/${id}`, {
+        method:"PATCH", headers:{ "Content-Type":"application/json" },
+        body: JSON.stringify(patch)
+      });
+      if (res.ok) {
+        const updated = await res.json();
+        setDbProducts(prev => prev.map(p => p.id === id ? updated : p));
+      }
+    } catch {}
+    finally { setInvEditing(null); }
+  };
+
   // Refresh helper — tries API first, falls back to localStorage
   const refreshOrders = async () => {
     try {
@@ -1218,13 +1332,15 @@ function AdminDash({ go }) {
 
   // ── Nav items for sidebar ──────────────────────────────────────────────────
   const navItems = [
-    { k:"overview",  l:"نظرة عامة", icon:"chart-bar" },
-    { k:"orders",    l:"الطلبات",   icon:"shopping-cart" },
-    { k:"products",  l:"المنتجات",  icon:"box" },
-    { k:"customers", l:"العملاء",   icon:"users" },
-    { k:"shipping",  l:"الشحن",     icon:"truck" },
-    { k:"coupons",   l:"الكوبونات", icon:"discount" },
-    { k:"settings",  l:"الإعدادات", icon:"settings" },
+    { k:"overview",    l:"نظرة عامة",   icon:"chart-bar" },
+    { k:"orders",      l:"الطلبات",     icon:"shopping-cart" },
+    { k:"products",    l:"المنتجات",    icon:"box" },
+    { k:"add-product", l:"إضافة منتج",  icon:"plus" },
+    { k:"inventory",   l:"المخزون",     icon:"package" },
+    { k:"customers",   l:"العملاء",     icon:"users" },
+    { k:"shipping",    l:"الشحن",       icon:"truck" },
+    { k:"coupons",     l:"الكوبونات",   icon:"discount" },
+    { k:"settings",    l:"الإعدادات",   icon:"settings" },
   ];
 
   const topbarTitle = navItems.find(n=>n.k===tab)?.l || "نظرة عامة";
@@ -1594,6 +1710,409 @@ function AdminDash({ go }) {
               )}
             </div>
           )}
+
+          {/* ─── ADD PRODUCT ─────────────────────────────────────────────── */}
+          {tab === "add-product" && (() => {
+            // Inline styled controls — share visual language with the rest of the admin
+            const inputStyle = {
+              width:"100%", padding:"9px 11px", border:ui.border, borderRadius:6,
+              background:ui.cardBg, fontFamily:ui.fontBody, fontSize:13, color:ui.text,
+              outline:"none", direction:"rtl", boxSizing:"border-box"
+            };
+            const labelStyle = { display:"block", fontSize:12, color:ui.text, fontFamily:ui.fontBody, marginBottom:5, fontWeight:500 };
+            const sectionCard = { background:ui.cardBg, border:ui.border, borderRadius:ui.radius, padding:mob?"14px":"18px", marginBottom:12 };
+            const sectionTitle = { fontSize:13, fontWeight:600, color:ui.text, fontFamily:ui.fontBody, marginBottom:12, paddingBottom:8, borderBottom:`0.5px solid #EEE` };
+            const Field = ({ label, children }) => (
+              <div style={{marginBottom:12}}>
+                <label style={labelStyle}>{label}</label>
+                {children}
+              </div>
+            );
+            const Toggle = ({ value, onChange, label }) => (
+              <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"8px 0",borderBottom:`0.5px solid #EEE`}}>
+                <span style={{fontSize:13,color:ui.text,fontFamily:ui.fontBody}}>{label}</span>
+                <button type="button" onClick={()=>onChange(!value)}
+                  style={{ width:38, height:22, borderRadius:11, border:"none",
+                    background: value ? "#16A34A" : "#D4D4D4", position:"relative",
+                    cursor:"pointer", transition:"background .2s", flexShrink:0 }}>
+                  <span style={{ position:"absolute", top:2, [value?"left":"right"]:2, width:18, height:18,
+                    background:"#fff", borderRadius:"50%", transition:"all .2s",
+                    boxShadow:"0 1px 2px rgba(0,0,0,.2)" }}/>
+                </button>
+              </div>
+            );
+
+            const addTag = () => {
+              const t = pForm.tagInput.trim();
+              if (!t) return;
+              if (pForm.tags.includes(t)) { setPForm({...pForm, tagInput:""}); return; }
+              setPForm({...pForm, tags:[...pForm.tags, t], tagInput:""});
+            };
+
+            return (
+              <div style={{maxWidth:980}}>
+                {pSaveMsg && (
+                  <div style={{
+                    padding:"10px 14px", borderRadius:6, marginBottom:12, fontSize:13, fontFamily:ui.fontBody,
+                    background: pSaveMsg.kind==="ok" ? "#DCFCE7" : "#FEE2E2",
+                    color: pSaveMsg.kind==="ok" ? "#15803D" : "#B91C1C",
+                    border: `0.5px solid ${pSaveMsg.kind==="ok" ? "#86EFAC" : "#FCA5A5"}`
+                  }}>{pSaveMsg.text}</div>
+                )}
+
+                <div style={{display:"grid",gridTemplateColumns:mob?"1fr":"2fr 1fr",gap:12}}>
+                  {/* LEFT COLUMN */}
+                  <div>
+                    {/* Basic info */}
+                    <div style={sectionCard}>
+                      <div style={sectionTitle}>المعلومات الأساسية</div>
+                      <Field label="اسم المنتج">
+                        <input style={inputStyle} value={pForm.name}
+                          onChange={e=>setPForm({...pForm, name:e.target.value})}
+                          placeholder="مثال: سيروم النياسيناميد 10%" />
+                      </Field>
+                      <Field label="الوصف">
+                        <textarea rows={4} style={{...inputStyle, resize:"vertical", fontFamily:ui.fontBody, minHeight:90}}
+                          value={pForm.description}
+                          onChange={e=>setPForm({...pForm, description:e.target.value})}
+                          placeholder="وصف تفصيلي للمنتج وفوائده..." />
+                      </Field>
+                      <div style={{display:"grid",gridTemplateColumns:mob?"1fr":"1fr 1fr",gap:12}}>
+                        <Field label="الفئة">
+                          <select style={inputStyle} value={pForm.category}
+                            onChange={e=>setPForm({...pForm, category:e.target.value})}>
+                            {PRODUCT_CATEGORIES.map(c => <option key={c} value={c}>{c}</option>)}
+                          </select>
+                        </Field>
+                        <Field label="الماركة">
+                          <input style={inputStyle} value={pForm.brand}
+                            onChange={e=>setPForm({...pForm, brand:e.target.value})}
+                            placeholder="مثال: THE ORDINARY" />
+                        </Field>
+                      </div>
+                      <Field label="المكونات">
+                        <textarea rows={3} style={{...inputStyle, resize:"vertical", minHeight:70}}
+                          value={pForm.ingredients}
+                          onChange={e=>setPForm({...pForm, ingredients:e.target.value})}
+                          placeholder="مثال: Niacinamide, Zinc PCA, Glycerin..." />
+                      </Field>
+                    </div>
+
+                    {/* Images */}
+                    <div style={sectionCard}>
+                      <div style={sectionTitle}>الصور</div>
+                      <label htmlFor="add-prod-imgs" style={{
+                        display:"flex", flexDirection:"column", alignItems:"center", justifyContent:"center",
+                        padding:"22px 16px", border:"1.5px dashed #D4D4D4", borderRadius:6,
+                        cursor:"pointer", background:"#FAFAFA", marginBottom:12, color:ui.textSub
+                      }}>
+                        <AdmIcon name="plus" size={22}/>
+                        <span style={{fontSize:13,fontFamily:ui.fontBody,marginTop:6}}>اضغط لرفع الصور (يمكن اختيار عدة صور)</span>
+                        <span style={{fontSize:11,fontFamily:ui.fontBody,marginTop:3,color:"#A3A3A3"}}>الحد الأقصى: 3MB لكل صورة</span>
+                      </label>
+                      <input id="add-prod-imgs" type="file" accept="image/*" multiple
+                        style={{display:"none"}}
+                        onChange={e=>{ handleImagesPick(e.target.files); e.target.value=""; }} />
+                      {pForm.images.length > 0 && (
+                        <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(90px,1fr))",gap:8}}>
+                          {pForm.images.map((src,i)=>(
+                            <div key={i} style={{position:"relative",aspectRatio:"1",borderRadius:6,overflow:"hidden",border:ui.border}}>
+                              <img src={src} alt="" style={{width:"100%",height:"100%",objectFit:"cover"}}/>
+                              <button type="button" onClick={()=>removeImg(i)}
+                                style={{ position:"absolute", top:4, insetInlineEnd:4,
+                                  width:22, height:22, borderRadius:"50%",
+                                  background:"rgba(0,0,0,.6)", color:"#fff", border:"none",
+                                  cursor:"pointer", fontSize:12, lineHeight:1, display:"flex",
+                                  alignItems:"center", justifyContent:"center" }}>×</button>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+
+                    {/* SEO */}
+                    <div style={sectionCard}>
+                      <div style={sectionTitle}>SEO — تحسين محركات البحث</div>
+                      <Field label="عنوان الصفحة (Page Title)">
+                        <input style={inputStyle} value={pForm.seo_title}
+                          onChange={e=>setPForm({...pForm, seo_title:e.target.value})}
+                          placeholder="مثال: سيروم النياسيناميد | نوّرَة" />
+                      </Field>
+                      <Field label="وصف Meta">
+                        <textarea rows={2} style={{...inputStyle, resize:"vertical", minHeight:55}}
+                          value={pForm.seo_description}
+                          onChange={e=>setPForm({...pForm, seo_description:e.target.value})}
+                          placeholder="وصف قصير يظهر في نتائج البحث (150 حرف تقريباً)" />
+                      </Field>
+                    </div>
+                  </div>
+
+                  {/* RIGHT COLUMN */}
+                  <div>
+                    {/* Pricing & stock */}
+                    <div style={sectionCard}>
+                      <div style={sectionTitle}>السعر والمخزون</div>
+                      <Field label="السعر (جنيه)">
+                        <input type="number" style={inputStyle} value={pForm.price}
+                          onChange={e=>setPForm({...pForm, price:e.target.value})} placeholder="280" />
+                      </Field>
+                      <Field label="السعر قبل الخصم (اختياري)">
+                        <input type="number" style={inputStyle} value={pForm.price_before}
+                          onChange={e=>setPForm({...pForm, price_before:e.target.value})} placeholder="350" />
+                      </Field>
+                      <Field label="التكلفة (للحسابات الداخلية)">
+                        <input type="number" style={inputStyle} value={pForm.cost}
+                          onChange={e=>setPForm({...pForm, cost:e.target.value})} placeholder="180" />
+                      </Field>
+                      <Field label="الكمية المتاحة">
+                        <input type="number" style={inputStyle} value={pForm.stock}
+                          onChange={e=>setPForm({...pForm, stock:e.target.value})} placeholder="10" />
+                      </Field>
+                      <Field label="حد التنبيه">
+                        <input type="number" style={inputStyle} value={pForm.alert_threshold}
+                          onChange={e=>setPForm({...pForm, alert_threshold:e.target.value})} placeholder="5" />
+                      </Field>
+                    </div>
+
+                    {/* Visibility toggles */}
+                    <div style={sectionCard}>
+                      <div style={sectionTitle}>الإعدادات</div>
+                      <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"8px 0",borderBottom:`0.5px solid #EEE`}}>
+                        <span style={{fontSize:13,color:ui.text,fontFamily:ui.fontBody}}>حالة النشر</span>
+                        <div style={{display:"flex",gap:4,border:ui.border,borderRadius:6,overflow:"hidden"}}>
+                          {[["published","نشر"],["draft","مسودة"]].map(([k,l])=>(
+                            <button key={k} type="button" onClick={()=>setPForm({...pForm, status:k})}
+                              style={{padding:"6px 12px",border:"none",cursor:"pointer",
+                                background: pForm.status===k ? ui.text : "transparent",
+                                color: pForm.status===k ? "#fff" : ui.textSub,
+                                fontSize:12, fontFamily:ui.fontBody}}>{l}</button>
+                          ))}
+                        </div>
+                      </div>
+                      <Toggle value={pForm.in_stock} onChange={v=>setPForm({...pForm, in_stock:v})} label="متاح في المخزون" />
+                      <Toggle value={pForm.featured} onChange={v=>setPForm({...pForm, featured:v})} label="منتج مميز" />
+                    </div>
+
+                    {/* Tags */}
+                    <div style={sectionCard}>
+                      <div style={sectionTitle}>الوسوم</div>
+                      <div style={{display:"flex",gap:6,marginBottom:10}}>
+                        <input style={{...inputStyle, flex:1}} value={pForm.tagInput}
+                          onChange={e=>setPForm({...pForm, tagInput:e.target.value})}
+                          onKeyDown={e=>{ if (e.key==="Enter"){ e.preventDefault(); addTag(); } }}
+                          placeholder="اكتب وسم واضغط Enter" />
+                        <button type="button" onClick={addTag} style={{padding:"0 14px",background:ui.text,color:"#fff",border:"none",borderRadius:6,fontSize:18,cursor:"pointer"}}>+</button>
+                      </div>
+                      {pForm.tags.length > 0 && (
+                        <div style={{display:"flex",flexWrap:"wrap",gap:6}}>
+                          {pForm.tags.map((t,i)=>(
+                            <span key={i} style={{display:"inline-flex",alignItems:"center",gap:6,padding:"3px 10px",background:"#F3F4F6",color:ui.text,borderRadius:20,fontSize:11.5,fontFamily:ui.fontBody}}>
+                              {t}
+                              <button type="button" onClick={()=>setPForm({...pForm, tags:pForm.tags.filter((_,j)=>j!==i)})}
+                                style={{background:"none",border:"none",cursor:"pointer",color:ui.textSub,fontSize:14,lineHeight:1,padding:0}}>×</button>
+                            </span>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                </div>
+
+                {/* Actions */}
+                <div style={{display:"flex",gap:10,marginTop:6,flexWrap:"wrap"}}>
+                  <button type="button" disabled={pSaving} onClick={()=>submitProduct(false)}
+                    style={{flex:1,minWidth:140,background:pSaving?"#9CA3AF":ui.text,color:"#fff",border:"none",padding:"12px 18px",cursor:pSaving?"wait":"pointer",fontFamily:ui.fontBody,fontSize:13,fontWeight:500,borderRadius:6}}>
+                    {pSaving ? "جاري الحفظ..." : "نشر المنتج"}
+                  </button>
+                  <button type="button" disabled={pSaving} onClick={()=>submitProduct(true)}
+                    style={{minWidth:120,background:"transparent",color:ui.text,border:`1px solid ${ui.text}`,padding:"12px 18px",cursor:pSaving?"wait":"pointer",fontFamily:ui.fontBody,fontSize:13,borderRadius:6}}>
+                    حفظ مسودة
+                  </button>
+                  <button type="button" disabled={pSaving} onClick={()=>{ setPForm(blankProdForm()); setPSaveMsg(null); }}
+                    style={{minWidth:90,background:"transparent",color:ui.textSub,border:ui.border,padding:"12px 18px",cursor:pSaving?"wait":"pointer",fontFamily:ui.fontBody,fontSize:13,borderRadius:6}}>
+                    إلغاء
+                  </button>
+                </div>
+              </div>
+            );
+          })()}
+
+          {/* ─── INVENTORY ───────────────────────────────────────────────── */}
+          {tab === "inventory" && (() => {
+            // Filter products
+            const filtered = dbProducts.filter(p => {
+              if (invSearch) {
+                const q = invSearch.toLowerCase();
+                if (!(p.name||"").toLowerCase().includes(q)
+                  && !(p.sku||"").toLowerCase().includes(q)
+                  && !(p.brand||"").toLowerCase().includes(q)) return false;
+              }
+              if (invCatFil !== "all" && p.category !== invCatFil) return false;
+              const isOut = (p.stock||0) <= 0;
+              const isLow = !isOut && (p.stock||0) <= (p.alert_threshold||0);
+              if (invStatusFil === "out" && !isOut) return false;
+              if (invStatusFil === "low" && !isLow) return false;
+              if (invStatusFil === "available" && (isOut || isLow)) return false;
+              return true;
+            });
+
+            // Metrics — from ALL products, not filtered
+            const totalProducts = dbProducts.length;
+            const totalStock    = dbProducts.reduce((s,p)=>s+(p.stock||0),0);
+            const lowCount      = dbProducts.filter(p => (p.stock||0) > 0 && (p.stock||0) <= (p.alert_threshold||0)).length;
+            const outCount      = dbProducts.filter(p => (p.stock||0) <= 0).length;
+
+            const stockBadge = (p) => {
+              if ((p.stock||0) <= 0) return { bg:"#FEE2E2", fg:"#B91C1C", l:"نفد" };
+              if ((p.stock||0) <= (p.alert_threshold||0)) return { bg:"#FEF3C7", fg:"#92400E", l:"قارب النفاد" };
+              return { bg:"#DCFCE7", fg:"#15803D", l:"متاح" };
+            };
+
+            // Progress %: stock / max(stock seen for THIS sku since admin opened tab)
+            const stockMax = Math.max(10, ...dbProducts.map(p=>p.stock||0));
+
+            const inputSm = {
+              padding:"6px 10px", border:ui.border, borderRadius:6, background:ui.cardBg,
+              fontFamily:ui.fontBody, fontSize:13, color:ui.text, outline:"none", direction:"rtl"
+            };
+
+            return (
+              <div>
+                {/* Metric cards */}
+                <div style={{display:"grid",gridTemplateColumns:mob?"1fr 1fr":"repeat(4,1fr)",gap:10,marginBottom:14}}>
+                  <Metric label="إجمالي المنتجات" value={totalProducts} />
+                  <Metric label="المخزون الكلي"   value={totalStock.toLocaleString()} suffix="قطعة" />
+                  <Metric label="قارب على النفاد" value={lowCount} hint={lowCount ? "بحاجة لمراجعة" : "—"} />
+                  <Metric label="نفد من المخزون"  value={outCount} hint={outCount ? "تجديد عاجل" : "—"} />
+                </div>
+
+                {/* Filters */}
+                <div style={{background:ui.cardBg,border:ui.border,borderRadius:ui.radius,padding:"12px 14px",marginBottom:12,
+                  display:"grid",gridTemplateColumns:mob?"1fr":"1fr 180px 180px auto",gap:10,alignItems:"center"}}>
+                  <input type="search" placeholder="ابحث بالاسم أو SKU أو الماركة..."
+                    value={invSearch} onChange={e=>setInvSearch(e.target.value)}
+                    style={{...inputSm, padding:"8px 12px", width:"100%"}}/>
+                  <select value={invStatusFil} onChange={e=>setInvStatusFil(e.target.value)}
+                    style={{...inputSm, padding:"8px 12px", width:"100%"}}>
+                    <option value="all">كل الحالات</option>
+                    <option value="available">متاح</option>
+                    <option value="low">قارب النفاد</option>
+                    <option value="out">نفد</option>
+                  </select>
+                  <select value={invCatFil} onChange={e=>setInvCatFil(e.target.value)}
+                    style={{...inputSm, padding:"8px 12px", width:"100%"}}>
+                    <option value="all">كل الفئات</option>
+                    {PRODUCT_CATEGORIES.map(c=><option key={c} value={c}>{c}</option>)}
+                  </select>
+                  <button onClick={refreshProducts}
+                    style={{display:"flex",alignItems:"center",gap:5,background:ui.cardBg,color:ui.text,
+                      border:ui.border,padding:"8px 14px",cursor:"pointer",fontFamily:ui.fontBody,
+                      fontSize:12,borderRadius:6,justifyContent:"center"}}>
+                    <AdmIcon name="refresh" size={13}/> تحديث
+                  </button>
+                </div>
+
+                {dbProducts.length === 0 ? (
+                  <Placeholder icon="package" title="لا توجد منتجات بعد"
+                    body='روح لتاب "إضافة منتج" عشان تضيف أول منتج. هتظهر كل المنتجات هنا.' />
+                ) : filtered.length === 0 ? (
+                  <div style={{background:ui.cardBg,border:ui.border,borderRadius:ui.radius,padding:"40px",textAlign:"center",color:ui.textSub,fontFamily:ui.fontBody,fontSize:13}}>
+                    لا توجد منتجات تطابق الفلتر الحالي
+                  </div>
+                ) : (
+                  <div style={{background:ui.cardBg,border:ui.border,borderRadius:ui.radius,overflow:"hidden",overflowX:"auto"}}>
+                    <table style={{width:"100%",borderCollapse:"collapse",direction:"rtl",fontFamily:ui.fontBody,minWidth:760}}>
+                      <thead>
+                        <tr style={{background:ui.sideBg,borderBottom:`0.5px solid #E5E5E5`}}>
+                          {["المنتج","الحالة","الكمية","حد التنبيه","مستوى المخزون","آخر تحديث",""].map(h=>(
+                            <th key={h} style={{padding:"11px 14px",textAlign:"right",fontSize:11.5,color:ui.textSub,fontWeight:500,whiteSpace:"nowrap"}}>{h}</th>
+                          ))}
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {filtered.map(p => {
+                          const b = stockBadge(p);
+                          const fillPct = Math.max(0, Math.min(100, Math.round(((p.stock||0)/stockMax)*100)));
+                          const fillColor = (p.stock||0) <= 0 ? "#DC2626"
+                            : (p.stock||0) <= (p.alert_threshold||0) ? "#D97706" : "#16A34A";
+                          return (
+                            <tr key={p.id} style={{borderTop:"0.5px solid #EEE"}}>
+                              {/* Product cell */}
+                              <td style={{padding:"11px 14px"}}>
+                                <div style={{display:"flex",alignItems:"center",gap:10}}>
+                                  <div style={{width:42,height:42,borderRadius:6,background:ui.sideBg,overflow:"hidden",flexShrink:0,display:"flex",alignItems:"center",justifyContent:"center"}}>
+                                    {p.images && p.images[0]
+                                      ? <img src={p.images[0]} alt="" style={{width:"100%",height:"100%",objectFit:"cover"}}/>
+                                      : <AdmIcon name="package" size={20}/>}
+                                  </div>
+                                  <div style={{minWidth:0}}>
+                                    <div style={{fontSize:13,color:ui.text,fontWeight:500,fontFamily:ui.fontBody,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",maxWidth:220}}>{p.name}</div>
+                                    <div style={{fontSize:10.5,color:ui.textSub,fontFamily:"monospace",marginTop:2}}>{p.sku || "—"}</div>
+                                  </div>
+                                </div>
+                              </td>
+                              {/* Status */}
+                              <td style={{padding:"11px 14px"}}>
+                                <span style={{fontSize:10.5,padding:"3px 10px",borderRadius:20,background:b.bg,color:b.fg,fontFamily:ui.fontBody,whiteSpace:"nowrap"}}>{b.l}</span>
+                              </td>
+                              {/* Quantity with +/- */}
+                              <td style={{padding:"11px 14px"}}>
+                                <div style={{display:"inline-flex",alignItems:"center",gap:4,border:ui.border,borderRadius:6,padding:"2px"}}>
+                                  <button onClick={()=>patchProduct(p.id, { stock: Math.max(0, (p.stock||0) - 1) })}
+                                    disabled={invEditing===p.id || (p.stock||0)<=0}
+                                    style={{width:24,height:24,border:"none",background:"transparent",cursor:"pointer",fontSize:16,color:ui.textSub,borderRadius:4}}>−</button>
+                                  <input type="number" value={p.stock||0}
+                                    onChange={e=>{
+                                      const v = Math.max(0, Number(e.target.value)||0);
+                                      setDbProducts(prev => prev.map(x => x.id===p.id ? { ...x, stock:v } : x));
+                                    }}
+                                    onBlur={e=>patchProduct(p.id, { stock: Math.max(0, Number(e.target.value)||0) })}
+                                    style={{width:46,textAlign:"center",border:"none",background:"transparent",fontFamily:ui.fontBody,fontSize:13,color:ui.text,outline:"none",padding:0}}/>
+                                  <button onClick={()=>patchProduct(p.id, { stock: (p.stock||0) + 1 })}
+                                    disabled={invEditing===p.id}
+                                    style={{width:24,height:24,border:"none",background:"transparent",cursor:"pointer",fontSize:16,color:ui.textSub,borderRadius:4}}>+</button>
+                                </div>
+                              </td>
+                              {/* Threshold (editable) */}
+                              <td style={{padding:"11px 14px"}}>
+                                <input type="number" defaultValue={p.alert_threshold||0}
+                                  onBlur={e=>{
+                                    const v = Math.max(0, Number(e.target.value)||0);
+                                    if (v !== (p.alert_threshold||0)) patchProduct(p.id, { alert_threshold: v });
+                                  }}
+                                  style={{...inputSm, width:60, padding:"4px 8px", textAlign:"center"}}/>
+                              </td>
+                              {/* Progress bar */}
+                              <td style={{padding:"11px 14px",minWidth:140}}>
+                                <div style={{display:"flex",alignItems:"center",gap:8}}>
+                                  <div style={{flex:1,height:6,background:"#F3F4F6",borderRadius:3,overflow:"hidden"}}>
+                                    <div style={{width:`${fillPct}%`,height:"100%",background:fillColor,transition:"width .25s"}}/>
+                                  </div>
+                                  <span style={{fontSize:11,color:ui.textSub,fontFamily:ui.fontBody,minWidth:36,textAlign:"left"}}>{fillPct}%</span>
+                                </div>
+                              </td>
+                              {/* Last updated */}
+                              <td style={{padding:"11px 14px",fontSize:11.5,color:ui.textSub,fontFamily:ui.fontBody,whiteSpace:"nowrap"}}>
+                                {p.updated_at ? new Date(p.updated_at.replace(" ","T")+"Z").toLocaleDateString("ar-EG",{day:"2-digit",month:"2-digit"}) : "—"}
+                              </td>
+                              {/* Edit button (jumps to add-product with prefill in a future iteration) */}
+                              <td style={{padding:"11px 14px",textAlign:"left"}}>
+                                <button onClick={()=>setDetailOrderId(null) /* placeholder until edit modal */}
+                                  title="ميزة التعديل الكامل قريباً"
+                                  style={{background:"transparent",border:ui.border,padding:"5px 10px",cursor:"pointer",fontFamily:ui.fontBody,fontSize:11.5,color:ui.text,borderRadius:4}}>
+                                  تعديل
+                                </button>
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </div>
+            );
+          })()}
 
           {tab === "shipping" && <Placeholder icon="truck" title="إدارة الشحن" body="هنا هتقدر تتابع وتحدّث حالات شحن الطلبات. هنضيف الميزة دي قريباً." />}
           {tab === "coupons"  && <Placeholder icon="discount" title="الكوبونات والعروض" body="إنشاء أكواد خصم وعروض ترويجية. قريباً." />}

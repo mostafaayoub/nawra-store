@@ -60,6 +60,31 @@ db.exec(`
     totalSpent  REAL DEFAULT 0
   )
 `);
+db.exec(`
+  CREATE TABLE IF NOT EXISTS products (
+    id              TEXT PRIMARY KEY,
+    sku             TEXT,
+    name            TEXT NOT NULL,
+    description     TEXT,
+    category        TEXT,
+    brand           TEXT,
+    ingredients     TEXT,
+    images          TEXT DEFAULT '[]',
+    price           REAL DEFAULT 0,
+    price_before    REAL DEFAULT 0,
+    cost            REAL DEFAULT 0,
+    stock           INTEGER DEFAULT 0,
+    alert_threshold INTEGER DEFAULT 5,
+    status          TEXT DEFAULT 'draft',
+    in_stock        INTEGER DEFAULT 1,
+    featured        INTEGER DEFAULT 0,
+    seo_title       TEXT,
+    seo_description TEXT,
+    tags            TEXT DEFAULT '[]',
+    created_at      DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at      DATETIME DEFAULT CURRENT_TIMESTAMP
+  )
+`);
 
 function ensureColumn(table, col, type) {
   try { db.exec(`ALTER TABLE ${table} ADD COLUMN ${col} ${type}`);
@@ -75,7 +100,9 @@ ensureColumn('addresses', 'lng',       'REAL');
 console.log('[nawra-api] DB ready:', path.join(__dirname, 'orders.db'));
 
 app.use(cors({ origin: '*' }));
-app.use(express.json({ limit: '1mb' }));
+// Lifted to 20mb so the admin Add-Product page can POST multiple base64 images
+// in one request without 413s.
+app.use(express.json({ limit: '20mb' }));
 
 // ── Nodemailer transport (Gmail SMTP, App Password) ───────────────────────────
 const gmailUser = process.env.GMAIL_USER;
@@ -351,6 +378,116 @@ app.patch('/api/addresses/:id/default', (req, res) => {
     const { userId } = req.body;
     db.prepare('UPDATE addresses SET isDefault=0 WHERE userId=?').run(userId);
     const info = db.prepare('UPDATE addresses SET isDefault=1 WHERE id=?').run(req.params.id);
+    if (!info.changes) return res.status(404).json({ error: 'not found' });
+    res.json({ ok: true });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// ── PRODUCTS ──────────────────────────────────────────────────────────────────
+// Stored in SQLite. Images are accepted as either remote URLs or base64 data
+// URLs and persisted as a JSON array string. Tags are also a JSON array.
+function rowToProduct(r) {
+  if (!r) return null;
+  let images = []; let tags = [];
+  try { images = JSON.parse(r.images || '[]'); } catch {}
+  try { tags   = JSON.parse(r.tags   || '[]'); } catch {}
+  return {
+    ...r, images, tags,
+    in_stock: !!r.in_stock,
+    featured: !!r.featured,
+  };
+}
+
+// Generate a sensible SKU when client doesn't supply one
+function generateSku(name) {
+  const base = String(name||'PROD').replace(/[^A-Za-z0-9]+/g,'').slice(0,4).toUpperCase() || 'PROD';
+  return `${base}-${Date.now().toString(36).toUpperCase()}`;
+}
+
+app.get('/api/products', (req, res) => {
+  try {
+    const { status, category, q } = req.query;
+    let sql = 'SELECT * FROM products WHERE 1=1';
+    const params = [];
+    if (status)   { sql += ' AND status = ?';   params.push(status); }
+    if (category) { sql += ' AND category = ?'; params.push(category); }
+    if (q)        { sql += ' AND (name LIKE ? OR brand LIKE ? OR sku LIKE ?)';
+                    const like = `%${q}%`; params.push(like, like, like); }
+    sql += ' ORDER BY created_at DESC';
+    const rows = db.prepare(sql).all(...params);
+    res.json(rows.map(rowToProduct));
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.get('/api/products/:id', (req, res) => {
+  try {
+    const row = db.prepare('SELECT * FROM products WHERE id = ?').get(req.params.id);
+    if (!row) return res.status(404).json({ error: 'not found' });
+    res.json(rowToProduct(row));
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.post('/api/products', (req, res) => {
+  try {
+    const p = req.body || {};
+    if (!p.name) return res.status(400).json({ error: 'name required' });
+    const id  = p.id  || `p_${Date.now().toString(36)}_${Math.random().toString(36).slice(2,6)}`;
+    const sku = p.sku || generateSku(p.name);
+    db.prepare(`
+      INSERT INTO products
+        (id, sku, name, description, category, brand, ingredients, images,
+         price, price_before, cost, stock, alert_threshold,
+         status, in_stock, featured, seo_title, seo_description, tags,
+         created_at, updated_at)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,datetime('now'),datetime('now'))
+    `).run(
+      id, sku, p.name, p.description||null, p.category||null, p.brand||null,
+      p.ingredients||null, JSON.stringify(Array.isArray(p.images)?p.images:[]),
+      Number(p.price)||0, Number(p.price_before)||0, Number(p.cost)||0,
+      Number.isFinite(+p.stock)?+p.stock:0, Number.isFinite(+p.alert_threshold)?+p.alert_threshold:5,
+      p.status === 'published' ? 'published' : 'draft',
+      p.in_stock === false ? 0 : 1,
+      p.featured ? 1 : 0,
+      p.seo_title||null, p.seo_description||null,
+      JSON.stringify(Array.isArray(p.tags)?p.tags:[])
+    );
+    console.log('[nawra-api] product created:', id, p.name, '(', p.status, ')');
+    res.json({ ok: true, id, sku });
+  } catch (e) { console.error('POST /api/products error:', e); res.status(500).json({ error: e.message }); }
+});
+
+app.patch('/api/products/:id', (req, res) => {
+  try {
+    const cur = db.prepare('SELECT * FROM products WHERE id = ?').get(req.params.id);
+    if (!cur) return res.status(404).json({ error: 'not found' });
+    const p = req.body || {};
+    // Whitelist of mutable fields → SQL column mapping
+    const cols = ['name','description','category','brand','ingredients',
+                  'price','price_before','cost','stock','alert_threshold',
+                  'status','seo_title','seo_description','sku'];
+    const sets = []; const vals = [];
+    cols.forEach(c => {
+      if (Object.prototype.hasOwnProperty.call(p, c)) {
+        sets.push(`${c} = ?`);
+        vals.push(p[c]);
+      }
+    });
+    if (Object.prototype.hasOwnProperty.call(p, 'images')) { sets.push('images = ?'); vals.push(JSON.stringify(Array.isArray(p.images)?p.images:[])); }
+    if (Object.prototype.hasOwnProperty.call(p, 'tags'))   { sets.push('tags = ?');   vals.push(JSON.stringify(Array.isArray(p.tags)?p.tags:[])); }
+    if (Object.prototype.hasOwnProperty.call(p, 'in_stock')) { sets.push('in_stock = ?'); vals.push(p.in_stock ? 1 : 0); }
+    if (Object.prototype.hasOwnProperty.call(p, 'featured')) { sets.push('featured = ?'); vals.push(p.featured ? 1 : 0); }
+    if (!sets.length) return res.json({ ok: true, noop: true });
+    sets.push("updated_at = datetime('now')");
+    vals.push(req.params.id);
+    db.prepare(`UPDATE products SET ${sets.join(', ')} WHERE id = ?`).run(...vals);
+    const row = db.prepare('SELECT * FROM products WHERE id = ?').get(req.params.id);
+    res.json(rowToProduct(row));
+  } catch (e) { console.error('PATCH /api/products error:', e); res.status(500).json({ error: e.message }); }
+});
+
+app.delete('/api/products/:id', (req, res) => {
+  try {
+    const info = db.prepare('DELETE FROM products WHERE id = ?').run(req.params.id);
     if (!info.changes) return res.status(404).json({ error: 'not found' });
     res.json({ ok: true });
   } catch (e) { res.status(500).json({ error: e.message }); }
