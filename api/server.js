@@ -61,6 +61,45 @@ db.exec(`
   )
 `);
 db.exec(`
+  CREATE TABLE IF NOT EXISTS coupons (
+    id           TEXT PRIMARY KEY,
+    code         TEXT UNIQUE NOT NULL,
+    type         TEXT DEFAULT 'percent',
+    discount     REAL DEFAULT 0,
+    min_order    REAL DEFAULT 0,
+    max_discount REAL DEFAULT 0,
+    start_date   TEXT,
+    end_date     TEXT,
+    max_uses     INTEGER DEFAULT 0,
+    uses         INTEGER DEFAULT 0,
+    active       INTEGER DEFAULT 1,
+    total_saved  REAL DEFAULT 0,
+    created_at   DATETIME DEFAULT CURRENT_TIMESTAMP
+  )
+`);
+db.exec(`
+  CREATE TABLE IF NOT EXISTS returns (
+    id          TEXT PRIMARY KEY,
+    order_id    TEXT,
+    customer    TEXT,
+    customer_email TEXT,
+    product     TEXT,
+    reason      TEXT,
+    amount      REAL DEFAULT 0,
+    status      TEXT DEFAULT 'pending',
+    admin_note  TEXT,
+    created_at  DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at  DATETIME DEFAULT CURRENT_TIMESTAMP
+  )
+`);
+db.exec(`
+  CREATE TABLE IF NOT EXISTS settings (
+    key        TEXT PRIMARY KEY,
+    value      TEXT,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+  )
+`);
+db.exec(`
   CREATE TABLE IF NOT EXISTS products (
     id              TEXT PRIMARY KEY,
     sku             TEXT,
@@ -489,6 +528,155 @@ app.delete('/api/products/:id', (req, res) => {
   try {
     const info = db.prepare('DELETE FROM products WHERE id = ?').run(req.params.id);
     if (!info.changes) return res.status(404).json({ error: 'not found' });
+    res.json({ ok: true });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// ── COUPONS ───────────────────────────────────────────────────────────────────
+// types: 'percent' (discount = %), 'fixed' (discount = EGP), 'free_shipping'
+function rowToCoupon(r) {
+  if (!r) return null;
+  return { ...r, active: !!r.active };
+}
+function couponStatus(c) {
+  const now = new Date();
+  if (!c.active) return 'منتهي';
+  if (c.end_date && new Date(c.end_date) < now) return 'منتهي';
+  if (c.max_uses && c.uses >= c.max_uses) return 'منتهي';
+  if (c.start_date && new Date(c.start_date) > now) return 'مجدول';
+  return 'نشط';
+}
+
+app.get('/api/coupons', (_req, res) => {
+  try {
+    const rows = db.prepare('SELECT * FROM coupons ORDER BY created_at DESC').all().map(rowToCoupon);
+    res.json(rows.map(c => ({ ...c, status: couponStatus(c) })));
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.post('/api/coupons', (req, res) => {
+  try {
+    const c = req.body || {};
+    if (!c.code) return res.status(400).json({ error: 'code required' });
+    const code = String(c.code).trim().toUpperCase();
+    if (!['percent','fixed','free_shipping'].includes(c.type))
+      return res.status(400).json({ error: 'invalid type' });
+    const id = c.id || `cp_${Date.now().toString(36)}_${Math.random().toString(36).slice(2,5)}`;
+    try {
+      db.prepare(`
+        INSERT INTO coupons
+          (id, code, type, discount, min_order, max_discount,
+           start_date, end_date, max_uses, uses, active)
+        VALUES (?,?,?,?,?,?,?,?,?,0,1)
+      `).run(id, code, c.type,
+             Number(c.discount)||0, Number(c.min_order)||0, Number(c.max_discount)||0,
+             c.start_date||null, c.end_date||null,
+             Number(c.max_uses)||0);
+    } catch (e) {
+      if (String(e.message).includes('UNIQUE')) return res.status(409).json({ error: 'code already exists' });
+      throw e;
+    }
+    const saved = rowToCoupon(db.prepare('SELECT * FROM coupons WHERE id=?').get(id));
+    res.json({ ok: true, ...saved, status: couponStatus(saved) });
+  } catch (e) { console.error('POST /api/coupons error:', e); res.status(500).json({ error: e.message }); }
+});
+
+app.delete('/api/coupons/:id', (req, res) => {
+  try {
+    const info = db.prepare('DELETE FROM coupons WHERE id=?').run(req.params.id);
+    if (!info.changes) return res.status(404).json({ error: 'not found' });
+    res.json({ ok: true });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// Validate a coupon against an order total (used by checkout)
+app.post('/api/coupons/validate', (req, res) => {
+  try {
+    const { code, total } = req.body || {};
+    if (!code) return res.status(400).json({ valid:false, error: 'code required' });
+    const c = db.prepare('SELECT * FROM coupons WHERE code=?').get(String(code).trim().toUpperCase());
+    if (!c) return res.json({ valid:false, error: 'كود غير صحيح' });
+    const cp = rowToCoupon(c);
+    const st = couponStatus(cp);
+    if (st !== 'نشط') return res.json({ valid:false, error:`الكود ${st}` });
+    const orderTotal = Number(total)||0;
+    if (cp.min_order && orderTotal < cp.min_order)
+      return res.json({ valid:false, error:`الحد الأدنى ${cp.min_order} ج` });
+    let discount = 0, free_shipping = false;
+    if (cp.type === 'percent') {
+      discount = orderTotal * (cp.discount/100);
+      if (cp.max_discount && discount > cp.max_discount) discount = cp.max_discount;
+    } else if (cp.type === 'fixed') {
+      discount = cp.discount;
+    } else if (cp.type === 'free_shipping') {
+      free_shipping = true;
+    }
+    res.json({ valid:true, code: cp.code, type: cp.type, discount: Math.round(discount), free_shipping });
+  } catch (e) { res.status(500).json({ valid:false, error: e.message }); }
+});
+
+// ── RETURNS ───────────────────────────────────────────────────────────────────
+// statuses: pending | approved | rejected | refunded
+app.get('/api/returns', (req, res) => {
+  try {
+    const { status } = req.query;
+    const rows = status
+      ? db.prepare('SELECT * FROM returns WHERE status=? ORDER BY created_at DESC').all(status)
+      : db.prepare('SELECT * FROM returns ORDER BY created_at DESC').all();
+    res.json(rows);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.post('/api/returns', (req, res) => {
+  try {
+    const r = req.body || {};
+    if (!r.order_id || !r.customer) return res.status(400).json({ error: 'order_id and customer required' });
+    const id = r.id || `rt_${Date.now().toString(36)}_${Math.random().toString(36).slice(2,5)}`;
+    db.prepare(`
+      INSERT INTO returns (id, order_id, customer, customer_email, product, reason, amount, status, admin_note)
+      VALUES (?,?,?,?,?,?,?,?,?)
+    `).run(id, r.order_id, r.customer, r.customer_email||null, r.product||null,
+           r.reason||null, Number(r.amount)||0, r.status||'pending', r.admin_note||null);
+    res.json({ ok: true, id });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.patch('/api/returns/:id', (req, res) => {
+  try {
+    const r = req.body || {};
+    const sets = []; const vals = [];
+    ['status','admin_note','amount','reason'].forEach(k => {
+      if (Object.prototype.hasOwnProperty.call(r, k)) { sets.push(`${k} = ?`); vals.push(r[k]); }
+    });
+    if (!sets.length) return res.json({ ok: true, noop: true });
+    sets.push("updated_at = datetime('now')");
+    vals.push(req.params.id);
+    const info = db.prepare(`UPDATE returns SET ${sets.join(', ')} WHERE id = ?`).run(...vals);
+    if (!info.changes) return res.status(404).json({ error: 'not found' });
+    res.json(db.prepare('SELECT * FROM returns WHERE id=?').get(req.params.id));
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// ── SETTINGS (key/value JSON blobs) ───────────────────────────────────────────
+// keys we use: 'shipping', 'payment', 'seo'
+app.get('/api/settings/:key', (req, res) => {
+  try {
+    const row = db.prepare('SELECT value FROM settings WHERE key=?').get(req.params.key);
+    if (!row) return res.json({ value: null });
+    try { res.json({ value: JSON.parse(row.value) }); }
+    catch { res.json({ value: row.value }); }
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.put('/api/settings/:key', (req, res) => {
+  try {
+    const v = req.body && Object.prototype.hasOwnProperty.call(req.body, 'value') ? req.body.value : req.body;
+    const json = typeof v === 'string' ? v : JSON.stringify(v);
+    db.prepare(`
+      INSERT INTO settings (key, value, updated_at)
+      VALUES (?, ?, datetime('now'))
+      ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = datetime('now')
+    `).run(req.params.key, json);
     res.json({ ok: true });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });

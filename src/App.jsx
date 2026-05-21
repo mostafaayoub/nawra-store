@@ -1031,6 +1031,114 @@ function AdminDash({ go }) {
     if (tab === "inventory" || tab === "overview") refreshProducts();
   }, [tab]); // eslint-disable-line
 
+  // ── Coupons ────────────────────────────────────────────────────────────────
+  const [coupons, setCoupons] = useState([]);
+  const blankCoupon = () => ({ code:"", type:"percent", discount:"", min_order:"", max_discount:"", start_date:"", end_date:"", max_uses:"" });
+  const [cForm, setCForm] = useState(blankCoupon);
+  const [cMsg, setCMsg] = useState(null);
+  const refreshCoupons = async () => {
+    try { const r = await fetch("/api/coupons"); if (r.ok) setCoupons(await r.json()); } catch {}
+  };
+  useEffect(() => { if (tab === "coupons") refreshCoupons(); }, [tab]);
+
+  const saveCoupon = async () => {
+    if (!cForm.code.trim()) { setCMsg({kind:"err",text:"الكود مطلوب"}); return; }
+    if (cForm.type !== "free_shipping" && (!cForm.discount || Number(cForm.discount) <= 0)) {
+      setCMsg({kind:"err",text:"قيمة الخصم مطلوبة"}); return;
+    }
+    try {
+      const r = await fetch("/api/coupons", {
+        method:"POST", headers:{"Content-Type":"application/json"},
+        body: JSON.stringify({
+          code: cForm.code, type: cForm.type,
+          discount: Number(cForm.discount)||0,
+          min_order: Number(cForm.min_order)||0,
+          max_discount: Number(cForm.max_discount)||0,
+          start_date: cForm.start_date||null,
+          end_date:   cForm.end_date||null,
+          max_uses: Number(cForm.max_uses)||0,
+        })
+      });
+      if (!r.ok) { const e = await r.json().catch(()=>({})); throw new Error(e.error || `HTTP ${r.status}`); }
+      setCMsg({kind:"ok",text:"تم إضافة الكوبون"});
+      setCForm(blankCoupon());
+      refreshCoupons();
+    } catch (e) { setCMsg({kind:"err",text:`فشل: ${e.message}`}); }
+  };
+  const delCoupon = async (id) => {
+    if (!confirm("حذف الكوبون نهائياً؟")) return;
+    try { await fetch(`/api/coupons/${id}`, { method:"DELETE" }); refreshCoupons(); } catch {}
+  };
+
+  // ── Returns ────────────────────────────────────────────────────────────────
+  const [returns, setReturns] = useState([]);
+  const [retTab, setRetTab] = useState("all"); // all | pending | approved | rejected | refunded
+  const refreshReturns = async () => {
+    try { const r = await fetch("/api/returns"); if (r.ok) setReturns(await r.json()); } catch {}
+  };
+  useEffect(() => { if (tab === "returns") refreshReturns(); }, [tab]);
+  const patchReturn = async (id, patch) => {
+    setReturns(prev => prev.map(x => x.id === id ? { ...x, ...patch } : x));
+    try { await fetch(`/api/returns/${id}`, { method:"PATCH", headers:{"Content-Type":"application/json"}, body: JSON.stringify(patch) }); } catch {}
+  };
+
+  // ── Settings (shipping / payment / seo) ────────────────────────────────────
+  const DEFAULT_SHIPPING = {
+    free_shipping_enabled: false,
+    free_shipping_min_order: 1000,
+    companies: { bosta: true, jt: false, aramex: false },
+    zones: [
+      { id:"z1", name:"القاهرة الكبرى",     governorates:"القاهرة، الجيزة، القليوبية",         price:50,  days:"1-2" },
+      { id:"z2", name:"الإسكندرية والساحل", governorates:"الإسكندرية، البحيرة، مرسى مطروح",     price:70,  days:"2-3" },
+      { id:"z3", name:"الدلتا",              governorates:"الدقهلية، الغربية، المنوفية، كفر الشيخ، الشرقية، دمياط", price:60, days:"2-3" },
+      { id:"z4", name:"الصعيد",              governorates:"الفيوم، بني سويف، المنيا، أسيوط، سوهاج، قنا، الأقصر، أسوان", price:90, days:"3-5" },
+      { id:"z5", name:"القناة وسيناء",       governorates:"السويس، الإسماعيلية، بورسعيد، شمال سيناء، جنوب سيناء، البحر الأحمر، الوادي الجديد", price:100, days:"3-5" },
+    ],
+  };
+  const DEFAULT_PAYMENT = {
+    paymob:  { enabled:false, api_key:"", integration_id:"" },
+    fawry:   { enabled:false, merchant_code:"", security_key:"" },
+    cod:     { enabled:true },
+    vodafone:{ enabled:false, number:"" },
+    instapay:{ enabled:false, handle:"" },
+  };
+  const DEFAULT_SEO = {
+    page_url:    "https://nawra.ayoupstudio.tech",
+    title:       "نوّرَة | منتجات العناية بالبشرة الأصلية في مصر",
+    description: "متجر نوّرَة — أفضل البراندات العالمية للعناية بالبشرة، أسعار حقيقية وشحن سريع لكل محافظات مصر.",
+    keywords:    "نوّرَة, عناية بالبشرة, سيروم, واقي شمس, ذا أوردينري, سيتافيل, لاروش بوزيه",
+  };
+  const [shipping, setShipping] = useState(DEFAULT_SHIPPING);
+  const [payment,  setPayment]  = useState(DEFAULT_PAYMENT);
+  const [seoCfg,   setSeoCfg]   = useState(DEFAULT_SEO);
+  const [savedToast, setSavedToast] = useState("");
+  const [settingsTab, setSettingsTab] = useState("payment"); // payment | seo
+  const [shipZoneEdit, setShipZoneEdit] = useState(null);
+
+  const loadSetting = async (key, fallback, setter) => {
+    try {
+      const r = await fetch(`/api/settings/${key}`);
+      if (r.ok) {
+        const { value } = await r.json();
+        if (value && typeof value === "object") setter({ ...fallback, ...value });
+      }
+    } catch {}
+  };
+  const saveSetting = async (key, value) => {
+    try {
+      await fetch(`/api/settings/${key}`, { method:"PUT", headers:{"Content-Type":"application/json"}, body: JSON.stringify({ value }) });
+      setSavedToast("تم الحفظ");
+      setTimeout(()=>setSavedToast(""), 1500);
+    } catch {}
+  };
+  useEffect(() => {
+    if (tab === "shipping") loadSetting("shipping", DEFAULT_SHIPPING, setShipping);
+    if (tab === "settings") {
+      loadSetting("payment", DEFAULT_PAYMENT, setPayment);
+      loadSetting("seo",     DEFAULT_SEO,     setSeoCfg);
+    }
+  }, [tab]); // eslint-disable-line
+
   // Convert one file to a data URL (base64) — used by the multi-image uploader
   const fileToDataUrl = (file) => new Promise((resolve, reject) => {
     const r = new FileReader();
@@ -1338,6 +1446,7 @@ function AdminDash({ go }) {
     { k:"add-product", l:"إضافة منتج",  icon:"plus" },
     { k:"inventory",   l:"المخزون",     icon:"package" },
     { k:"customers",   l:"العملاء",     icon:"users" },
+    { k:"returns",     l:"المرتجعات",   icon:"refresh" },
     { k:"shipping",    l:"الشحن",       icon:"truck" },
     { k:"coupons",     l:"الكوبونات",   icon:"discount" },
     { k:"settings",    l:"الإعدادات",   icon:"settings" },
@@ -1661,55 +1770,101 @@ function AdminDash({ go }) {
           )}
 
           {/* CUSTOMERS */}
-          {tab === "customers" && (
-            <div>
-              <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:12}}>
-                <span style={{fontSize:13,color:ui.textSub,fontFamily:ui.fontBody}}>الإجمالي: {allUsers.length} عميل</span>
-                <button onClick={loadUsers}
-                  style={{display:"flex",alignItems:"center",gap:5,background:ui.cardBg,color:ui.text,
-                    border:ui.border,padding:"6px 12px",cursor:"pointer",fontFamily:ui.fontBody,fontSize:12,borderRadius:6}}>
-                  <AdmIcon name="refresh" size={13}/> تحديث
-                </button>
-              </div>
-              {allUsers.length===0 ? (
-                <Placeholder icon="users" title="مفيش عملاء لحد دلوقتي" body="هتبان قائمة العملاء هنا بعد أول طلب." />
-              ) : (
-                <div style={{background:ui.cardBg,border:ui.border,borderRadius:ui.radius,overflow:"hidden",overflowX:"auto"}}>
-                  <table style={{width:"100%",borderCollapse:"collapse",direction:"rtl",fontFamily:ui.fontBody}}>
-                    <thead>
-                      <tr style={{background:ui.sideBg,borderBottom:`0.5px solid #E5E5E5`}}>
-                        {["#","الاسم","البريد","الهاتف","آخر طلب","عدد الطلبات","إجمالي الإنفاق"].map(h=>(
-                          <th key={h} style={{padding:mob?"9px 10px":"11px 14px",textAlign:"right",fontSize:11,color:ui.textSub,fontWeight:500,whiteSpace:"nowrap"}}>{h}</th>
-                        ))}
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {allUsers.map((u,i)=>(
-                        <tr key={u.email} style={{borderTop:"0.5px solid #EEE"}}>
-                          <td style={{padding:mob?"9px 10px":"11px 14px",fontSize:11.5,color:ui.textSub}}>{i+1}</td>
-                          <td style={{padding:mob?"9px 10px":"11px 14px"}}>
-                            <div style={{display:"flex",alignItems:"center",gap:8}}>
-                              <div style={{width:28,height:28,borderRadius:"50%",background:ui.sideBg,display:"flex",alignItems:"center",justifyContent:"center",fontSize:13,color:ui.text,fontWeight:600,flexShrink:0}}>{(u.name||u.email||"?")[0].toUpperCase()}</div>
-                              <span style={{fontSize:13,color:ui.text}}>{u.name||"—"}</span>
-                            </div>
-                          </td>
-                          <td style={{padding:mob?"9px 10px":"11px 14px",fontSize:12,color:ui.textSub}}>{u.email}</td>
-                          <td style={{padding:mob?"9px 10px":"11px 14px",fontSize:12,color:ui.textSub,fontFamily:"monospace"}}>{u.phone||"—"}</td>
-                          <td style={{padding:mob?"9px 10px":"11px 14px",fontSize:11.5,color:ui.textSub,whiteSpace:"nowrap"}}>{u.lastOrder ? new Date(u.lastOrder).toLocaleDateString("ar-EG") : "—"}</td>
-                          <td style={{padding:mob?"9px 10px":"11px 14px",textAlign:"center"}}>
-                            <span style={{background:u.totalOrders>0?"#DCFCE7":"#F3F4F6",color:u.totalOrders>0?"#15803D":"#737373",fontSize:11.5,padding:"2px 9px",borderRadius:20}}>{u.totalOrders||0}</span>
-                          </td>
-                          <td style={{padding:mob?"9px 10px":"11px 14px",whiteSpace:"nowrap"}}>
-                            <span style={{fontSize:13,color:ui.text,fontWeight:500}}>{(u.totalSpent||0).toLocaleString()} <span style={{fontSize:10.5,color:ui.textSub}}>ج</span></span>
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
+          {tab === "customers" && (() => {
+            // Analytics
+            const totalCust  = allUsers.length;
+            const newCust    = allUsers.filter(u => {
+              if (!u.firstOrder) return false;
+              const d = new Date(u.firstOrder);
+              return !isNaN(d) && d.getFullYear()===now.getFullYear() && d.getMonth()===now.getMonth();
+            }).length;
+            const vipCust    = allUsers.filter(u => (u.totalOrders||0) >= 3).length;
+            const avgSpend   = totalCust ? Math.round(allUsers.reduce((s,u)=>s+(u.totalSpent||0),0)/totalCust) : 0;
+            const maxOrders  = Math.max(1, ...allUsers.map(u=>u.totalOrders||0));
+            const tierOf = (u) => {
+              if ((u.totalOrders||0) >= 3) return { bg:"#FEF3C7", fg:"#92400E", l:"VIP" };
+              if (!u.firstOrder) return { bg:"#F3F4F6", fg:"#737373", l:"عادي" };
+              const fd = new Date(u.firstOrder);
+              const isNewMonth = !isNaN(fd) && fd.getFullYear()===now.getFullYear() && fd.getMonth()===now.getMonth();
+              if (isNewMonth) return { bg:"#DBEAFE", fg:"#1D4ED8", l:"جديد" };
+              return { bg:"#F3F4F6", fg:"#737373", l:"عادي" };
+            };
+            return (
+              <div>
+                <div style={{display:"grid",gridTemplateColumns:mob?"1fr 1fr":"repeat(4,1fr)",gap:10,marginBottom:14}}>
+                  <Metric label="إجمالي العملاء" value={totalCust} />
+                  <Metric label="عملاء جدد"      value={newCust} hint={newCust ? "هذا الشهر" : "—"} />
+                  <Metric label="عملاء VIP"      value={vipCust} hint={vipCust ? "3+ طلبات" : "—"} />
+                  <Metric label="متوسط الإنفاق"   value={avgSpend.toLocaleString()} suffix="ج" />
                 </div>
-              )}
-            </div>
-          )}
+                <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:10}}>
+                  <span style={{fontSize:13,color:ui.textSub,fontFamily:ui.fontBody}}>الإجمالي: {totalCust} عميل</span>
+                  <button onClick={loadUsers}
+                    style={{display:"flex",alignItems:"center",gap:5,background:ui.cardBg,color:ui.text,
+                      border:ui.border,padding:"6px 12px",cursor:"pointer",fontFamily:ui.fontBody,fontSize:12,borderRadius:6}}>
+                    <AdmIcon name="refresh" size={13}/> تحديث
+                  </button>
+                </div>
+                {totalCust===0 ? (
+                  <Placeholder icon="users" title="مفيش عملاء لحد دلوقتي" body="هتبان قائمة العملاء هنا بعد أول طلب." />
+                ) : (
+                  <div style={{background:ui.cardBg,border:ui.border,borderRadius:ui.radius,overflow:"hidden",overflowX:"auto"}}>
+                    <table style={{width:"100%",borderCollapse:"collapse",direction:"rtl",fontFamily:ui.fontBody,minWidth:760}}>
+                      <thead>
+                        <tr style={{background:ui.sideBg,borderBottom:`0.5px solid #E5E5E5`}}>
+                          {["العميل","الهاتف","الطلبات","إجمالي الإنفاق","آخر طلب","الفئة",""].map(h=>(
+                            <th key={h} style={{padding:"11px 14px",textAlign:"right",fontSize:11.5,color:ui.textSub,fontWeight:500,whiteSpace:"nowrap"}}>{h}</th>
+                          ))}
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {allUsers.map(u => {
+                          const tier = tierOf(u);
+                          const barPct = Math.round(((u.totalOrders||0)/maxOrders)*100);
+                          return (
+                            <tr key={u.email} style={{borderTop:"0.5px solid #EEE"}}>
+                              {/* Customer */}
+                              <td style={{padding:"11px 14px"}}>
+                                <div style={{display:"flex",alignItems:"center",gap:10}}>
+                                  <div style={{width:36,height:36,borderRadius:"50%",background:ui.sideBg,display:"flex",alignItems:"center",justifyContent:"center",fontSize:13,color:ui.text,fontWeight:600,flexShrink:0}}>{(u.name||u.email||"?")[0].toUpperCase()}</div>
+                                  <div style={{minWidth:0}}>
+                                    <div style={{fontSize:13,color:ui.text,fontWeight:500,fontFamily:ui.fontBody}}>{u.name || "—"}</div>
+                                    <div style={{fontSize:11,color:ui.textSub,fontFamily:ui.fontBody,marginTop:2}}>{u.email}</div>
+                                  </div>
+                                </div>
+                              </td>
+                              <td style={{padding:"11px 14px",fontSize:12,color:ui.textSub,fontFamily:"monospace",whiteSpace:"nowrap"}}>{u.phone||"—"}</td>
+                              <td style={{padding:"11px 14px",minWidth:120}}>
+                                <div style={{display:"flex",alignItems:"center",gap:8}}>
+                                  <span style={{fontSize:13,color:ui.text,fontWeight:500,fontFamily:ui.fontBody,minWidth:22,textAlign:"center"}}>{u.totalOrders||0}</span>
+                                  <div style={{flex:1,height:4,background:"#F3F4F6",borderRadius:2,overflow:"hidden"}}>
+                                    <div style={{width:`${barPct}%`,height:"100%",background: (u.totalOrders||0)>=3 ? "#D97706" : "#3B82F6"}}/>
+                                  </div>
+                                </div>
+                              </td>
+                              <td style={{padding:"11px 14px",whiteSpace:"nowrap"}}>
+                                <span style={{fontSize:13,color:ui.text,fontWeight:500,fontFamily:ui.fontBody}}>{(u.totalSpent||0).toLocaleString()} <span style={{fontSize:10.5,color:ui.textSub}}>ج</span></span>
+                              </td>
+                              <td style={{padding:"11px 14px",fontSize:11.5,color:ui.textSub,whiteSpace:"nowrap"}}>
+                                {u.lastOrder ? new Date(u.lastOrder).toLocaleDateString("ar-EG",{day:"2-digit",month:"2-digit",year:"numeric"}) : "—"}
+                              </td>
+                              <td style={{padding:"11px 14px"}}>
+                                <span style={{fontSize:10.5,padding:"3px 10px",borderRadius:20,background:tier.bg,color:tier.fg,fontFamily:ui.fontBody,whiteSpace:"nowrap"}}>{tier.l}</span>
+                              </td>
+                              <td style={{padding:"11px 14px",textAlign:"left"}}>
+                                <button onClick={()=>alert(`العميل: ${u.name||"—"}\nالبريد: ${u.email}\nالهاتف: ${u.phone||"—"}\nالطلبات: ${u.totalOrders||0}\nالإنفاق: ${(u.totalSpent||0).toLocaleString()} ج`)}
+                                  style={{background:"transparent",border:ui.border,padding:"5px 10px",cursor:"pointer",fontFamily:ui.fontBody,fontSize:11.5,color:ui.text,borderRadius:4}}>عرض</button>
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </div>
+            );
+          })()}
 
           {/* ─── ADD PRODUCT ─────────────────────────────────────────────── */}
           {tab === "add-product" && (() => {
@@ -2114,9 +2269,499 @@ function AdminDash({ go }) {
             );
           })()}
 
-          {tab === "shipping" && <Placeholder icon="truck" title="إدارة الشحن" body="هنا هتقدر تتابع وتحدّث حالات شحن الطلبات. هنضيف الميزة دي قريباً." />}
-          {tab === "coupons"  && <Placeholder icon="discount" title="الكوبونات والعروض" body="إنشاء أكواد خصم وعروض ترويجية. قريباً." />}
-          {tab === "settings" && <Placeholder icon="settings" title="إعدادات المتجر" body="معلومات المتجر، طرق الدفع، اللغة، والإعدادات العامة. قريباً." />}
+          {/* ─── RETURNS ─────────────────────────────────────────────────── */}
+          {tab === "returns" && (() => {
+            const total     = returns.length;
+            const pending   = returns.filter(r => r.status==="pending").length;
+            const refunded  = returns.filter(r => r.status==="refunded").length;
+            const refundedAmt = returns.filter(r => r.status==="refunded").reduce((s,r)=>s+(Number(r.amount)||0),0);
+            const returnRate = orderList.length ? Math.round((total/orderList.length)*100) : 0;
+
+            const statusBadge = (s) => {
+              if (s === "approved") return { bg:"#DBEAFE", fg:"#1D4ED8", l:"موافق" };
+              if (s === "rejected") return { bg:"#FEE2E2", fg:"#B91C1C", l:"مرفوض" };
+              if (s === "refunded") return { bg:"#DCFCE7", fg:"#15803D", l:"تم الاسترداد" };
+              return { bg:"#FEF3C7", fg:"#92400E", l:"انتظار" };
+            };
+            const retTabs = [["all","الكل"],["pending","انتظار"],["approved","موافق"],["rejected","مرفوض"],["refunded","تم الاسترداد"]];
+            const filtered = returns.filter(r => retTab === "all" ? true : r.status === retTab);
+
+            return (
+              <div>
+                <div style={{display:"grid",gridTemplateColumns:mob?"1fr 1fr":"repeat(4,1fr)",gap:10,marginBottom:14}}>
+                  <Metric label="إجمالي المرتجعات" value={total} />
+                  <Metric label="في الانتظار"      value={pending} hint={pending ? "بحاجة لمراجعة" : "—"} />
+                  <Metric label="تم الاسترداد"     value={refundedAmt.toLocaleString()} suffix="ج" hint={refunded ? `${refunded} طلب` : "—"} />
+                  <Metric label="نسبة الإرجاع"     value={returnRate} suffix="%" />
+                </div>
+
+                {/* Status tabs */}
+                <div style={{background:ui.cardBg,border:ui.border,borderRadius:ui.radius,padding:"6px 6px",marginBottom:12,display:"flex",gap:4,overflowX:"auto"}}>
+                  {retTabs.map(([k,l])=>(
+                    <button key={k} onClick={()=>setRetTab(k)}
+                      style={{padding:"7px 14px",border:"none",cursor:"pointer",borderRadius:6,
+                        background: retTab===k ? ui.text : "transparent",
+                        color: retTab===k ? "#fff" : ui.textSub,
+                        fontSize:12, fontFamily:ui.fontBody, whiteSpace:"nowrap"}}>{l}</button>
+                  ))}
+                </div>
+
+                {total===0 ? (
+                  <Placeholder icon="refresh" title="لا توجد مرتجعات" body="هتبان طلبات الإرجاع هنا أول ما يحصل أول طلب استرداد." />
+                ) : filtered.length === 0 ? (
+                  <div style={{background:ui.cardBg,border:ui.border,borderRadius:ui.radius,padding:"40px",textAlign:"center",color:ui.textSub,fontFamily:ui.fontBody,fontSize:13}}>لا توجد طلبات في هذه الفئة</div>
+                ) : (
+                  <div style={{background:ui.cardBg,border:ui.border,borderRadius:ui.radius,overflow:"hidden",overflowX:"auto"}}>
+                    <table style={{width:"100%",borderCollapse:"collapse",direction:"rtl",fontFamily:ui.fontBody,minWidth:820}}>
+                      <thead>
+                        <tr style={{background:ui.sideBg,borderBottom:`0.5px solid #E5E5E5`}}>
+                          {["رقم الطلب","العميل","المنتج","السبب","المبلغ","الحالة","التاريخ","إجراء"].map(h=>(
+                            <th key={h} style={{padding:"11px 14px",textAlign:"right",fontSize:11.5,color:ui.textSub,fontWeight:500,whiteSpace:"nowrap"}}>{h}</th>
+                          ))}
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {filtered.map(r => {
+                          const b = statusBadge(r.status);
+                          return (
+                            <tr key={r.id} style={{borderTop:"0.5px solid #EEE"}}>
+                              <td style={{padding:"11px 14px",fontSize:12,color:ui.text,fontFamily:"monospace"}}>#{r.order_id}</td>
+                              <td style={{padding:"11px 14px",fontSize:13,color:ui.text,fontFamily:ui.fontBody}}>{r.customer}</td>
+                              <td style={{padding:"11px 14px",fontSize:12.5,color:ui.text,fontFamily:ui.fontBody}}>{r.product||"—"}</td>
+                              <td style={{padding:"11px 14px",fontSize:12,color:ui.textSub,fontFamily:ui.fontBody,maxWidth:220,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{r.reason||"—"}</td>
+                              <td style={{padding:"11px 14px",fontSize:13,color:ui.text,fontWeight:500,fontFamily:ui.fontBody,whiteSpace:"nowrap"}}>{(Number(r.amount)||0).toLocaleString()} ج</td>
+                              <td style={{padding:"11px 14px"}}><span style={{fontSize:10.5,padding:"3px 10px",borderRadius:20,background:b.bg,color:b.fg,fontFamily:ui.fontBody,whiteSpace:"nowrap"}}>{b.l}</span></td>
+                              <td style={{padding:"11px 14px",fontSize:11.5,color:ui.textSub,fontFamily:ui.fontBody,whiteSpace:"nowrap"}}>
+                                {r.created_at ? new Date(r.created_at.replace(" ","T")+"Z").toLocaleDateString("ar-EG") : "—"}
+                              </td>
+                              <td style={{padding:"11px 14px"}}>
+                                {r.status === "pending" && (
+                                  <div style={{display:"flex",gap:5}}>
+                                    <button onClick={()=>patchReturn(r.id, { status:"approved" })}
+                                      style={{background:"#DCFCE7",border:"0.5px solid #86EFAC",padding:"4px 9px",cursor:"pointer",fontSize:11,fontFamily:ui.fontBody,color:"#15803D",borderRadius:4}}>موافقة</button>
+                                    <button onClick={()=>patchReturn(r.id, { status:"rejected" })}
+                                      style={{background:"#FEE2E2",border:"0.5px solid #FCA5A5",padding:"4px 9px",cursor:"pointer",fontSize:11,fontFamily:ui.fontBody,color:"#B91C1C",borderRadius:4}}>رفض</button>
+                                  </div>
+                                )}
+                                {r.status === "approved" && (
+                                  <button onClick={()=>patchReturn(r.id, { status:"refunded" })}
+                                    style={{background:ui.text,color:"#fff",border:"none",padding:"4px 11px",cursor:"pointer",fontSize:11,fontFamily:ui.fontBody,borderRadius:4}}>تمت الإعادة</button>
+                                )}
+                                {(r.status==="rejected"||r.status==="refunded") && (
+                                  <span style={{fontSize:11,color:ui.textSub,fontFamily:ui.fontBody}}>—</span>
+                                )}
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </div>
+            );
+          })()}
+
+          {/* ─── SHIPPING ────────────────────────────────────────────────── */}
+          {tab === "shipping" && (() => {
+            const inputSm = { padding:"6px 10px", border:ui.border, borderRadius:6, background:ui.cardBg,
+              fontFamily:ui.fontBody, fontSize:13, color:ui.text, outline:"none", direction:"rtl", boxSizing:"border-box" };
+            const Toggle = ({ value, onChange }) => (
+              <button type="button" onClick={()=>onChange(!value)}
+                style={{ width:38, height:22, borderRadius:11, border:"none",
+                  background: value ? "#16A34A" : "#D4D4D4", position:"relative",
+                  cursor:"pointer", transition:"background .2s", flexShrink:0 }}>
+                <span style={{ position:"absolute", top:2, [value?"left":"right"]:2, width:18, height:18,
+                  background:"#fff", borderRadius:"50%", boxShadow:"0 1px 2px rgba(0,0,0,.2)" }}/>
+              </button>
+            );
+            const Section = ({ title, children }) => (
+              <div style={{background:ui.cardBg,border:ui.border,borderRadius:ui.radius,padding:mob?"14px":"18px",marginBottom:12}}>
+                <div style={{fontSize:13,fontWeight:600,color:ui.text,fontFamily:ui.fontBody,marginBottom:14,paddingBottom:8,borderBottom:`0.5px solid #EEE`}}>{title}</div>
+                {children}
+              </div>
+            );
+            const editZone = (id, patch) => {
+              setShipping(s => ({ ...s, zones: s.zones.map(z => z.id===id ? { ...z, ...patch } : z) }));
+            };
+            return (
+              <div style={{maxWidth:1080}}>
+                {savedToast && (
+                  <div style={{padding:"8px 14px",borderRadius:6,marginBottom:10,background:"#DCFCE7",color:"#15803D",fontSize:12.5,fontFamily:ui.fontBody,border:"0.5px solid #86EFAC"}}>{savedToast}</div>
+                )}
+
+                <Section title="مناطق الشحن">
+                  <div style={{overflowX:"auto"}}>
+                    <table style={{width:"100%",borderCollapse:"collapse",fontFamily:ui.fontBody,minWidth:700}}>
+                      <thead>
+                        <tr style={{background:ui.sideBg,borderBottom:`0.5px solid #E5E5E5`}}>
+                          {["المنطقة","المحافظات","السعر (ج)","أيام التوصيل","إجراء"].map(h=>(
+                            <th key={h} style={{padding:"10px 12px",textAlign:"right",fontSize:11.5,color:ui.textSub,fontWeight:500,whiteSpace:"nowrap"}}>{h}</th>
+                          ))}
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {shipping.zones.map(z => {
+                          const isEdit = shipZoneEdit === z.id;
+                          return (
+                            <tr key={z.id} style={{borderTop:"0.5px solid #EEE"}}>
+                              <td style={{padding:"10px 12px"}}>
+                                {isEdit
+                                  ? <input style={{...inputSm, width:"100%"}} value={z.name} onChange={e=>editZone(z.id,{name:e.target.value})}/>
+                                  : <span style={{fontSize:13,color:ui.text,fontWeight:500}}>{z.name}</span>}
+                              </td>
+                              <td style={{padding:"10px 12px",maxWidth:320}}>
+                                {isEdit
+                                  ? <input style={{...inputSm, width:"100%"}} value={z.governorates} onChange={e=>editZone(z.id,{governorates:e.target.value})}/>
+                                  : <span style={{fontSize:12,color:ui.textSub,lineHeight:1.6}}>{z.governorates}</span>}
+                              </td>
+                              <td style={{padding:"10px 12px"}}>
+                                {isEdit
+                                  ? <input type="number" style={{...inputSm, width:80}} value={z.price} onChange={e=>editZone(z.id,{price:Number(e.target.value)||0})}/>
+                                  : <span style={{fontSize:13,color:ui.text,fontWeight:500}}>{z.price} ج</span>}
+                              </td>
+                              <td style={{padding:"10px 12px"}}>
+                                {isEdit
+                                  ? <input style={{...inputSm, width:80}} value={z.days} onChange={e=>editZone(z.id,{days:e.target.value})}/>
+                                  : <span style={{fontSize:12.5,color:ui.text}}>{z.days} يوم</span>}
+                              </td>
+                              <td style={{padding:"10px 12px",textAlign:"left"}}>
+                                {isEdit ? (
+                                  <button onClick={()=>{ setShipZoneEdit(null); saveSetting("shipping", shipping); }}
+                                    style={{background:ui.text,color:"#fff",border:"none",padding:"4px 11px",cursor:"pointer",fontSize:11.5,borderRadius:4,fontFamily:ui.fontBody}}>حفظ</button>
+                                ) : (
+                                  <button onClick={()=>setShipZoneEdit(z.id)}
+                                    style={{background:"transparent",border:ui.border,padding:"4px 11px",cursor:"pointer",fontSize:11.5,color:ui.text,borderRadius:4,fontFamily:ui.fontBody}}>تعديل</button>
+                                )}
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                </Section>
+
+                <Section title="الشحن المجاني">
+                  <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"6px 0"}}>
+                    <span style={{fontSize:13,color:ui.text,fontFamily:ui.fontBody}}>تفعيل الشحن المجاني للطلبات الكبيرة</span>
+                    <Toggle value={shipping.free_shipping_enabled} onChange={v=>{ const next={...shipping, free_shipping_enabled:v}; setShipping(next); saveSetting("shipping", next); }}/>
+                  </div>
+                  <div style={{marginTop:12,display:"grid",gridTemplateColumns:mob?"1fr":"1fr auto",gap:10,alignItems:"end"}}>
+                    <div>
+                      <label style={{display:"block",fontSize:12,color:ui.text,fontFamily:ui.fontBody,marginBottom:5}}>الحد الأدنى للطلب (جنيه)</label>
+                      <input type="number" style={{...inputSm, padding:"8px 12px", width:"100%"}}
+                        value={shipping.free_shipping_min_order}
+                        onChange={e=>setShipping({...shipping, free_shipping_min_order: Number(e.target.value)||0})} />
+                    </div>
+                    <button onClick={()=>saveSetting("shipping", shipping)}
+                      style={{background:ui.text,color:"#fff",border:"none",padding:"9px 18px",cursor:"pointer",fontSize:12.5,borderRadius:6,fontFamily:ui.fontBody}}>حفظ</button>
+                  </div>
+                </Section>
+
+                <Section title="شركات الشحن">
+                  {[
+                    { key:"bosta",  l:"Bosta",     hint:"خدمة شحن سريع — توصيل خلال 24-48 ساعة" },
+                    { key:"jt",     l:"J&T Express", hint:"شبكة توصيل واسعة لكل المحافظات" },
+                    { key:"aramex", l:"Aramex",    hint:"شحن دولي ومحلي مع تتبع كامل" },
+                  ].map((c,i,arr)=>(
+                    <div key={c.key} style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"10px 0",borderBottom: i < arr.length-1 ? `0.5px solid #EEE` : "none"}}>
+                      <div>
+                        <div style={{fontSize:13,color:ui.text,fontWeight:500,fontFamily:ui.fontBody}}>{c.l}</div>
+                        <div style={{fontSize:11.5,color:ui.textSub,fontFamily:ui.fontBody,marginTop:2}}>{c.hint}</div>
+                      </div>
+                      <Toggle value={!!shipping.companies[c.key]} onChange={v=>{
+                        const next = { ...shipping, companies: { ...shipping.companies, [c.key]: v } };
+                        setShipping(next); saveSetting("shipping", next);
+                      }}/>
+                    </div>
+                  ))}
+                </Section>
+              </div>
+            );
+          })()}
+
+          {/* ─── COUPONS ─────────────────────────────────────────────────── */}
+          {tab === "coupons" && (() => {
+            const total       = coupons.length;
+            const activeCnt   = coupons.filter(c => c.status === "نشط").length;
+            const totalUses   = coupons.reduce((s,c)=>s+(c.uses||0),0);
+            const totalSaved  = coupons.reduce((s,c)=>s+(c.total_saved||0),0);
+            const inputStyle = { padding:"8px 11px", border:ui.border, borderRadius:6, background:ui.cardBg,
+              fontFamily:ui.fontBody, fontSize:13, color:ui.text, outline:"none", direction:"rtl", boxSizing:"border-box", width:"100%" };
+            const labelStyle = { display:"block", fontSize:12, color:ui.text, marginBottom:5, fontFamily:ui.fontBody };
+            const couponTypeLabel = (t) => t==="percent"?"نسبة %" : t==="fixed"?"مبلغ ثابت" : "شحن مجاني";
+            const couponDiscLabel = (c) => c.type==="percent" ? `${c.discount}%` : c.type==="fixed" ? `${c.discount} ج` : "—";
+            const stBadge = (st) => st==="نشط" ? {bg:"#DCFCE7",fg:"#15803D"}
+              : st==="مجدول" ? {bg:"#DBEAFE",fg:"#1D4ED8"}
+              : {bg:"#F3F4F6",fg:"#737373"};
+
+            return (
+              <div>
+                <div style={{display:"grid",gridTemplateColumns:mob?"1fr 1fr":"repeat(4,1fr)",gap:10,marginBottom:14}}>
+                  <Metric label="كل الكوبونات" value={total} />
+                  <Metric label="نشط"          value={activeCnt} hint={activeCnt ? "متاح للاستخدام" : "—"} />
+                  <Metric label="استخدامات"     value={totalUses} />
+                  <Metric label="توفير العملاء" value={totalSaved.toLocaleString()} suffix="ج" />
+                </div>
+
+                {cMsg && (
+                  <div style={{padding:"8px 14px",borderRadius:6,marginBottom:10,fontSize:12.5,fontFamily:ui.fontBody,
+                    background: cMsg.kind==="ok"?"#DCFCE7":"#FEE2E2",
+                    color: cMsg.kind==="ok"?"#15803D":"#B91C1C",
+                    border: `0.5px solid ${cMsg.kind==="ok"?"#86EFAC":"#FCA5A5"}`}}>{cMsg.text}</div>
+                )}
+
+                <div style={{display:"grid",gridTemplateColumns:mob?"1fr":"2fr 1fr",gap:12}}>
+                  {/* Table */}
+                  <div style={{background:ui.cardBg,border:ui.border,borderRadius:ui.radius,overflow:"hidden",overflowX:"auto"}}>
+                    <table style={{width:"100%",borderCollapse:"collapse",direction:"rtl",fontFamily:ui.fontBody,minWidth:600}}>
+                      <thead>
+                        <tr style={{background:ui.sideBg,borderBottom:`0.5px solid #E5E5E5`}}>
+                          {["الكود","النوع","الخصم","الاستخدام","ينتهي","الحالة",""].map(h=>(
+                            <th key={h} style={{padding:"11px 12px",textAlign:"right",fontSize:11.5,color:ui.textSub,fontWeight:500,whiteSpace:"nowrap"}}>{h}</th>
+                          ))}
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {coupons.length === 0 ? (
+                          <tr><td colSpan={7} style={{padding:"30px",textAlign:"center",color:ui.textSub,fontSize:12.5}}>لا توجد كوبونات — أضف أول كوبون من الجانب ←</td></tr>
+                        ) : coupons.map(c => {
+                          const sb = stBadge(c.status);
+                          return (
+                            <tr key={c.id} style={{borderTop:"0.5px solid #EEE"}}>
+                              <td style={{padding:"11px 12px",fontFamily:"monospace",fontSize:13,color:ui.text,fontWeight:500}}>{c.code}</td>
+                              <td style={{padding:"11px 12px",fontSize:12,color:ui.textSub}}>{couponTypeLabel(c.type)}</td>
+                              <td style={{padding:"11px 12px",fontSize:13,color:ui.text,fontWeight:500,whiteSpace:"nowrap"}}>{couponDiscLabel(c)}</td>
+                              <td style={{padding:"11px 12px",fontSize:12,color:ui.textSub,whiteSpace:"nowrap"}}>{c.uses||0}{c.max_uses ? ` / ${c.max_uses}` : ""}</td>
+                              <td style={{padding:"11px 12px",fontSize:11.5,color:ui.textSub,whiteSpace:"nowrap"}}>{c.end_date ? new Date(c.end_date).toLocaleDateString("ar-EG") : "—"}</td>
+                              <td style={{padding:"11px 12px"}}><span style={{fontSize:10.5,padding:"3px 10px",borderRadius:20,background:sb.bg,color:sb.fg,fontFamily:ui.fontBody}}>{c.status}</span></td>
+                              <td style={{padding:"11px 12px",textAlign:"left"}}>
+                                <button onClick={()=>delCoupon(c.id)} title="حذف"
+                                  style={{background:"none",border:"1px solid rgba(220,38,38,.3)",color:"#DC2626",padding:"4px 9px",cursor:"pointer",fontSize:11,fontFamily:ui.fontBody,borderRadius:4}}>حذف</button>
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+
+                  {/* Add form */}
+                  <div style={{background:ui.cardBg,border:ui.border,borderRadius:ui.radius,padding:mob?"14px":"16px",alignSelf:"start"}}>
+                    <div style={{fontSize:13,fontWeight:600,color:ui.text,fontFamily:ui.fontBody,marginBottom:12,paddingBottom:8,borderBottom:`0.5px solid #EEE`}}>إضافة كوبون جديد</div>
+                    <div style={{marginBottom:12}}>
+                      <label style={labelStyle}>نوع الخصم</label>
+                      <div style={{display:"flex",border:ui.border,borderRadius:6,overflow:"hidden"}}>
+                        {[["percent","%"],["fixed","مبلغ ثابت"],["free_shipping","شحن مجاني"]].map(([k,l])=>(
+                          <button key={k} type="button" onClick={()=>setCForm({...cForm, type:k})}
+                            style={{flex:1,padding:"7px 8px",border:"none",cursor:"pointer",
+                              background: cForm.type===k ? ui.text : "transparent",
+                              color: cForm.type===k ? "#fff" : ui.textSub,
+                              fontSize:11.5,fontFamily:ui.fontBody}}>{l}</button>
+                        ))}
+                      </div>
+                    </div>
+                    <div style={{marginBottom:12}}>
+                      <label style={labelStyle}>الكود</label>
+                      <input style={inputStyle} value={cForm.code} onChange={e=>setCForm({...cForm, code:e.target.value.toUpperCase()})} placeholder="WELCOME10"/>
+                    </div>
+                    {cForm.type !== "free_shipping" && (
+                      <div style={{marginBottom:12}}>
+                        <label style={labelStyle}>قيمة الخصم ({cForm.type==="percent" ? "%" : "جنيه"})</label>
+                        <input type="number" style={inputStyle} value={cForm.discount} onChange={e=>setCForm({...cForm, discount:e.target.value})} placeholder={cForm.type==="percent"?"10":"50"}/>
+                      </div>
+                    )}
+                    <div style={{marginBottom:12}}>
+                      <label style={labelStyle}>الحد الأدنى للطلب (جنيه)</label>
+                      <input type="number" style={inputStyle} value={cForm.min_order} onChange={e=>setCForm({...cForm, min_order:e.target.value})} placeholder="0"/>
+                    </div>
+                    {cForm.type === "percent" && (
+                      <div style={{marginBottom:12}}>
+                        <label style={labelStyle}>الحد الأقصى للخصم (جنيه — اختياري)</label>
+                        <input type="number" style={inputStyle} value={cForm.max_discount} onChange={e=>setCForm({...cForm, max_discount:e.target.value})} placeholder="200"/>
+                      </div>
+                    )}
+                    <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8,marginBottom:12}}>
+                      <div>
+                        <label style={labelStyle}>تاريخ البدء</label>
+                        <input type="date" style={inputStyle} value={cForm.start_date} onChange={e=>setCForm({...cForm, start_date:e.target.value})}/>
+                      </div>
+                      <div>
+                        <label style={labelStyle}>تاريخ الانتهاء</label>
+                        <input type="date" style={inputStyle} value={cForm.end_date} onChange={e=>setCForm({...cForm, end_date:e.target.value})}/>
+                      </div>
+                    </div>
+                    <div style={{marginBottom:14}}>
+                      <label style={labelStyle}>الحد الأقصى للاستخدام (0 = غير محدود)</label>
+                      <input type="number" style={inputStyle} value={cForm.max_uses} onChange={e=>setCForm({...cForm, max_uses:e.target.value})} placeholder="0"/>
+                    </div>
+                    <button onClick={saveCoupon}
+                      style={{width:"100%",background:ui.text,color:"#fff",border:"none",padding:"10px",cursor:"pointer",fontSize:13,fontFamily:ui.fontBody,fontWeight:500,borderRadius:6}}>
+                      إضافة الكوبون
+                    </button>
+                  </div>
+                </div>
+              </div>
+            );
+          })()}
+
+          {/* ─── SETTINGS (payment + SEO sub-tabs) ─────────────────────── */}
+          {tab === "settings" && (() => {
+            const inputStyle = { padding:"8px 11px", border:ui.border, borderRadius:6, background:ui.cardBg,
+              fontFamily:ui.fontBody, fontSize:13, color:ui.text, outline:"none", direction:"ltr", boxSizing:"border-box", width:"100%" };
+            const inputAr = { ...inputStyle, direction:"rtl" };
+            const labelStyle = { display:"block", fontSize:12, color:ui.text, marginBottom:5, fontFamily:ui.fontBody };
+            const Toggle = ({ value, onChange }) => (
+              <button type="button" onClick={()=>onChange(!value)}
+                style={{ width:38, height:22, borderRadius:11, border:"none",
+                  background: value ? "#16A34A" : "#D4D4D4", position:"relative", cursor:"pointer", flexShrink:0 }}>
+                <span style={{ position:"absolute", top:2, [value?"left":"right"]:2, width:18, height:18, background:"#fff", borderRadius:"50%", boxShadow:"0 1px 2px rgba(0,0,0,.2)" }}/>
+              </button>
+            );
+            const sectionCard = { background:ui.cardBg,border:ui.border,borderRadius:ui.radius,padding:mob?"14px":"18px",marginBottom:12 };
+            const sectionTitle = { fontSize:13, fontWeight:600, color:ui.text, fontFamily:ui.fontBody, marginBottom:14, paddingBottom:8, borderBottom:`0.5px solid #EEE`, display:"flex", justifyContent:"space-between", alignItems:"center" };
+
+            return (
+              <div style={{maxWidth:980}}>
+                {savedToast && (
+                  <div style={{padding:"8px 14px",borderRadius:6,marginBottom:10,background:"#DCFCE7",color:"#15803D",fontSize:12.5,fontFamily:ui.fontBody,border:"0.5px solid #86EFAC"}}>{savedToast}</div>
+                )}
+
+                {/* Sub-tabs */}
+                <div style={{background:ui.cardBg,border:ui.border,borderRadius:ui.radius,padding:"6px 6px",marginBottom:12,display:"flex",gap:4}}>
+                  {[["payment","الدفع"],["seo","SEO"]].map(([k,l])=>(
+                    <button key={k} onClick={()=>setSettingsTab(k)}
+                      style={{padding:"8px 18px",border:"none",cursor:"pointer",borderRadius:6,
+                        background: settingsTab===k ? ui.text : "transparent",
+                        color: settingsTab===k ? "#fff" : ui.textSub,
+                        fontSize:12.5, fontFamily:ui.fontBody}}>{l}</button>
+                  ))}
+                </div>
+
+                {settingsTab === "payment" && (
+                  <div>
+                    {/* Paymob */}
+                    <div style={sectionCard}>
+                      <div style={sectionTitle}>
+                        <span>Paymob</span>
+                        <Toggle value={payment.paymob.enabled} onChange={v=>setPayment({...payment, paymob:{...payment.paymob, enabled:v}})}/>
+                      </div>
+                      <div style={{marginBottom:10}}>
+                        <label style={labelStyle}>API Key</label>
+                        <input style={inputStyle} value={payment.paymob.api_key} onChange={e=>setPayment({...payment, paymob:{...payment.paymob, api_key:e.target.value}})} placeholder="ZXlKaGJHY2lPaUpJVXpVeE1pSXNJblI1Y0NJNkpVcFhWQ0o5..."/>
+                      </div>
+                      <div style={{marginBottom:10}}>
+                        <label style={labelStyle}>Integration ID</label>
+                        <input style={inputStyle} value={payment.paymob.integration_id} onChange={e=>setPayment({...payment, paymob:{...payment.paymob, integration_id:e.target.value}})} placeholder="1234567"/>
+                      </div>
+                    </div>
+
+                    {/* Fawry */}
+                    <div style={sectionCard}>
+                      <div style={sectionTitle}>
+                        <span>Fawry</span>
+                        <Toggle value={payment.fawry.enabled} onChange={v=>setPayment({...payment, fawry:{...payment.fawry, enabled:v}})}/>
+                      </div>
+                      <div style={{marginBottom:10}}>
+                        <label style={labelStyle}>Merchant Code</label>
+                        <input style={inputStyle} value={payment.fawry.merchant_code} onChange={e=>setPayment({...payment, fawry:{...payment.fawry, merchant_code:e.target.value}})} placeholder="700"/>
+                      </div>
+                      <div style={{marginBottom:10}}>
+                        <label style={labelStyle}>Security Key</label>
+                        <input style={inputStyle} value={payment.fawry.security_key} onChange={e=>setPayment({...payment, fawry:{...payment.fawry, security_key:e.target.value}})} placeholder="••••••••••••"/>
+                      </div>
+                    </div>
+
+                    {/* COD */}
+                    <div style={sectionCard}>
+                      <div style={{display:"flex",alignItems:"center",justifyContent:"space-between"}}>
+                        <div>
+                          <div style={{fontSize:13,color:ui.text,fontWeight:600,fontFamily:ui.fontBody}}>كاش عند الاستلام</div>
+                          <div style={{fontSize:11.5,color:ui.textSub,fontFamily:ui.fontBody,marginTop:3}}>السماح للعملاء بالدفع نقداً عند استلام الطلب</div>
+                        </div>
+                        <Toggle value={payment.cod.enabled} onChange={v=>setPayment({...payment, cod:{...payment.cod, enabled:v}})}/>
+                      </div>
+                    </div>
+
+                    {/* Vodafone Cash */}
+                    <div style={sectionCard}>
+                      <div style={sectionTitle}>
+                        <span>فودافون كاش</span>
+                        <Toggle value={payment.vodafone.enabled} onChange={v=>setPayment({...payment, vodafone:{...payment.vodafone, enabled:v}})}/>
+                      </div>
+                      <div>
+                        <label style={labelStyle}>رقم محفظة الاستلام</label>
+                        <input style={{...inputStyle, direction:"ltr", textAlign:"left"}} value={payment.vodafone.number} onChange={e=>setPayment({...payment, vodafone:{...payment.vodafone, number:e.target.value}})} placeholder="01012345678"/>
+                      </div>
+                    </div>
+
+                    {/* InstaPay */}
+                    <div style={sectionCard}>
+                      <div style={sectionTitle}>
+                        <span>إنستاباي (InstaPay)</span>
+                        <Toggle value={payment.instapay.enabled} onChange={v=>setPayment({...payment, instapay:{...payment.instapay, enabled:v}})}/>
+                      </div>
+                      <div>
+                        <label style={labelStyle}>الـ Handle / الرقم</label>
+                        <input style={{...inputStyle, direction:"ltr", textAlign:"left"}} value={payment.instapay.handle} onChange={e=>setPayment({...payment, instapay:{...payment.instapay, handle:e.target.value}})} placeholder="nawra@instapay"/>
+                      </div>
+                    </div>
+
+                    <button onClick={()=>saveSetting("payment", payment)}
+                      style={{background:ui.text,color:"#fff",border:"none",padding:"11px 22px",cursor:"pointer",fontSize:13,fontFamily:ui.fontBody,fontWeight:500,borderRadius:6}}>
+                      حفظ إعدادات الدفع
+                    </button>
+                  </div>
+                )}
+
+                {settingsTab === "seo" && (
+                  <div>
+                    {/* Google preview */}
+                    <div style={sectionCard}>
+                      <div style={sectionTitle}>معاينة جوجل</div>
+                      <div style={{padding:"14px 16px",background:"#FAFAFA",border:"0.5px solid #EEE",borderRadius:6,direction:"ltr",textAlign:"left",fontFamily:"Arial, sans-serif"}}>
+                        <div style={{fontSize:12,color:"#202124",marginBottom:4}}>{seoCfg.page_url}</div>
+                        <div style={{fontSize:18,color:"#1a0dab",fontWeight:400,marginBottom:5,lineHeight:1.3}}>{seoCfg.title || "بدون عنوان"}</div>
+                        <div style={{fontSize:13,color:"#4d5156",lineHeight:1.5,maxWidth:600}}>{seoCfg.description || "بدون وصف"}</div>
+                      </div>
+                    </div>
+
+                    <div style={sectionCard}>
+                      <div style={sectionTitle}>إعدادات SEO</div>
+                      <div style={{marginBottom:12}}>
+                        <label style={labelStyle}>رابط الصفحة (Canonical URL)</label>
+                        <input style={{...inputStyle, direction:"ltr", textAlign:"left"}} value={seoCfg.page_url} onChange={e=>setSeoCfg({...seoCfg, page_url:e.target.value})}/>
+                      </div>
+                      <div style={{marginBottom:12}}>
+                        <div style={{display:"flex",justifyContent:"space-between"}}>
+                          <label style={labelStyle}>عنوان الصفحة (Title)</label>
+                          <span style={{fontSize:10.5, color: seoCfg.title.length > 60 ? "#DC2626" : ui.textSub}}>{seoCfg.title.length}/60</span>
+                        </div>
+                        <input style={inputAr} value={seoCfg.title} onChange={e=>setSeoCfg({...seoCfg, title:e.target.value})}/>
+                      </div>
+                      <div style={{marginBottom:12}}>
+                        <div style={{display:"flex",justifyContent:"space-between"}}>
+                          <label style={labelStyle}>وصف Meta</label>
+                          <span style={{fontSize:10.5, color: seoCfg.description.length > 160 ? "#DC2626" : ui.textSub}}>{seoCfg.description.length}/160</span>
+                        </div>
+                        <textarea rows={3} style={{...inputAr, resize:"vertical", minHeight:70, fontFamily:ui.fontBody}}
+                          value={seoCfg.description} onChange={e=>setSeoCfg({...seoCfg, description:e.target.value})}/>
+                      </div>
+                      <div style={{marginBottom:14}}>
+                        <label style={labelStyle}>الكلمات المفتاحية (مفصولة بفواصل)</label>
+                        <input style={inputAr} value={seoCfg.keywords} onChange={e=>setSeoCfg({...seoCfg, keywords:e.target.value})} placeholder="عناية بالبشرة, سيروم, واقي شمس"/>
+                      </div>
+                      <button onClick={()=>saveSetting("seo", seoCfg)}
+                        style={{background:ui.text,color:"#fff",border:"none",padding:"11px 22px",cursor:"pointer",fontSize:13,fontFamily:ui.fontBody,fontWeight:500,borderRadius:6}}>
+                        حفظ إعدادات SEO
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </div>
+            );
+          })()}
 
         </main>
       </div>
