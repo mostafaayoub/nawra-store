@@ -1,4 +1,4 @@
-import { useState, useEffect, createContext, useContext } from "react";
+import { useState, useEffect, useRef, createContext, useContext } from "react";
 import LogoImg from '/nawra-logo.png';
 
 // ─── Translations ─────────────────────────────────────────────────────────────
@@ -1020,15 +1020,89 @@ function AdminDash({ go }) {
   const [invStatusFil, setInvStatusFil] = useState("all"); // all|available|low|out
   const [invCatFil, setInvCatFil] = useState("all");
   const [invEditing, setInvEditing] = useState(null); // product id currently saving
+  const [invImporting, setInvImporting] = useState(false);
+  const [invNotice, setInvNotice]   = useState(null); // one-time auto-import banner
+  const importedRef = useRef(false); // make sure auto-import runs at most once per session
 
-  const refreshProducts = async () => {
+  // Map a legacy localStorage product (from useProds / PRODS_KEY) onto the
+  // shape that POST /api/products expects. Best-guesses category from name.
+  const guessCategory = (name = "") => {
+    const n = String(name);
+    if (/سيروم/i.test(n))         return "سيروم";
+    if (/غسول|cleanser/i.test(n)) return "غسول";
+    if (/sun|spf|واقي/i.test(n))  return "واقي شمس";
+    return "مرطب";
+  };
+  const legacyToApi = (p) => ({
+    name:        p.nameAr || p.name || "منتج",
+    description: p.descAr || p.desc || p.detAr || "",
+    category:    guessCategory(p.nameAr || p.name || ""),
+    brand:       p.brand || "",
+    ingredients: p.useAr || "",
+    images:      p.img ? [p.img] : [],
+    price:        Number(p.price) || 0,
+    price_before: 0,
+    cost:         0,
+    stock:           Number(p.stock) || 0,
+    alert_threshold: 5,
+    status:   "published",
+    in_stock: (Number(p.stock) || 0) > 0,
+    featured: !!p.badgeAr,
+    tags:     p.brand ? [p.brand] : [],
+  });
+
+  const refreshProducts = async ({ allowImport = true } = {}) => {
     try {
       const res = await fetch("/api/products");
-      if (res.ok) setDbProducts(await res.json());
+      if (!res.ok) return;
+      let list = await res.json();
+
+      // One-time auto-import: if API is empty (or missing some) AND legacy
+      // localStorage has products, sync them up so the inventory page works
+      // immediately for existing stores. After this runs, the API is the
+      // single source of truth — future edits go straight through PATCH.
+      if (allowImport && !importedRef.current && Array.isArray(prods) && prods.length) {
+        const apiNames = new Set(list.map(p => (p.name || "").trim().toLowerCase()));
+        const missing  = prods.filter(p => {
+          const key = (p.nameAr || p.name || "").trim().toLowerCase();
+          return key && !apiNames.has(key);
+        });
+        if (missing.length) {
+          importedRef.current = true;
+          setInvImporting(true);
+          let imported = 0;
+          for (const lp of missing) {
+            try {
+              const r = await fetch("/api/products", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(legacyToApi(lp))
+              });
+              if (r.ok) imported++;
+            } catch {}
+          }
+          // Re-fetch after the import batch
+          try {
+            const res2 = await fetch("/api/products");
+            if (res2.ok) list = await res2.json();
+          } catch {}
+          setInvImporting(false);
+          if (imported) {
+            setInvNotice(`تم استيراد ${imported} منتج من المتجر تلقائياً`);
+            setTimeout(() => setInvNotice(null), 6000);
+          }
+        }
+      }
+
+      setDbProducts(list);
     } catch {}
   };
+
+  // Fetch on mount AND whenever the tab switches into a page that uses
+  // dbProducts. The empty-deps useEffect catches the initial admin load.
+  useEffect(() => { refreshProducts(); /* eslint-disable-next-line */ }, []);
   useEffect(() => {
-    if (tab === "inventory" || tab === "overview") refreshProducts();
+    if (tab === "inventory" || tab === "overview" || tab === "add-product") refreshProducts();
   }, [tab]); // eslint-disable-line
 
   // ── Coupons ────────────────────────────────────────────────────────────────
@@ -1280,10 +1354,37 @@ function AdminDash({ go }) {
     </div>
   );
 
-  const saveProduct = () => {
+  const saveProduct = async () => {
     if (!newP.name||!newP.price) return;
-    if (editId) { editProd(editId, {...newP, price:parseInt(newP.price), stars:5, det:"", use:""}); setEditId(null); }
-    else addProd({...newP, price:parseInt(newP.price), stars:5, det:"وصف تفصيلي للمنتج", use:"طريقة الاستخدام", stock:10});
+    if (editId) {
+      editProd(editId, {...newP, price:parseInt(newP.price), stars:5, det:"", use:""});
+      setEditId(null);
+    } else {
+      addProd({...newP, price:parseInt(newP.price), stars:5, det:"وصف تفصيلي للمنتج", use:"طريقة الاستخدام", stock:10});
+      // Also mirror the new product into the DB so it shows up immediately
+      // in the inventory tab. Best-effort — failures don't block the legacy
+      // localStorage save.
+      try {
+        await fetch("/api/products", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            name: newP.name,
+            brand: newP.brand || "",
+            description: newP.desc || "",
+            category: guessCategory(newP.name),
+            images: [],
+            price: parseInt(newP.price) || 0,
+            stock: parseInt(newP.stock) || 10,
+            alert_threshold: 5,
+            status: "published",
+            in_stock: (parseInt(newP.stock) || 10) > 0,
+            tags: newP.brand ? [newP.brand] : [],
+          })
+        });
+        refreshProducts({ allowImport: false });
+      } catch {}
+    }
     setNewP({name:"",brand:"",desc:"",price:"",icon:"✨",badge:"",bg:"linear-gradient(135deg,#F5EBE8,#E8D5C4)"});
     setShowAdd(false);
   };
@@ -2167,9 +2268,35 @@ function AdminDash({ go }) {
                   </button>
                 </div>
 
+                {/* Auto-import status banner + manual fallback */}
+                {invImporting && (
+                  <div style={{padding:"10px 14px",borderRadius:6,marginBottom:10,background:"#DBEAFE",color:"#1D4ED8",fontSize:12.5,fontFamily:ui.fontBody,border:"0.5px solid #93C5FD"}}>
+                    جاري استيراد المنتجات الموجودة في المتجر...
+                  </div>
+                )}
+                {invNotice && !invImporting && (
+                  <div style={{padding:"10px 14px",borderRadius:6,marginBottom:10,background:"#DCFCE7",color:"#15803D",fontSize:12.5,fontFamily:ui.fontBody,border:"0.5px solid #86EFAC"}}>
+                    {invNotice}
+                  </div>
+                )}
+
                 {dbProducts.length === 0 ? (
-                  <Placeholder icon="package" title="لا توجد منتجات بعد"
-                    body='روح لتاب "إضافة منتج" عشان تضيف أول منتج. هتظهر كل المنتجات هنا.' />
+                  <div>
+                    <Placeholder icon="package"
+                      title={prods && prods.length ? "المخزون لسه فاضي" : "لا توجد منتجات بعد"}
+                      body={prods && prods.length
+                        ? `عندك ${prods.length} منتج في المتجر، اضغط الزر تحت عشان تستوردهم.`
+                        : 'روح لتاب "إضافة منتج" عشان تضيف أول منتج.'} />
+                    {prods && prods.length > 0 && (
+                      <div style={{textAlign:"center",marginTop:12}}>
+                        <button onClick={() => { importedRef.current = false; refreshProducts(); }}
+                          disabled={invImporting}
+                          style={{background:ui.text,color:"#fff",border:"none",padding:"10px 22px",cursor:invImporting?"wait":"pointer",fontSize:13,fontFamily:ui.fontBody,fontWeight:500,borderRadius:6}}>
+                          {invImporting ? "جاري الاستيراد..." : `استيراد ${prods.length} منتج`}
+                        </button>
+                      </div>
+                    )}
+                  </div>
                 ) : filtered.length === 0 ? (
                   <div style={{background:ui.cardBg,border:ui.border,borderRadius:ui.radius,padding:"40px",textAlign:"center",color:ui.textSub,fontFamily:ui.fontBody,fontSize:13}}>
                     لا توجد منتجات تطابق الفلتر الحالي
