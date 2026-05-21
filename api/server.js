@@ -132,6 +132,20 @@ db.exec(`
 `);
 
 db.exec(`
+  CREATE TABLE IF NOT EXISTS expenses (
+    id          TEXT PRIMARY KEY,
+    category    TEXT NOT NULL,
+    description TEXT,
+    quantity    REAL DEFAULT 1,
+    unit_price  REAL DEFAULT 0,
+    amount      REAL DEFAULT 0,
+    date        TEXT,
+    notes       TEXT,
+    created_at  DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at  DATETIME DEFAULT CURRENT_TIMESTAMP
+  )
+`);
+db.exec(`
   CREATE TABLE IF NOT EXISTS stock_changes (
     id          TEXT PRIMARY KEY,
     product_id  TEXT,
@@ -953,6 +967,265 @@ app.get('/api/stock-changes', (_req, res) => {
   try {
     const rows = db.prepare('SELECT * FROM stock_changes ORDER BY created_at DESC LIMIT 100').all();
     res.json(rows);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// ── EXPENSES ──────────────────────────────────────────────────────────────────
+// Categories used by the admin: salaries, marketing, packing, shipping, overhead, general
+const EXPENSE_CATEGORIES = ['salaries','marketing','packing','shipping','overhead','general'];
+
+app.get('/api/expenses', (req, res) => {
+  try {
+    const { month, year, category, from, to } = req.query;
+    let sql = 'SELECT * FROM expenses WHERE 1=1';
+    const params = [];
+    if (category) { sql += ' AND category = ?'; params.push(category); }
+    if (from)     { sql += ' AND date >= ?';   params.push(from); }
+    if (to)       { sql += ' AND date <= ?';   params.push(to); }
+    if (month && year) {
+      const mm = String(month).padStart(2, '0');
+      sql += ' AND date >= ? AND date <= ?';
+      params.push(`${year}-${mm}-01`, `${year}-${mm}-31`);
+    } else if (year) {
+      sql += ' AND date >= ? AND date <= ?';
+      params.push(`${year}-01-01`, `${year}-12-31`);
+    }
+    sql += ' ORDER BY date DESC, created_at DESC';
+    const rows = db.prepare(sql).all(...params);
+    res.json(rows);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+function computeAmount(qty, unit, given) {
+  const computed = (Number(qty)||0) * (Number(unit)||0);
+  // If the caller supplies an explicit amount, honour it; otherwise auto-compute
+  if (given !== undefined && given !== null && given !== '' && !Number.isNaN(Number(given))) return Number(given);
+  return computed;
+}
+
+app.post('/api/expenses', (req, res) => {
+  try {
+    const e = req.body || {};
+    if (!e.category) return res.status(400).json({ error: 'category required' });
+    if (!EXPENSE_CATEGORIES.includes(e.category)) return res.status(400).json({ error: 'invalid category' });
+    const id = e.id || `ex_${Date.now().toString(36)}_${Math.random().toString(36).slice(2,5)}`;
+    const qty  = Number(e.quantity)   || 0;
+    const unit = Number(e.unit_price) || 0;
+    const amt  = computeAmount(qty, unit, e.amount);
+    const date = e.date || new Date().toISOString().slice(0,10);
+    db.prepare(`
+      INSERT INTO expenses (id, category, description, quantity, unit_price, amount, date, notes)
+      VALUES (?,?,?,?,?,?,?,?)
+    `).run(id, e.category, e.description||null, qty, unit, amt, date, e.notes||null);
+    res.json({ ok: true, id, amount: amt });
+  } catch (err) { console.error('POST /api/expenses error:', err); res.status(500).json({ error: err.message }); }
+});
+
+app.put('/api/expenses/:id', (req, res) => {
+  try {
+    const cur = db.prepare('SELECT * FROM expenses WHERE id = ?').get(req.params.id);
+    if (!cur) return res.status(404).json({ error: 'not found' });
+    const e = req.body || {};
+    const qty  = e.quantity   !== undefined ? Number(e.quantity)   : cur.quantity;
+    const unit = e.unit_price !== undefined ? Number(e.unit_price) : cur.unit_price;
+    const amt  = e.amount     !== undefined ? Number(e.amount)     : computeAmount(qty, unit);
+    db.prepare(`
+      UPDATE expenses SET
+        category    = COALESCE(?, category),
+        description = COALESCE(?, description),
+        quantity    = ?, unit_price = ?, amount = ?,
+        date        = COALESCE(?, date),
+        notes       = COALESCE(?, notes),
+        updated_at  = datetime('now')
+      WHERE id = ?
+    `).run(e.category||null, e.description||null, qty, unit, amt, e.date||null, e.notes||null, req.params.id);
+    res.json(db.prepare('SELECT * FROM expenses WHERE id = ?').get(req.params.id));
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.delete('/api/expenses/:id', (req, res) => {
+  try {
+    const info = db.prepare('DELETE FROM expenses WHERE id = ?').run(req.params.id);
+    if (!info.changes) return res.status(404).json({ error: 'not found' });
+    res.json({ ok: true });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// ── FINANCE — derived endpoints ───────────────────────────────────────────────
+// Revenue: SUM(orders.total) where status != 'ملغي'
+// COGS:    SUM over orders.items[*] of (item.qty * product.cost),  joined by
+//          product name → products.cost (best-effort; falls back to 0).
+// Net:     gross profit − expenses in range.
+
+function parseOrderDateStr(s) {
+  if (!s) return null;
+  const d = new Date(s); if (!isNaN(d)) return d;
+  const m = String(s).match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2,4})/);
+  if (m) {
+    const yr = m[3].length === 2 ? 2000 + Number(m[3]) : Number(m[3]);
+    return new Date(yr, Number(m[2]) - 1, Number(m[1]));
+  }
+  return null;
+}
+function inRangeISO(dateLike, fromISO, toISO) {
+  const d = parseOrderDateStr(dateLike); if (!d) return false;
+  const day = d.toISOString().slice(0,10);
+  return (!fromISO || day >= fromISO) && (!toISO || day <= toISO);
+}
+
+function aggregateFinance(fromISO, toISO) {
+  const orders   = db.prepare('SELECT * FROM orders').all();
+  const products = db.prepare('SELECT name, cost FROM products').all();
+  const expenses = db.prepare('SELECT * FROM expenses WHERE 1=1'
+    + (fromISO ? ' AND date >= ?' : '')
+    + (toISO   ? ' AND date <= ?' : '')).all(...[fromISO, toISO].filter(Boolean));
+  const returnsRows = db.prepare('SELECT * FROM returns WHERE status = ?').all('refunded');
+
+  const costByName = new Map(products.map(p => [(p.name||'').trim().toLowerCase(), Number(p.cost)||0]));
+  const findCost = (name) => costByName.get(String(name||'').trim().toLowerCase()) || 0;
+
+  let revenue = 0, cogs = 0, refunds = 0, orderCount = 0;
+  const productAgg = new Map();
+  orders.forEach(o => {
+    if (!inRangeISO(o.created_at || o.date, fromISO, toISO)) return;
+    if (o.status === 'ملغي') return;
+    revenue += Number(o.total) || 0;
+    orderCount++;
+    let items = [];
+    try { items = JSON.parse(o.items || '[]'); } catch {}
+    items.forEach(it => {
+      const qty   = Number(it.qty)   || 0;
+      const price = Number(it.price) || 0;
+      const cost  = findCost(it.name);
+      cogs += cost * qty;
+      const key = (it.name || '').trim() || '—';
+      const prev = productAgg.get(key) || { name: key, qty: 0, revenue: 0, cost: 0 };
+      prev.qty     += qty;
+      prev.revenue += qty * price;
+      prev.cost    += qty * cost;
+      productAgg.set(key, prev);
+    });
+  });
+  returnsRows.forEach(r => {
+    if (!inRangeISO(r.created_at, fromISO, toISO)) return;
+    refunds += Number(r.amount) || 0;
+  });
+
+  // Expenses by category in range
+  const expensesByCategory = {};
+  let expensesTotal = 0;
+  expenses.forEach(x => {
+    expensesByCategory[x.category] = (expensesByCategory[x.category] || 0) + (Number(x.amount)||0);
+    expensesTotal += Number(x.amount) || 0;
+  });
+
+  const grossProfit = revenue - cogs;
+  const netProfit   = grossProfit - expensesTotal - refunds;
+  const margin      = revenue ? (netProfit / revenue) * 100 : 0;
+
+  const topProducts = Array.from(productAgg.values())
+    .map(p => ({ ...p,
+      margin_pct: p.revenue ? Math.round(((p.revenue - p.cost) / p.revenue) * 100) : 0
+    }))
+    .sort((a,b) => b.revenue - a.revenue)
+    .slice(0, 5);
+
+  return { revenue, cogs, grossProfit, expensesTotal, refunds, netProfit, margin,
+           orderCount, expensesByCategory, topProducts, expensesRows: expenses };
+}
+
+app.get('/api/finance/summary', (req, res) => {
+  try {
+    const { from, to } = req.query;
+    const cur = aggregateFinance(from || null, to || null);
+
+    // Previous-period KPIs (for % change). When range is omitted, prev is null.
+    let prev = null;
+    if (from && to) {
+      const f = new Date(from), t = new Date(to);
+      const days = Math.round((t - f) / 86400000) + 1;
+      const prevFrom = new Date(f); prevFrom.setDate(prevFrom.getDate() - days);
+      const prevTo   = new Date(f); prevTo.setDate(prevTo.getDate() - 1);
+      prev = aggregateFinance(prevFrom.toISOString().slice(0,10), prevTo.toISOString().slice(0,10));
+    }
+
+    const pct = (a, b) => b ? Math.round(((a - b) / Math.abs(b)) * 100) : (a ? 100 : 0);
+    res.json({
+      revenue:        cur.revenue,
+      cogs:           cur.cogs,
+      gross_profit:   cur.grossProfit,
+      expenses_total: cur.expensesTotal,
+      net_profit:     cur.netProfit,
+      margin_pct:     Math.round(cur.margin * 10) / 10,
+      order_count:    cur.orderCount,
+      refunds:        cur.refunds,
+      expenses_by_category: cur.expensesByCategory,
+      top_products: cur.topProducts,
+      change: prev ? {
+        revenue:        pct(cur.revenue,      prev.revenue),
+        cogs:           pct(cur.cogs,         prev.cogs),
+        gross_profit:   pct(cur.grossProfit,  prev.grossProfit),
+        expenses_total: pct(cur.expensesTotal, prev.expensesTotal),
+        net_profit:     pct(cur.netProfit,    prev.netProfit),
+        margin_pct:     Math.round((cur.margin - prev.margin) * 10) / 10,
+      } : null,
+    });
+  } catch (e) { console.error('GET /api/finance/summary error:', e); res.status(500).json({ error: e.message }); }
+});
+
+// Monthly chart data (revenue / expenses / net) for the last N months ending at `to`.
+app.get('/api/finance/chart', (req, res) => {
+  try {
+    const { from, to } = req.query;
+    const end   = to   ? new Date(to)   : new Date();
+    const start = from ? new Date(from) : (() => { const d = new Date(end); d.setMonth(d.getMonth() - 11); d.setDate(1); return d; })();
+    const months = [];
+    const cur = new Date(start.getFullYear(), start.getMonth(), 1);
+    const endMonth = new Date(end.getFullYear(), end.getMonth(), 1);
+    while (cur <= endMonth) {
+      const y = cur.getFullYear(), m = cur.getMonth();
+      const mFromISO = `${y}-${String(m+1).padStart(2,'0')}-01`;
+      const last = new Date(y, m+1, 0); // last day of this month
+      const mToISO = `${y}-${String(m+1).padStart(2,'0')}-${String(last.getDate()).padStart(2,'0')}`;
+      const agg = aggregateFinance(mFromISO, mToISO);
+      months.push({
+        label: `${m+1}/${y}`,
+        from: mFromISO, to: mToISO,
+        revenue: agg.revenue, expenses: agg.expensesTotal,
+        cogs: agg.cogs, net: agg.netProfit, gross: agg.grossProfit,
+      });
+      cur.setMonth(cur.getMonth() + 1);
+    }
+    res.json(months);
+  } catch (e) { console.error('GET /api/finance/chart error:', e); res.status(500).json({ error: e.message }); }
+});
+
+// Expense breakdown by category for [from, to], plus same comparison vs prev period.
+app.get('/api/finance/expenses', (req, res) => {
+  try {
+    const { from, to } = req.query;
+    const cur = aggregateFinance(from || null, to || null);
+    let prev = null;
+    if (from && to) {
+      const f = new Date(from), t = new Date(to);
+      const days = Math.round((t - f) / 86400000) + 1;
+      const prevFrom = new Date(f); prevFrom.setDate(prevFrom.getDate() - days);
+      const prevTo   = new Date(f); prevTo.setDate(prevTo.getDate() - 1);
+      prev = aggregateFinance(prevFrom.toISOString().slice(0,10), prevTo.toISOString().slice(0,10));
+    }
+    const allCats = new Set([...Object.keys(cur.expensesByCategory),
+                             ...(prev ? Object.keys(prev.expensesByCategory) : [])]);
+    const rows = Array.from(allCats).map(cat => {
+      const amount = cur.expensesByCategory[cat] || 0;
+      const prevAmt = prev ? (prev.expensesByCategory[cat] || 0) : 0;
+      return {
+        category: cat,
+        amount,
+        pct_of_revenue: cur.revenue ? Math.round((amount / cur.revenue) * 1000) / 10 : 0,
+        change_pct:     prev ? (prevAmt ? Math.round(((amount - prevAmt) / Math.abs(prevAmt)) * 100) : (amount ? 100 : 0)) : null,
+      };
+    }).sort((a,b) => b.amount - a.amount);
+    res.json({ rows, total: cur.expensesTotal, revenue: cur.revenue });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 

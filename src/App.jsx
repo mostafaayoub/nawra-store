@@ -1013,7 +1013,11 @@ function AdmIcon({ name, size = 16 }) {
     "package":       <><path d="M21 8l-9-5-9 5 9 5 9-5z"/><path d="M3 8v8l9 5 9-5V8"/></>,
     "refresh":       <><path d="M21 12a9 9 0 1 1-3-6.7"/><path d="M21 4v5h-5"/></>,
     "logout":        <><path d="M14 8V6a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h7a2 2 0 0 0 2-2v-2"/><path d="M9 12h12"/><path d="M17 8l4 4-4 4"/></>,
-    "plus":          <><path d="M12 5v14"/><path d="M5 12h14"/></>
+    "plus":          <><path d="M12 5v14"/><path d="M5 12h14"/></>,
+    "receipt":       <><path d="M5 21V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2v16l-3-2-3 2-3-2-3 2-2-2z"/><path d="M9 7h6M9 11h6M9 15h4"/></>,
+    "report-money":  <><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M9 9h6M12 9v8"/><path d="M9 13c0 1.5 1.5 2 3 2s3-.5 3-2-1.5-2-3-2-3-.5-3-2 1.5-2 3-2 3 .5 3 2"/></>,
+    "trash":         <><path d="M4 7h16"/><path d="M10 11v6M14 11v6"/><path d="M5 7l1 12a2 2 0 0 0 2 2h8a2 2 0 0 0 2-2l1-12"/><path d="M9 7V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v3"/></>,
+    "pencil":        <><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4 12.5-12.5z"/></>
   };
   return (
     <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" style={{flexShrink:0,verticalAlign:"middle"}}>
@@ -1142,6 +1146,103 @@ function AdminDash({ go }) {
       }
     } catch {}
   };
+  // ── Expenses ────────────────────────────────────────────────────────────────
+  const EXPENSE_CATEGORIES = [
+    { key:"salaries",  l:"الرواتب",  color:"#534AB7" },
+    { key:"marketing", l:"التسويق",  color:"#3B82F6" },
+    { key:"packing",   l:"التغليف",  color:"#16A34A" },
+    { key:"shipping",  l:"الشحن",    color:"#F97316" },
+    { key:"overhead",  l:"تشغيلي",   color:"#EC4899" },
+    { key:"general",   l:"عام",      color:"#6B7280" },
+  ];
+  const [expenses, setExpenses] = useState([]);
+  const [expCatTab, setExpCatTab] = useState("salaries");
+  const [expMonth, setExpMonth] = useState(() => String(new Date().getMonth()+1));
+  const [expYear,  setExpYear]  = useState(() => String(new Date().getFullYear()));
+  const [expDraft, setExpDraft] = useState({ description:"", quantity:"1", unit_price:"", date: new Date().toISOString().slice(0,10), notes:"" });
+  const [expEditingId, setExpEditingId] = useState(null);
+  const [expEditDraft, setExpEditDraft] = useState(null);
+
+  const refreshExpenses = async () => {
+    try {
+      const r = await fetch(`/api/expenses?month=${expMonth}&year=${expYear}`);
+      if (r.ok) setExpenses(await r.json());
+    } catch {}
+  };
+  useEffect(() => { if (tab === "expenses") refreshExpenses(); }, [tab, expMonth, expYear]); // eslint-disable-line
+
+  const addExpense = async () => {
+    if (!expDraft.description.trim()) return;
+    const qty  = Number(expDraft.quantity)   || 0;
+    const unit = Number(expDraft.unit_price) || 0;
+    try {
+      const r = await fetch("/api/expenses", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          category: expCatTab,
+          description: expDraft.description.trim(),
+          quantity: qty, unit_price: unit, amount: qty * unit,
+          date: expDraft.date,
+          notes: expDraft.notes.trim() || null,
+        })
+      });
+      if (r.ok) {
+        setExpDraft({ description:"", quantity:"1", unit_price:"", date: new Date().toISOString().slice(0,10), notes:"" });
+        refreshExpenses();
+      }
+    } catch {}
+  };
+  const saveExpenseEdit = async () => {
+    if (!expEditingId || !expEditDraft) return;
+    const qty  = Number(expEditDraft.quantity)   || 0;
+    const unit = Number(expEditDraft.unit_price) || 0;
+    try {
+      await fetch(`/api/expenses/${expEditingId}`, {
+        method: "PUT", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          ...expEditDraft, quantity: qty, unit_price: unit, amount: qty * unit
+        })
+      });
+      setExpEditingId(null); setExpEditDraft(null);
+      refreshExpenses();
+    } catch {}
+  };
+  const deleteExpense = async (id) => {
+    if (!confirm("حذف هذا المصروف نهائياً؟")) return;
+    try { await fetch(`/api/expenses/${id}`, { method: "DELETE" }); refreshExpenses(); } catch {}
+  };
+
+  // ── Finance ────────────────────────────────────────────────────────────────
+  const [finRange, setFinRange] = useState("month"); // today | month | 3months | custom
+  const [finFrom, setFinFrom] = useState("");
+  const [finTo, setFinTo] = useState("");
+  const [finSummary, setFinSummary] = useState(null);
+  const [finChart, setFinChart] = useState([]);
+  const [finExpBreakdown, setFinExpBreakdown] = useState({ rows: [], total: 0, revenue: 0 });
+
+  const resolveFinRange = () => {
+    const today = new Date();
+    const iso = (d) => d.toISOString().slice(0,10);
+    if (finRange === "today")    return { from: iso(today), to: iso(today) };
+    if (finRange === "month")    { const f = new Date(today.getFullYear(), today.getMonth(), 1); return { from: iso(f), to: iso(today) }; }
+    if (finRange === "3months")  { const f = new Date(today); f.setMonth(f.getMonth() - 3); return { from: iso(f), to: iso(today) }; }
+    if (finRange === "custom" && finFrom && finTo) return { from: finFrom, to: finTo };
+    return { from: iso(new Date(today.getFullYear(), today.getMonth(), 1)), to: iso(today) };
+  };
+
+  const refreshFinance = async () => {
+    const { from, to } = resolveFinRange();
+    try {
+      const [s, c, b] = await Promise.all([
+        fetch(`/api/finance/summary?from=${from}&to=${to}`).then(r => r.ok ? r.json() : null),
+        fetch(`/api/finance/chart?from=${from}&to=${to}`).then(r => r.ok ? r.json() : []),
+        fetch(`/api/finance/expenses?from=${from}&to=${to}`).then(r => r.ok ? r.json() : { rows:[], total:0, revenue:0 }),
+      ]);
+      setFinSummary(s); setFinChart(c || []); setFinExpBreakdown(b || { rows:[], total:0, revenue:0 });
+    } catch {}
+  };
+  useEffect(() => { if (tab === "finance") refreshFinance(); }, [tab, finRange, finFrom, finTo]); // eslint-disable-line
+
   const resolveApproval = async (id, status, note = "") => {
     try {
       const r = await fetch(`/api/approvals/${id}`, {
@@ -1791,6 +1892,8 @@ function AdminDash({ go }) {
     { k:"inventory",   l:"المخزون",     icon:"package" },
     { k:"customers",   l:"العملاء",     icon:"users" },
     { k:"returns",     l:"المرتجعات",   icon:"refresh" },
+    { k:"expenses",    l:"المصروفات",   icon:"receipt" },
+    { k:"finance",     l:"المالية",     icon:"report-money" },
     { k:"shipping",    l:"الشحن",       icon:"truck" },
     { k:"coupons",     l:"الكوبونات",   icon:"discount" },
     { k:"settings",    l:"الإعدادات",   icon:"settings" },
@@ -3107,6 +3210,521 @@ function AdminDash({ go }) {
                     </table>
                   </div>
                 )}
+              </div>
+            );
+          })()}
+
+          {/* ─── EXPENSES ────────────────────────────────────────────────── */}
+          {tab === "expenses" && (() => {
+            const months = [
+              {v:"1",l:"يناير"},{v:"2",l:"فبراير"},{v:"3",l:"مارس"},{v:"4",l:"أبريل"},
+              {v:"5",l:"مايو"},{v:"6",l:"يونيو"},{v:"7",l:"يوليو"},{v:"8",l:"أغسطس"},
+              {v:"9",l:"سبتمبر"},{v:"10",l:"أكتوبر"},{v:"11",l:"نوفمبر"},{v:"12",l:"ديسمبر"},
+            ];
+            const years = [];
+            const yNow = new Date().getFullYear();
+            for (let y = yNow - 3; y <= yNow + 1; y++) years.push(String(y));
+
+            const inputSm = { padding:"6px 10px", border:ui.border, borderRadius:6, background:ui.cardBg,
+              fontFamily:ui.fontBody, fontSize:13, color:ui.text, outline:"none", direction:"rtl", boxSizing:"border-box" };
+            const tdCell = { padding:"9px 12px", fontSize:12.5, color:ui.text, fontFamily:ui.fontBody, verticalAlign:"middle" };
+
+            // Totals by category across the loaded month
+            const totals = {};
+            EXPENSE_CATEGORIES.forEach(c => totals[c.key] = 0);
+            expenses.forEach(e => { totals[e.category] = (totals[e.category]||0) + (Number(e.amount)||0); });
+            const totalAll = Object.values(totals).reduce((s,n)=>s+n,0);
+
+            // For metric cards: salaries / marketing / packing / (shipping + general + overhead)
+            const cardItems = [
+              { k:"_all",    l:"إجمالي المصروفات", v: totalAll, color: ui.text },
+              { k:"salaries",  l:"الرواتب",      v: totals.salaries  || 0, color:"#534AB7" },
+              { k:"marketing", l:"التسويق",      v: totals.marketing || 0, color:"#3B82F6" },
+              { k:"packing",   l:"التغليف",      v: totals.packing   || 0, color:"#16A34A" },
+              { k:"_shipgen",  l:"شحن + عام + تشغيلي", v: (totals.shipping||0) + (totals.general||0) + (totals.overhead||0), color:"#F97316" },
+            ];
+
+            const exportCsv = () => {
+              const head = ["الفئة","الوصف","الكمية","سعر الوحدة","الإجمالي","التاريخ","ملاحظات"];
+              const catLabel = (k) => (EXPENSE_CATEGORIES.find(c=>c.key===k) || {l:k}).l;
+              const esc = (v) => {
+                const s = v == null ? "" : String(v);
+                return /[",\n]/.test(s) ? `"${s.replace(/"/g,'""')}"` : s;
+              };
+              const lines = [head.join(",")];
+              expenses.forEach(e => lines.push([
+                catLabel(e.category), e.description, e.quantity, e.unit_price, e.amount, e.date, e.notes
+              ].map(esc).join(",")));
+              const blob = new Blob(["﻿" + lines.join("\n")], { type:"text/csv;charset=utf-8;" });
+              const url = URL.createObjectURL(blob);
+              const a = document.createElement("a");
+              a.href = url; a.download = `expenses_${expYear}_${String(expMonth).padStart(2,"0")}.csv`;
+              document.body.appendChild(a); a.click(); a.remove();
+              URL.revokeObjectURL(url);
+            };
+
+            const tabRows = expenses.filter(e => e.category === expCatTab);
+            const tabTotal = totals[expCatTab] || 0;
+            const activeCat = EXPENSE_CATEGORIES.find(c => c.key === expCatTab);
+
+            return (
+              <div>
+                {/* Top bar */}
+                <div style={{background:ui.cardBg,border:ui.border,borderRadius:ui.radius,padding:"12px 14px",marginBottom:12,
+                  display:"grid",gridTemplateColumns:mob?"1fr":"1fr 1fr auto auto",gap:10,alignItems:"end"}}>
+                  <div>
+                    <label style={{display:"block",fontSize:11,color:ui.textSub,fontFamily:ui.fontBody,marginBottom:5}}>الشهر</label>
+                    <select value={expMonth} onChange={e=>setExpMonth(e.target.value)} style={{...inputSm, padding:"8px 12px", width:"100%"}}>
+                      {months.map(m => <option key={m.v} value={m.v}>{m.l}</option>)}
+                    </select>
+                  </div>
+                  <div>
+                    <label style={{display:"block",fontSize:11,color:ui.textSub,fontFamily:ui.fontBody,marginBottom:5}}>السنة</label>
+                    <select value={expYear} onChange={e=>setExpYear(e.target.value)} style={{...inputSm, padding:"8px 12px", width:"100%"}}>
+                      {years.map(y => <option key={y} value={y}>{y}</option>)}
+                    </select>
+                  </div>
+                  <button onClick={refreshExpenses}
+                    style={{display:"flex",alignItems:"center",gap:5,background:ui.cardBg,color:ui.text,
+                      border:ui.border,padding:"8px 14px",cursor:"pointer",fontFamily:ui.fontBody,fontSize:12,borderRadius:6,justifyContent:"center"}}>
+                    <AdmIcon name="refresh" size={13}/> تحديث
+                  </button>
+                  <button onClick={exportCsv} disabled={expenses.length === 0}
+                    style={{display:"flex",alignItems:"center",gap:5,
+                      background: expenses.length === 0 ? "transparent" : ui.text,
+                      color: expenses.length === 0 ? ui.textSub : "#fff",
+                      border: expenses.length === 0 ? ui.border : "none",
+                      padding:"8px 14px",cursor: expenses.length === 0 ? "not-allowed" : "pointer",
+                      fontFamily:ui.fontBody,fontSize:12,borderRadius:6,justifyContent:"center"}}>
+                    تصدير CSV
+                  </button>
+                </div>
+
+                {/* Metric cards */}
+                <div style={{display:"grid",gridTemplateColumns:mob?"1fr 1fr":"repeat(5,1fr)",gap:10,marginBottom:14}}>
+                  {cardItems.map((c,i) => (
+                    <div key={i} style={{background:ui.cardBg,border:ui.border,borderRadius:ui.radius,padding:"14px 16px",borderTop:`3px solid ${c.color}`}}>
+                      <div style={{fontSize:11.5,color:ui.textSub,fontFamily:ui.fontBody,marginBottom:6}}>{c.l}</div>
+                      <div style={{fontSize:mob?17:20,color:ui.text,fontFamily:ui.fontHead,fontWeight:500,lineHeight:1.1}}>
+                        {Math.round(c.v).toLocaleString()}
+                        <span style={{fontSize:11.5,color:ui.textSub,marginInlineStart:5,fontFamily:ui.fontBody}}>ج</span>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+
+                {/* Category tabs */}
+                <div style={{background:ui.cardBg,border:ui.border,borderRadius:ui.radius,padding:"6px 6px",marginBottom:12,display:"flex",gap:4,overflowX:"auto"}}>
+                  {EXPENSE_CATEGORIES.map(c => (
+                    <button key={c.key} onClick={()=>setExpCatTab(c.key)}
+                      style={{display:"flex",alignItems:"center",gap:6,padding:"7px 12px",border:"none",cursor:"pointer",borderRadius:6,
+                        background: expCatTab===c.key ? c.color : "transparent",
+                        color: expCatTab===c.key ? "#fff" : ui.textSub,
+                        fontSize:12, fontFamily:ui.fontBody, whiteSpace:"nowrap"}}>
+                      <span style={{width:6,height:6,borderRadius:"50%",background: expCatTab===c.key ? "#fff" : c.color, display:"inline-block"}}/>
+                      {c.l}
+                    </button>
+                  ))}
+                </div>
+
+                {/* Table */}
+                <div style={{background:ui.cardBg,border:ui.border,borderRadius:ui.radius,overflow:"hidden"}}>
+                  <div style={{overflowX:"auto"}}>
+                    <table style={{width:"100%",borderCollapse:"collapse",direction:"rtl",fontFamily:ui.fontBody,minWidth:760}}>
+                      <thead>
+                        <tr style={{background:ui.sideBg,borderBottom:`0.5px solid #E5E5E5`}}>
+                          {["الوصف","الكمية","سعر الوحدة","الإجمالي","التاريخ","ملاحظات",""].map(h=>(
+                            <th key={h} style={{padding:"11px 12px",textAlign:"right",fontSize:11.5,color:ui.textSub,fontWeight:500,whiteSpace:"nowrap"}}>{h}</th>
+                          ))}
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {tabRows.length === 0 ? (
+                          <tr><td colSpan={7} style={{padding:"24px 12px",textAlign:"center",color:ui.textSub,fontSize:12.5,fontFamily:ui.fontBody}}>
+                            لا توجد مصروفات في فئة {activeCat?.l} لهذا الشهر — أضف أول سطر من الأسفل ↓
+                          </td></tr>
+                        ) : tabRows.map(e => {
+                          const editing = expEditingId === e.id;
+                          return (
+                            <tr key={e.id} style={{borderTop:"0.5px solid #EEE"}}>
+                              <td style={tdCell}>
+                                {editing
+                                  ? <input style={{...inputSm, width:"100%"}} value={expEditDraft.description} onChange={ev=>setExpEditDraft({...expEditDraft, description:ev.target.value})}/>
+                                  : e.description || "—"}
+                              </td>
+                              <td style={tdCell}>
+                                {editing
+                                  ? <input type="text" inputMode="numeric" style={{...inputSm, width:70, direction:"ltr", textAlign:"left"}} value={expEditDraft.quantity} onChange={ev=>setExpEditDraft({...expEditDraft, quantity:ev.target.value.replace(/[^0-9.]/g,"")})}/>
+                                  : (Number(e.quantity)||0).toLocaleString()}
+                              </td>
+                              <td style={tdCell}>
+                                {editing
+                                  ? <input type="text" inputMode="numeric" style={{...inputSm, width:90, direction:"ltr", textAlign:"left"}} value={expEditDraft.unit_price} onChange={ev=>setExpEditDraft({...expEditDraft, unit_price:ev.target.value.replace(/[^0-9.]/g,"")})}/>
+                                  : (Number(e.unit_price)||0).toLocaleString() + " ج"}
+                              </td>
+                              <td style={{...tdCell, fontWeight:500}}>
+                                {editing
+                                  ? ((Number(expEditDraft.quantity)||0) * (Number(expEditDraft.unit_price)||0)).toLocaleString() + " ج"
+                                  : (Number(e.amount)||0).toLocaleString() + " ج"}
+                              </td>
+                              <td style={tdCell}>
+                                {editing
+                                  ? <input type="date" style={{...inputSm, padding:"5px 9px"}} value={expEditDraft.date || ""} onChange={ev=>setExpEditDraft({...expEditDraft, date:ev.target.value})}/>
+                                  : (e.date || "—")}
+                              </td>
+                              <td style={{...tdCell, color:ui.textSub, fontSize:11.5, maxWidth:200, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap"}}>
+                                {editing
+                                  ? <input style={{...inputSm, width:"100%"}} value={expEditDraft.notes || ""} onChange={ev=>setExpEditDraft({...expEditDraft, notes:ev.target.value})}/>
+                                  : (e.notes || "—")}
+                              </td>
+                              <td style={{...tdCell, textAlign:"left", whiteSpace:"nowrap"}}>
+                                {editing ? (
+                                  <div style={{display:"flex",gap:4}}>
+                                    <button onClick={saveExpenseEdit} style={{background:ui.text,color:"#fff",border:"none",padding:"4px 10px",cursor:"pointer",fontSize:11,fontFamily:ui.fontBody,borderRadius:4}}>حفظ</button>
+                                    <button onClick={()=>{ setExpEditingId(null); setExpEditDraft(null); }} style={{background:"transparent",border:ui.border,padding:"4px 9px",cursor:"pointer",fontSize:11,color:ui.textSub,fontFamily:ui.fontBody,borderRadius:4}}>إلغاء</button>
+                                  </div>
+                                ) : (
+                                  <div style={{display:"flex",gap:6,alignItems:"center"}}>
+                                    <button title="تعديل" onClick={()=>{ setExpEditingId(e.id); setExpEditDraft({...e, quantity: String(e.quantity), unit_price: String(e.unit_price), date: e.date || ""}); }}
+                                      style={{background:"transparent",border:"none",cursor:"pointer",padding:4,color:ui.textSub,display:"flex"}}>
+                                      <AdmIcon name="pencil" size={14}/>
+                                    </button>
+                                    <button title="حذف" onClick={()=>deleteExpense(e.id)}
+                                      style={{background:"transparent",border:"none",cursor:"pointer",padding:4,color:"#DC2626",display:"flex"}}>
+                                      <AdmIcon name="trash" size={14}/>
+                                    </button>
+                                  </div>
+                                )}
+                              </td>
+                            </tr>
+                          );
+                        })}
+
+                        {/* Inline add row — always present at the bottom */}
+                        <tr style={{borderTop:"0.5px solid #EEE", background:"#FAFAFA"}}>
+                          <td style={{padding:"9px 12px"}}>
+                            <input style={{...inputSm, width:"100%"}} value={expDraft.description}
+                              onChange={e=>setExpDraft({...expDraft, description:e.target.value})}
+                              placeholder={`وصف ${activeCat?.l || ""}...`}/>
+                          </td>
+                          <td style={{padding:"9px 12px"}}>
+                            <input type="text" inputMode="numeric" style={{...inputSm, width:70, direction:"ltr", textAlign:"left"}}
+                              value={expDraft.quantity}
+                              onChange={e=>setExpDraft({...expDraft, quantity:e.target.value.replace(/[^0-9.]/g,"")})}/>
+                          </td>
+                          <td style={{padding:"9px 12px"}}>
+                            <input type="text" inputMode="numeric" style={{...inputSm, width:90, direction:"ltr", textAlign:"left"}}
+                              value={expDraft.unit_price} placeholder="0"
+                              onChange={e=>setExpDraft({...expDraft, unit_price:e.target.value.replace(/[^0-9.]/g,"")})}/>
+                          </td>
+                          <td style={{padding:"9px 12px",fontWeight:500,fontSize:12.5,color:ui.text,fontFamily:ui.fontBody}}>
+                            {((Number(expDraft.quantity)||0) * (Number(expDraft.unit_price)||0)).toLocaleString()} ج
+                          </td>
+                          <td style={{padding:"9px 12px"}}>
+                            <input type="date" style={{...inputSm, padding:"5px 9px"}} value={expDraft.date}
+                              onChange={e=>setExpDraft({...expDraft, date:e.target.value})}/>
+                          </td>
+                          <td style={{padding:"9px 12px"}}>
+                            <input style={{...inputSm, width:"100%"}} value={expDraft.notes}
+                              onChange={e=>setExpDraft({...expDraft, notes:e.target.value})}
+                              placeholder="ملاحظات (اختياري)"/>
+                          </td>
+                          <td style={{padding:"9px 12px",textAlign:"left",whiteSpace:"nowrap"}}>
+                            <button onClick={addExpense} disabled={!expDraft.description.trim()}
+                              style={{background: expDraft.description.trim() ? (activeCat?.color || ui.text) : "#9CA3AF",
+                                color:"#fff",border:"none",padding:"6px 14px",
+                                cursor: expDraft.description.trim() ? "pointer" : "not-allowed",
+                                fontSize:12,fontFamily:ui.fontBody,borderRadius:4}}>
+                              + إضافة
+                            </button>
+                          </td>
+                        </tr>
+                      </tbody>
+                      {/* Category total bar */}
+                      <tfoot>
+                        <tr style={{background: (activeCat?.color || ui.text) + "11", borderTop:`1px solid ${(activeCat?.color || ui.text) + "44"}`}}>
+                          <td colSpan={3} style={{padding:"11px 12px",fontSize:12.5,color:ui.text,fontFamily:ui.fontBody,fontWeight:600}}>
+                            إجمالي {activeCat?.l} لشهر {months.find(m=>m.v===expMonth)?.l} {expYear}
+                          </td>
+                          <td colSpan={4} style={{padding:"11px 12px",fontSize:14,color: activeCat?.color || ui.text, fontFamily:ui.fontHead, fontWeight:600, textAlign:"right"}}>
+                            {tabTotal.toLocaleString()} ج
+                          </td>
+                        </tr>
+                      </tfoot>
+                    </table>
+                  </div>
+                </div>
+              </div>
+            );
+          })()}
+
+          {/* ─── FINANCE ─────────────────────────────────────────────────── */}
+          {tab === "finance" && (() => {
+            const s = finSummary || { revenue:0, cogs:0, gross_profit:0, expenses_total:0, net_profit:0, margin_pct:0, order_count:0, top_products:[], change:null };
+            const catLabel = (k) => (EXPENSE_CATEGORIES.find(c=>c.key===k) || {l:k}).l;
+            const catColor = (k) => (EXPENSE_CATEGORIES.find(c=>c.key===k) || {color:"#6B7280"}).color;
+            const fmt = (n) => Math.round(Number(n)||0).toLocaleString();
+            const inputSm = { padding:"6px 10px", border:ui.border, borderRadius:6, background:ui.cardBg,
+              fontFamily:ui.fontBody, fontSize:12, color:ui.text, outline:"none", direction:"ltr", boxSizing:"border-box" };
+
+            const kpis = [
+              { l:"الإيرادات",       v: fmt(s.revenue),        change: s.change?.revenue,        accent:"#16A34A" },
+              { l:"تكلفة البضاعة",   v: fmt(s.cogs),           change: s.change?.cogs,           accent:"#F97316", inverted:true },
+              { l:"إجمالي الربح",    v: fmt(s.gross_profit),   change: s.change?.gross_profit,   accent:"#3B82F6" },
+              { l:"إجمالي المصروفات", v: fmt(s.expenses_total), change: s.change?.expenses_total, accent:"#EC4899", inverted:true },
+              { l:"صافي الربح",      v: fmt(s.net_profit),     change: s.change?.net_profit,     accent:"#534AB7" },
+              { l:"هامش الربح",      v: `${s.margin_pct}%`,    change: s.change?.margin_pct,     accent:"#0EA5E9", isPct:true },
+            ];
+
+            // Compute forecast: average of last 3 months' net profit
+            const last3 = finChart.slice(-3);
+            const forecast = last3.length
+              ? Math.round(last3.reduce((s,m)=>s + (Number(m.net)||0), 0) / last3.length)
+              : 0;
+
+            // Chart max for scaling
+            const chartMax = Math.max(1, ...finChart.map(m => Math.max(Number(m.revenue)||0, Number(m.expenses)||0)));
+            const netMax   = Math.max(1, ...finChart.map(m => Math.abs(Number(m.net)||0)));
+
+            // Export helpers
+            const exportFinanceCsv = () => {
+              const head = ["الفئة","المؤشر","القيمة (ج)"];
+              const lines = [head.join(",")];
+              kpis.forEach(k => lines.push(["مؤشرات", k.l, String(k.v)].join(",")));
+              finExpBreakdown.rows.forEach(r => lines.push(["مصروفات", catLabel(r.category), String(Math.round(r.amount))].join(",")));
+              (s.top_products||[]).forEach(p => lines.push(["أفضل المنتجات", p.name, String(Math.round(p.revenue))].join(",")));
+              const blob = new Blob(["﻿" + lines.join("\n")], { type:"text/csv;charset=utf-8;" });
+              const url = URL.createObjectURL(blob);
+              const a = document.createElement("a");
+              const { from, to } = resolveFinRange();
+              a.href = url; a.download = `finance_${from}_to_${to}.csv`;
+              document.body.appendChild(a); a.click(); a.remove();
+              URL.revokeObjectURL(url);
+            };
+            const exportFinancePdf = () => {
+              // Open a print-friendly view that uses the same print stylesheet —
+              // user can "Save as PDF" from the browser print dialog.
+              injectPrintStyles();
+              document.body.classList.add("nawra-print-mode");
+              const cleanup = () => { document.body.classList.remove("nawra-print-mode"); window.removeEventListener("afterprint", cleanup); };
+              window.addEventListener("afterprint", cleanup);
+              setTimeout(cleanup, 4000);
+              window.print();
+            };
+
+            return (
+              <div className="order-print-overlay" style={{padding:0}}>
+                <div className="order-print-card" style={{background:"transparent"}}>
+                  {/* Top filter bar */}
+                  <div className="no-print" style={{background:ui.cardBg,border:ui.border,borderRadius:ui.radius,padding:"12px 14px",marginBottom:12,
+                    display:"grid",gridTemplateColumns:mob?"1fr":"1fr auto auto",gap:10,alignItems:"end"}}>
+                    <div>
+                      <div style={{display:"flex",gap:4,flexWrap:"wrap"}}>
+                        {[["today","اليوم"],["month","هذا الشهر"],["3months","آخر 3 أشهر"],["custom","مخصص"]].map(([k,l])=>(
+                          <button key={k} onClick={()=>setFinRange(k)}
+                            style={{padding:"5px 12px",borderRadius:14,fontSize:11.5,fontFamily:ui.fontBody,cursor:"pointer",
+                              background: finRange===k ? ui.text : "transparent",
+                              color: finRange===k ? "#fff" : ui.textSub,
+                              border: finRange===k ? "none" : ui.border}}>{l}</button>
+                        ))}
+                      </div>
+                      {finRange === "custom" && (
+                        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:6,marginTop:8}}>
+                          <input type="date" value={finFrom} onChange={e=>setFinFrom(e.target.value)} style={{...inputSm, padding:"6px 10px"}}/>
+                          <input type="date" value={finTo}   onChange={e=>setFinTo(e.target.value)}   style={{...inputSm, padding:"6px 10px"}}/>
+                        </div>
+                      )}
+                    </div>
+                    <button onClick={exportFinanceCsv}
+                      style={{display:"flex",alignItems:"center",gap:5,background:ui.text,color:"#fff",border:"none",padding:"8px 14px",cursor:"pointer",fontFamily:ui.fontBody,fontSize:12,borderRadius:6}}>
+                      تصدير CSV
+                    </button>
+                    <button onClick={exportFinancePdf}
+                      style={{display:"flex",alignItems:"center",gap:5,background:ui.cardBg,color:ui.text,border:ui.border,padding:"8px 14px",cursor:"pointer",fontFamily:ui.fontBody,fontSize:12,borderRadius:6}}>
+                      PDF / طباعة
+                    </button>
+                  </div>
+
+                  {/* 6 KPI cards */}
+                  <div style={{display:"grid",gridTemplateColumns:mob?"1fr 1fr":"repeat(3,1fr) ",gap:10,marginBottom:12}}>
+                    {kpis.map((k,i) => {
+                      const ch = k.change;
+                      const showChange = ch !== undefined && ch !== null;
+                      // For "inverted" KPIs (cogs/expenses), a rise is bad → red
+                      const isGood = k.inverted ? (ch < 0) : (ch > 0);
+                      return (
+                        <div key={i} style={{background:ui.cardBg,border:ui.border,borderRadius:ui.radius,padding:"14px 16px",borderTop:`3px solid ${k.accent}`}}>
+                          <div style={{fontSize:11.5,color:ui.textSub,fontFamily:ui.fontBody,marginBottom:6}}>{k.l}</div>
+                          <div style={{fontSize:mob?18:22,color:ui.text,fontFamily:ui.fontHead,fontWeight:500,lineHeight:1.1}}>
+                            {k.v}{!k.isPct && <span style={{fontSize:11.5,color:ui.textSub,marginInlineStart:5,fontFamily:ui.fontBody}}>ج</span>}
+                          </div>
+                          {showChange && (
+                            <div style={{display:"flex",alignItems:"center",gap:4,marginTop:5,fontSize:11,fontFamily:ui.fontBody,
+                              color: ch === 0 ? ui.textSub : (isGood ? "#16A34A" : "#DC2626")}}>
+                              {ch !== 0 && <AdmIcon name={ch > 0 ? "arrow-up" : "arrow-down"} size={11}/>}
+                              <span>{Math.abs(ch)}{k.isPct ? " نقطة" : "%"} مقارنة بالفترة السابقة</span>
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+
+                  {/* Charts: revenue vs expenses (bars) + net profit (line) */}
+                  <div style={{display:"grid",gridTemplateColumns:mob?"1fr":"1fr 1fr",gap:10,marginBottom:12}}>
+                    {/* Bar chart */}
+                    <div style={{background:ui.cardBg,border:ui.border,borderRadius:ui.radius,padding:"14px 16px"}}>
+                      <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:10}}>
+                        <h3 style={{fontSize:13,fontWeight:500,color:ui.text,margin:0,fontFamily:ui.fontBody}}>الإيرادات مقابل المصروفات (شهرياً)</h3>
+                        <div style={{display:"flex",gap:10,fontSize:10.5,fontFamily:ui.fontBody}}>
+                          <span style={{display:"flex",alignItems:"center",gap:4,color:ui.textSub}}>
+                            <span style={{width:8,height:8,background:"#16A34A",borderRadius:2}}/>إيرادات
+                          </span>
+                          <span style={{display:"flex",alignItems:"center",gap:4,color:ui.textSub}}>
+                            <span style={{width:8,height:8,background:"#EC4899",borderRadius:2}}/>مصروفات
+                          </span>
+                        </div>
+                      </div>
+                      <div style={{display:"flex",alignItems:"flex-end",gap:6,height:140,paddingTop:8,direction:"ltr"}}>
+                        {finChart.map((m,i) => {
+                          const hR = Math.max(2, Math.round(((Number(m.revenue) ||0)/chartMax)*100));
+                          const hE = Math.max(2, Math.round(((Number(m.expenses)||0)/chartMax)*100));
+                          return (
+                            <div key={i} style={{flex:1,display:"flex",flexDirection:"column",alignItems:"center",gap:5}}>
+                              <div style={{display:"flex",alignItems:"flex-end",gap:2,width:"100%",height:"90%",justifyContent:"center"}}>
+                                <div title={`إيرادات: ${fmt(m.revenue)} ج`}
+                                  style={{flex:1,maxWidth:14,background:"#16A34A",height:`${hR}%`,borderRadius:"2px 2px 0 0"}}/>
+                                <div title={`مصروفات: ${fmt(m.expenses)} ج`}
+                                  style={{flex:1,maxWidth:14,background:"#EC4899",height:`${hE}%`,borderRadius:"2px 2px 0 0"}}/>
+                              </div>
+                              {finChart.length <= 12 && <span style={{fontSize:9.5,color:ui.textSub,fontFamily:ui.fontBody,whiteSpace:"nowrap"}}>{m.label}</span>}
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+
+                    {/* Line chart for net profit (SVG) */}
+                    <div style={{background:ui.cardBg,border:ui.border,borderRadius:ui.radius,padding:"14px 16px"}}>
+                      <h3 style={{fontSize:13,fontWeight:500,color:ui.text,margin:"0 0 10px",fontFamily:ui.fontBody}}>صافي الربح الشهري</h3>
+                      <div style={{height:140,direction:"ltr",position:"relative"}}>
+                        {finChart.length > 1 ? (
+                          <svg viewBox="0 0 100 100" preserveAspectRatio="none" style={{width:"100%",height:"100%"}}>
+                            <line x1="0" y1="50" x2="100" y2="50" stroke="#E5E5E5" strokeWidth="0.3" strokeDasharray="1,1"/>
+                            <polyline fill="none" stroke="#534AB7" strokeWidth="0.8"
+                              points={finChart.map((m,i) => {
+                                const x = (i / (finChart.length - 1)) * 100;
+                                const y = 50 - ((Number(m.net)||0) / netMax) * 45;
+                                return `${x.toFixed(2)},${y.toFixed(2)}`;
+                              }).join(" ")}/>
+                            {finChart.map((m,i) => {
+                              const x = (i / (finChart.length - 1)) * 100;
+                              const y = 50 - ((Number(m.net)||0) / netMax) * 45;
+                              return <circle key={i} cx={x} cy={y} r="1.2" fill="#534AB7">
+                                <title>{`${m.label}: ${fmt(m.net)} ج`}</title>
+                              </circle>;
+                            })}
+                          </svg>
+                        ) : (
+                          <div style={{display:"flex",alignItems:"center",justifyContent:"center",height:"100%",color:ui.textSub,fontSize:12.5,fontFamily:ui.fontBody}}>
+                            تحتاج شهرين على الأقل لرسم الاتجاه
+                          </div>
+                        )}
+                      </div>
+                      <div style={{display:"flex",justifyContent:"space-between",fontSize:10,color:ui.textSub,fontFamily:ui.fontBody,marginTop:6,direction:"ltr"}}>
+                        {finChart.length > 0 && <span>{finChart[0].label}</span>}
+                        {finChart.length > 1 && <span>{finChart[finChart.length-1].label}</span>}
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Expense breakdown */}
+                  <div style={{background:ui.cardBg,border:ui.border,borderRadius:ui.radius,marginBottom:12,overflow:"hidden"}}>
+                    <div style={{padding:"12px 14px",borderBottom:"0.5px solid #EEE",fontSize:13,fontWeight:600,color:ui.text,fontFamily:ui.fontBody}}>
+                      تفصيل المصروفات حسب الفئة
+                    </div>
+                    <div style={{overflowX:"auto"}}>
+                      <table style={{width:"100%",borderCollapse:"collapse",direction:"rtl",fontFamily:ui.fontBody,minWidth:560}}>
+                        <thead>
+                          <tr style={{background:ui.sideBg,borderBottom:`0.5px solid #E5E5E5`}}>
+                            {["الفئة","المبلغ","% من الإيرادات","مقارنة بالفترة السابقة"].map(h=>(
+                              <th key={h} style={{padding:"10px 12px",textAlign:"right",fontSize:11.5,color:ui.textSub,fontWeight:500,whiteSpace:"nowrap"}}>{h}</th>
+                            ))}
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {finExpBreakdown.rows.length === 0 ? (
+                            <tr><td colSpan={4} style={{padding:"20px",textAlign:"center",color:ui.textSub,fontSize:12.5}}>لا توجد مصروفات في النطاق المحدد</td></tr>
+                          ) : finExpBreakdown.rows.map(r => (
+                            <tr key={r.category} style={{borderTop:"0.5px solid #EEE"}}>
+                              <td style={{padding:"10px 12px",fontSize:13,color:ui.text,fontFamily:ui.fontBody}}>
+                                <span style={{display:"inline-flex",alignItems:"center",gap:8}}>
+                                  <span style={{width:8,height:8,borderRadius:"50%",background: catColor(r.category)}}/>
+                                  {catLabel(r.category)}
+                                </span>
+                              </td>
+                              <td style={{padding:"10px 12px",fontSize:13,color:ui.text,fontWeight:500,whiteSpace:"nowrap"}}>{fmt(r.amount)} ج</td>
+                              <td style={{padding:"10px 12px",fontSize:12.5,color:ui.textSub,whiteSpace:"nowrap"}}>{r.pct_of_revenue}%</td>
+                              <td style={{padding:"10px 12px",fontSize:11.5,whiteSpace:"nowrap",
+                                color: r.change_pct == null ? ui.textSub : r.change_pct > 0 ? "#DC2626" : r.change_pct < 0 ? "#16A34A" : ui.textSub}}>
+                                {r.change_pct == null ? "—" : `${r.change_pct > 0 ? "+" : ""}${r.change_pct}%`}
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+
+                  {/* Best-selling products */}
+                  <div style={{background:ui.cardBg,border:ui.border,borderRadius:ui.radius,marginBottom:12,overflow:"hidden"}}>
+                    <div style={{padding:"12px 14px",borderBottom:"0.5px solid #EEE",fontSize:13,fontWeight:600,color:ui.text,fontFamily:ui.fontBody}}>
+                      أفضل المنتجات أداءً (Top 5)
+                    </div>
+                    <div style={{overflowX:"auto"}}>
+                      <table style={{width:"100%",borderCollapse:"collapse",direction:"rtl",fontFamily:ui.fontBody,minWidth:560}}>
+                        <thead>
+                          <tr style={{background:ui.sideBg,borderBottom:`0.5px solid #E5E5E5`}}>
+                            {["المنتج","المبيعات","الإيراد","هامش الربح %"].map(h=>(
+                              <th key={h} style={{padding:"10px 12px",textAlign:"right",fontSize:11.5,color:ui.textSub,fontWeight:500,whiteSpace:"nowrap"}}>{h}</th>
+                            ))}
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {(s.top_products || []).length === 0 ? (
+                            <tr><td colSpan={4} style={{padding:"20px",textAlign:"center",color:ui.textSub,fontSize:12.5}}>لا توجد طلبات في النطاق</td></tr>
+                          ) : (s.top_products || []).map((p,i) => (
+                            <tr key={i} style={{borderTop:"0.5px solid #EEE"}}>
+                              <td style={{padding:"10px 12px",fontSize:13,color:ui.text,fontWeight:500,fontFamily:ui.fontBody}}>{p.name}</td>
+                              <td style={{padding:"10px 12px",fontSize:12.5,color:ui.textSub}}>{p.qty} قطعة</td>
+                              <td style={{padding:"10px 12px",fontSize:13,color:ui.text,whiteSpace:"nowrap"}}>{fmt(p.revenue)} ج</td>
+                              <td style={{padding:"10px 12px",fontSize:12.5,fontWeight:500,
+                                color: p.margin_pct > 30 ? "#16A34A" : p.margin_pct > 10 ? "#F97316" : "#DC2626"}}>
+                                {p.margin_pct}%
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+
+                  {/* Forecast */}
+                  <div style={{background: "linear-gradient(135deg,#FAF7F2,#F0EBE3)",border:ui.border,borderRadius:ui.radius,padding:"16px 18px"}}>
+                    <div style={{fontSize:11.5,color:ui.textSub,fontFamily:ui.fontBody,marginBottom:6,letterSpacing:".04em"}}>توقع</div>
+                    <div style={{display:"flex",alignItems:"baseline",justifyContent:"space-between",flexWrap:"wrap",gap:10}}>
+                      <div>
+                        <div style={{fontSize:14,color:ui.text,fontWeight:600,fontFamily:ui.fontBody,marginBottom:6}}>صافي ربح الشهر القادم (متوقع)</div>
+                        <div style={{fontSize:24,color: forecast >= 0 ? "#16A34A" : "#DC2626", fontFamily:ui.fontHead, fontWeight:600}}>
+                          {forecast.toLocaleString()} <span style={{fontSize:13,color:ui.textSub,fontFamily:ui.fontBody}}>ج</span>
+                        </div>
+                      </div>
+                      <div style={{fontSize:11.5,color:ui.textSub,fontFamily:ui.fontBody,maxWidth:260,lineHeight:1.7}}>
+                        محسوب من متوسط صافي الربح في آخر {last3.length || 0} {last3.length === 1 ? "شهر" : "أشهر"} من البيانات الفعلية.
+                      </div>
+                    </div>
+                  </div>
+                </div>
               </div>
             );
           })()}
