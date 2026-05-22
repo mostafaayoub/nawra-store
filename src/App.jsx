@@ -1279,14 +1279,35 @@ function AdminDash({ go }) {
 
   // ── Messages inbox ─────────────────────────────────────────────────────────
   const [messages, setMessages] = useState([]);
+  // Local-only set of message ids that have been actioned (approved/rejected)
+  // and should disappear from the inbox immediately. We don't rely on the
+  // server removing them — the inbox is the actor's queue, not the audit log.
+  const [removedMsgIds, setRemovedMsgIds] = useState({}); // { [id]: 'fading' | 'gone' }
   const [inboxOpen, setInboxOpen] = useState(false);
   const [rejectionFor, setRejectionFor] = useState(null); // { msgId, approvalId, label, note }
   const myInboxAddr = (authUser && authUser.email) || activeRole;
 
+  // Visible inbox = server messages minus anything we've optimistically removed.
+  // 'fading' rows stay rendered for ~200ms so the animation plays; 'gone' rows
+  // are filtered out completely.
+  const visibleMessages = messages.filter(m => removedMsgIds[m.id] !== 'gone');
+  const unreadCount = visibleMessages.filter(m => !m.read_at && removedMsgIds[m.id] !== 'fading').length;
+
   const refreshMessages = async () => {
     try {
       const r = await fetch(`/api/messages?to=${encodeURIComponent(myInboxAddr)}`);
-      if (r.ok) setMessages(await r.json());
+      if (r.ok) {
+        const fresh = await r.json();
+        setMessages(fresh);
+        // Drop any "gone" entries the server has now actually dropped on its
+        // side too, so the map doesn't grow unbounded.
+        setRemovedMsgIds(prev => {
+          const freshIds = new Set(fresh.map(m => m.id));
+          const next = {};
+          Object.keys(prev).forEach(id => { if (freshIds.has(id)) next[id] = prev[id]; });
+          return next;
+        });
+      }
     } catch {}
   };
   // Poll the inbox every 10 seconds — works on every admin tab.
@@ -1305,7 +1326,38 @@ function AdminDash({ go }) {
     setMessages(prev => prev.map(m => m.read_at ? m : { ...m, read_at: new Date().toISOString() }));
     try { await fetch(`/api/messages/read-all`, { method:"PATCH", headers:{"Content-Type":"application/json"}, body: JSON.stringify({ to: myInboxAddr }) }); } catch {}
   };
-  const unreadCount = messages.filter(m => !m.read_at).length;
+
+  // Optimistically remove a message from the inbox (with fade-out), then call
+  // the approval API. On failure, restore the row.
+  const actionMessage = async (msgId, approvalId, status, note = "") => {
+    // Phase 1: trigger fade — buttons disappear, opacity drops
+    setRemovedMsgIds(prev => ({ ...prev, [msgId]: 'fading' }));
+    // Mark read on the server in parallel (best-effort)
+    fetch(`/api/messages/${msgId}/read`, { method:"PATCH" }).catch(()=>{});
+    // Phase 2: after 200ms, fully hide
+    setTimeout(() => {
+      setRemovedMsgIds(prev => ({ ...prev, [msgId]: 'gone' }));
+    }, 200);
+    try {
+      const r = await fetch(`/api/approvals/${approvalId}`, {
+        method:"PATCH", headers:{"Content-Type":"application/json"},
+        body: JSON.stringify({ status, resolution_note: note })
+      });
+      if (!r.ok) throw new Error('approval failed');
+      // success — refresh related stores so the user sees fresh data
+      refreshApprovals(); refreshProducts({ allowImport: false }); refreshMessages();
+      setSavedToast(status === 'approved' ? 'تمت الموافقة' : 'تم الرفض');
+      setTimeout(()=>setSavedToast(''), 2000);
+    } catch {
+      // Rollback the optimistic removal
+      setRemovedMsgIds(prev => {
+        const next = { ...prev };
+        delete next[msgId];
+        return next;
+      });
+      alert('فشل تنفيذ الإجراء — تم إعادة الرسالة للصندوق');
+    }
+  };
   // Overview poller — every 10s — fans out to orders / users / products / approvals
   useEffect(() => {
     if (tab !== "overview") return;
@@ -1587,6 +1639,7 @@ function AdminDash({ go }) {
     store_open: true,
     registration_enabled: true,
     guest_checkout: true,
+    monthly_target: 0,
   };
   const DEFAULT_ACCOUNT = {
     admin_name: "Super Admin",
@@ -1649,6 +1702,8 @@ function AdminDash({ go }) {
   };
   useEffect(() => {
     if (tab === "shipping") loadSetting("shipping", DEFAULT_SHIPPING, setShipping);
+    // Overview needs the store config so the "هدف الشهر" card knows its target.
+    if (tab === "overview") loadSetting("store", DEFAULT_STORE, setStoreCfg);
     if (tab === "settings") {
       loadSetting("payment",       DEFAULT_PAYMENT,       setPayment);
       loadSetting("seo",           DEFAULT_SEO,           setSeoCfg);
@@ -2200,7 +2255,15 @@ function AdminDash({ go }) {
   };
 
   // ── Overview tab content ───────────────────────────────────────────────────
-  const Overview = () => (
+  const Overview = () => {
+    // Monthly target gauge — only shown when the super-admin has set a target > 0
+    const target = Number(storeCfg.monthly_target) || 0;
+    const pct       = target > 0 ? Math.min(100, Math.round((salesThisMonth / target) * 100)) : 0;
+    const remaining = Math.max(0, target - salesThisMonth);
+    const dashOffset = 251.2 * (1 - pct / 100); // circumference 2πr (r=40) ≈ 251.2
+    const gaugeColor = pct >= 100 ? "#16A34A" : pct >= 75 ? "#3B82F6" : pct >= 50 ? "#F59E0B" : "#DC2626";
+
+    return (
     <div>
       {/* 4 Metric cards */}
       <div style={{display:"grid",gridTemplateColumns:mob?"1fr 1fr":"repeat(4,1fr)",gap:10,marginBottom:14}}>
@@ -2209,6 +2272,64 @@ function AdminDash({ go }) {
         <Metric label="العملاء"          value={allUsers.length} hint={newCustomersThisMonth ? `${newCustomersThisMonth} جدد` : "—"} />
         <Metric label="متوسط قيمة الطلب" value={Math.round(avgThis).toLocaleString()} suffix="ج" changePct={avgChangePct} hint="عن الشهر السابق" />
       </div>
+
+      {/* Monthly target gauge — only when configured */}
+      {target > 0 && (
+        <div style={{background:ui.cardBg,border:ui.border,borderRadius:ui.radius,padding:"16px 18px",marginBottom:14,
+          display:"grid",gridTemplateColumns:mob?"1fr":"auto 1fr",gap:mob?14:24,alignItems:"center"}}>
+          {/* SVG circular gauge */}
+          <div style={{position:"relative",width:120,height:120,direction:"ltr",margin:mob?"0 auto":0}}>
+            <svg width="120" height="120" viewBox="0 0 120 120">
+              <circle cx="60" cy="60" r="40" fill="none" stroke="#F3F4F6" strokeWidth="10"/>
+              <circle cx="60" cy="60" r="40" fill="none" stroke={gaugeColor} strokeWidth="10"
+                strokeDasharray="251.2" strokeDashoffset={dashOffset}
+                strokeLinecap="round" transform="rotate(-90 60 60)"
+                style={{transition: "stroke-dashoffset .8s ease, stroke .3s"}}/>
+              <text x="60" y="60" textAnchor="middle" dominantBaseline="central"
+                style={{fontFamily:ui.fontHead, fontSize:24, fontWeight:600, fill:ui.text}}>
+                {pct}%
+              </text>
+              <text x="60" y="82" textAnchor="middle" dominantBaseline="central"
+                style={{fontFamily:ui.fontBody, fontSize:10, fill:ui.textSub}}>
+                من الهدف
+              </text>
+            </svg>
+          </div>
+          <div>
+            <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:10,flexWrap:"wrap",gap:6}}>
+              <h3 style={{fontSize:14,fontWeight:600,color:ui.text,margin:0,fontFamily:ui.fontBody}}>هدف الشهر</h3>
+              <span style={{fontSize:11,color:ui.textSub,fontFamily:ui.fontBody}}>{monthLabel}</span>
+            </div>
+            <div style={{display:"grid",gridTemplateColumns:mob?"1fr":"repeat(3,1fr)",gap:14}}>
+              <div>
+                <div style={{fontSize:10.5,color:ui.textSub,fontFamily:ui.fontBody,marginBottom:3}}>المبيعات الفعلية</div>
+                <div style={{fontSize:16,color:ui.text,fontFamily:ui.fontHead,fontWeight:500}}>
+                  {salesThisMonth.toLocaleString()} <span style={{fontSize:11,color:ui.textSub,fontFamily:ui.fontBody}}>ج</span>
+                </div>
+              </div>
+              <div>
+                <div style={{fontSize:10.5,color:ui.textSub,fontFamily:ui.fontBody,marginBottom:3}}>الهدف</div>
+                <div style={{fontSize:16,color:ui.text,fontFamily:ui.fontHead,fontWeight:500}}>
+                  {target.toLocaleString()} <span style={{fontSize:11,color:ui.textSub,fontFamily:ui.fontBody}}>ج</span>
+                </div>
+              </div>
+              <div>
+                <div style={{fontSize:10.5,color:ui.textSub,fontFamily:ui.fontBody,marginBottom:3}}>
+                  {pct >= 100 ? "تجاوز" : "المتبقي"}
+                </div>
+                <div style={{fontSize:16, color: pct >= 100 ? "#16A34A" : "#DC2626", fontFamily:ui.fontHead,fontWeight:500}}>
+                  {(pct >= 100 ? salesThisMonth - target : remaining).toLocaleString()}
+                  <span style={{fontSize:11,color:ui.textSub,fontFamily:ui.fontBody,marginInlineStart:4}}>ج</span>
+                </div>
+              </div>
+            </div>
+            {/* Linear bar under the kpis for at-a-glance scanning */}
+            <div style={{marginTop:12,height:6,background:"#F3F4F6",borderRadius:3,overflow:"hidden"}}>
+              <div style={{width: `${pct}%`, height:"100%", background: gaugeColor, transition:"width .8s ease, background .3s"}}/>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Row: bar chart + latest orders */}
       <div style={{display:"grid",gridTemplateColumns:mob?"1fr":"1fr 1fr",gap:10,marginBottom:10}}>
@@ -2308,7 +2429,8 @@ function AdminDash({ go }) {
         ))}
       </div>
     </div>
-  );
+    );
+  };
 
   // ── Placeholder tab for future features ────────────────────────────────────
   const Placeholder = ({ icon, title, body }) => (
@@ -2400,7 +2522,7 @@ function AdminDash({ go }) {
                   <div>
                     <div style={{fontSize:14.5,fontWeight:600,color:ui.text,fontFamily:ui.fontBody}}>صندوق الرسائل</div>
                     <div style={{fontSize:11,color:ui.textSub,fontFamily:ui.fontBody,marginTop:2}}>
-                      {messages.length} رسالة · {unreadCount} غير مقروءة
+                      {visibleMessages.length} رسالة · {unreadCount} غير مقروءة
                     </div>
                   </div>
                   <div style={{display:"flex",gap:6}}>
@@ -2414,22 +2536,32 @@ function AdminDash({ go }) {
                   </div>
                 </header>
                 <div style={{flex:1,overflowY:"auto"}}>
-                  {messages.length === 0 ? (
+                  {visibleMessages.length === 0 ? (
                     <div style={{padding:"40px 20px",textAlign:"center",color:ui.textSub,fontFamily:ui.fontBody,fontSize:13}}>
                       لا توجد رسائل
                     </div>
-                  ) : messages.map(m => {
+                  ) : visibleMessages.map(m => {
                     const isReq = m.type === 'request';
                     const isApp = m.type === 'approval';
                     const isRej = m.type === 'rejection';
                     const accent = isReq ? "#F59E0B" : isApp ? "#16A34A" : isRej ? "#DC2626" : ui.textSub;
-                    const needsAction = isReq && m.metadata && m.metadata.requires_action && m.metadata.approval_id && isSuper;
+                    // Actioned messages skip the "needs action" UI even if
+                    // they still have requires_action in their metadata.
+                    const actioned   = removedMsgIds[m.id] === 'fading';
+                    const needsAction = !actioned && isReq && m.metadata && m.metadata.requires_action && m.metadata.approval_id && isSuper;
                     return (
                       <article key={m.id}
-                        onClick={()=>!m.read_at && markMessageRead(m.id)}
+                        onClick={()=>!m.read_at && !actioned && markMessageRead(m.id)}
                         style={{padding:"12px 16px",borderBottom:`0.5px solid #EEE`,
                           background: m.read_at ? "transparent" : "#FFFBEA",
-                          cursor: m.read_at ? "default" : "pointer", borderInlineStart:`3px solid ${accent}`}}>
+                          cursor: m.read_at || actioned ? "default" : "pointer",
+                          borderInlineStart:`3px solid ${accent}`,
+                          opacity: actioned ? 0 : 1,
+                          maxHeight: actioned ? 0 : 600,
+                          paddingTop: actioned ? 0 : 12,
+                          paddingBottom: actioned ? 0 : 12,
+                          overflow: "hidden",
+                          transition: "opacity .2s ease, max-height .2s ease, padding .2s ease"}}>
                         <div style={{display:"flex",justifyContent:"space-between",alignItems:"baseline",gap:8,marginBottom:4}}>
                           <div style={{fontSize:13,fontWeight:600,color:ui.text,fontFamily:ui.fontBody,flex:1,minWidth:0}}>{m.subject || "—"}</div>
                           <div style={{fontSize:10.5,color:ui.textSub,fontFamily:ui.fontBody,whiteSpace:"nowrap"}}>
@@ -2454,10 +2586,9 @@ function AdminDash({ go }) {
                         )}
                         {needsAction && (
                           <div style={{display:"flex",gap:6,marginTop:10}}>
-                            <button onClick={async (e)=>{
+                            <button onClick={(e)=>{
                               e.stopPropagation();
-                              await resolveApproval(m.metadata.approval_id, "approved");
-                              markMessageRead(m.id);
+                              actionMessage(m.id, m.metadata.approval_id, "approved");
                             }}
                               style={{background:"#DCFCE7",border:"0.5px solid #86EFAC",padding:"5px 12px",cursor:"pointer",fontSize:11.5,fontFamily:ui.fontBody,color:"#15803D",borderRadius:5}}>
                               ✓ موافقة
@@ -2504,9 +2635,9 @@ function AdminDash({ go }) {
                     style={{padding:"8px 16px",background:"transparent",border:ui.border,borderRadius:6,fontSize:12.5,color:ui.textSub,fontFamily:ui.fontBody,cursor:"pointer"}}>إلغاء</button>
                   <button
                     disabled={(rejectionFor.note || "").trim().length < 3}
-                    onClick={async () => {
-                      await resolveApproval(rejectionFor.approvalId, "rejected", rejectionFor.note.trim());
-                      if (rejectionFor.msgId) markMessageRead(rejectionFor.msgId);
+                    onClick={() => {
+                      // Optimistic remove with rollback — same as موافقة flow
+                      actionMessage(rejectionFor.msgId, rejectionFor.approvalId, "rejected", rejectionFor.note.trim());
                       setRejectionFor(null);
                     }}
                     style={{padding:"8px 18px",background: (rejectionFor.note||"").trim().length >= 3 ? "#DC2626" : "#9CA3AF",color:"#fff",border:"none",borderRadius:6,fontSize:12.5,fontFamily:ui.fontBody,cursor:(rejectionFor.note||"").trim().length >= 3 ? "pointer" : "not-allowed"}}>
@@ -4559,6 +4690,30 @@ function AdminDash({ go }) {
                               value={storeCfg.brand_accent} onChange={e=>setStoreCfg({...storeCfg, brand_accent:e.target.value})}/>
                           </div>
                         </div>
+                      </div>
+                    </div>
+
+                    <div style={sectionCard}>
+                      <div style={sectionTitle}>هدف المبيعات الشهري</div>
+                      <div style={{fontSize:11.5,color:ui.textSub,fontFamily:ui.fontBody,marginBottom:12,padding:"8px 12px",background:"#FAFAFA",borderRadius:6}}>
+                        🎯 يظهر تقدم الشهر على بطاقة "هدف الشهر" في صفحة "نظرة عامة". يتحكم فيه <strong>Super Admin</strong> فقط.
+                      </div>
+                      <label style={{display:"block",fontSize:12,color:ui.text,fontFamily:ui.fontBody,marginBottom:5}}>الهدف (جنيه)</label>
+                      <div style={{display:"grid",gridTemplateColumns:mob?"1fr":"1fr auto",gap:10,alignItems:"end"}}>
+                        <input type="text" inputMode="numeric" pattern="[0-9]*"
+                          key={`mtgt-${storeCfg.monthly_target}`}
+                          defaultValue={String(storeCfg.monthly_target ?? 0)}
+                          onBlur={e=>{
+                            const v = Math.max(0, parseInt(e.target.value.replace(/[^0-9]/g,""), 10) || 0);
+                            setStoreCfg({...storeCfg, monthly_target: v});
+                          }}
+                          placeholder="مثال: 50000"
+                          style={{padding:"10px 14px",border:ui.border,borderRadius:6,background:ui.cardBg,fontFamily:ui.fontBody,fontSize:14,color:ui.text,outline:"none",width:"100%",direction:"ltr",textAlign:"left",boxSizing:"border-box"}}/>
+                        <button onClick={()=>saveSetting("store", storeCfg)}
+                          style={{background:ui.text,color:"#fff",border:"none",padding:"10px 22px",cursor:"pointer",fontSize:13,borderRadius:6,fontFamily:ui.fontBody,fontWeight:500}}>حفظ</button>
+                      </div>
+                      <div style={{fontSize:11,color:ui.textSub,fontFamily:ui.fontBody,marginTop:8}}>
+                        اتركها 0 لإخفاء البطاقة من صفحة "نظرة عامة".
                       </div>
                     </div>
 
