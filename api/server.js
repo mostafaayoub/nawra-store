@@ -132,6 +132,24 @@ db.exec(`
 `);
 
 db.exec(`
+  CREATE TABLE IF NOT EXISTS stock_movements (
+    id                       TEXT PRIMARY KEY,
+    product_id               TEXT NOT NULL,
+    product_name             TEXT,
+    type                     TEXT NOT NULL,
+    quantity_delta           INTEGER NOT NULL DEFAULT 0,
+    balance_after_available  INTEGER,
+    balance_after_reserved   INTEGER,
+    balance_after_damaged    INTEGER,
+    reason                   TEXT,
+    reference                TEXT,
+    unit_cost                REAL DEFAULT 0,
+    user_id                  TEXT,
+    user_name                TEXT,
+    created_at               DATETIME DEFAULT CURRENT_TIMESTAMP
+  )
+`);
+db.exec(`
   CREATE TABLE IF NOT EXISTS messages (
     id            TEXT PRIMARY KEY,
     from_user_id  TEXT,
@@ -449,6 +467,30 @@ function findProductForItem(item) {
 }
 const SUPER_ADMIN_FALLBACK = 'nawraskincare@gmail.com';
 
+// Append a single movement row. The caller passes the *post-event* balances so
+// the history is fully self-describing without needing to replay earlier rows.
+// All stock mutations on the products table also go through here.
+function recordMovement({
+  product_id, product_name, type, quantity_delta,
+  balance_after_available, balance_after_reserved, balance_after_damaged,
+  reason, reference, unit_cost, user_id, user_name
+}) {
+  const id = `mv_${Date.now().toString(36)}_${Math.random().toString(36).slice(2,5)}`;
+  db.prepare(`
+    INSERT INTO stock_movements
+      (id, product_id, product_name, type, quantity_delta,
+       balance_after_available, balance_after_reserved, balance_after_damaged,
+       reason, reference, unit_cost, user_id, user_name)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+  `).run(
+    id, String(product_id), product_name || null, type, Number(quantity_delta) || 0,
+    balance_after_available ?? null, balance_after_reserved ?? null, balance_after_damaged ?? null,
+    reason || null, reference || null, Number(unit_cost) || 0,
+    user_id || null, user_name || null
+  );
+  return id;
+}
+
 // Reserve stock when an order is placed: available -=, reserved +=.
 // Idempotent via orders.stock_applied flag.
 function reserveStockForOrder(order, items) {
@@ -459,8 +501,17 @@ function reserveStockForOrder(order, items) {
     const p = findProductForItem(it);
     if (!p) return;
     const newAvail = Math.max(0, (p.stock || 0) - qty);
-    db.prepare('UPDATE products SET stock = ?, stock_reserved = COALESCE(stock_reserved,0) + ? WHERE id = ?')
-      .run(newAvail, qty, p.id);
+    const newRes   = (p.stock_reserved || 0) + qty;
+    db.prepare('UPDATE products SET stock = ?, stock_reserved = ? WHERE id = ?').run(newAvail, newRes, p.id);
+    recordMovement({
+      product_id: p.id, product_name: p.name,
+      type: 'customer_order', quantity_delta: -qty,
+      balance_after_available: newAvail,
+      balance_after_reserved:  newRes,
+      balance_after_damaged:   p.stock_damaged || 0,
+      reason: '\u062d\u062c\u0632 \u0644\u0637\u0644\u0628 \u0639\u0645\u064a\u0644', reference: String(order.id),
+      user_id: order.userEmail || null, user_name: order.name || null,
+    });
   });
   db.prepare('UPDATE orders SET stock_applied = 1 WHERE id = ?').run(String(order.id));
 }
@@ -476,6 +527,14 @@ function shipStockForOrder(order, items) {
     if (!p) return;
     const newRes = Math.max(0, (p.stock_reserved || 0) - qty);
     db.prepare('UPDATE products SET stock_reserved = ? WHERE id = ?').run(newRes, p.id);
+    recordMovement({
+      product_id: p.id, product_name: p.name,
+      type: 'shipped', quantity_delta: 0,
+      balance_after_available: p.stock || 0,
+      balance_after_reserved:  newRes,
+      balance_after_damaged:   p.stock_damaged || 0,
+      reason: '\u062a\u0645 \u0627\u0644\u0634\u062d\u0646', reference: String(order.id),
+    });
   });
   db.prepare('UPDATE orders SET stock_released = 1 WHERE id = ?').run(String(order.id));
 }
@@ -488,9 +547,17 @@ function cancelStockForOrder(order, items) {
     if (!qty) return;
     const p = findProductForItem(it);
     if (!p) return;
-    const newRes = Math.max(0, (p.stock_reserved || 0) - qty);
-    db.prepare('UPDATE products SET stock = stock + ?, stock_reserved = ? WHERE id = ?')
-      .run(qty, newRes, p.id);
+    const newAvail = (p.stock || 0) + qty;
+    const newRes   = Math.max(0, (p.stock_reserved || 0) - qty);
+    db.prepare('UPDATE products SET stock = ?, stock_reserved = ? WHERE id = ?').run(newAvail, newRes, p.id);
+    recordMovement({
+      product_id: p.id, product_name: p.name,
+      type: 'order_cancelled', quantity_delta: +qty,
+      balance_after_available: newAvail,
+      balance_after_reserved:  newRes,
+      balance_after_damaged:   p.stock_damaged || 0,
+      reason: '\u0625\u0644\u063a\u0627\u0621 \u0637\u0644\u0628', reference: String(order.id),
+    });
   });
   db.prepare('UPDATE orders SET stock_released = 1 WHERE id = ?').run(String(order.id));
 }
@@ -894,9 +961,19 @@ app.patch('/api/returns/:id', (req, res) => {
       const qty = 1; // Returns table doesn't carry qty granularity yet; settle 1 unit per return.
       if (productRow) {
         if (r.inspection_status === 'good') {
-          db.prepare('UPDATE products SET stock = stock + ? WHERE id = ?').run(qty, productRow.id);
+          const newAvail = (productRow.stock || 0) + qty;
+          db.prepare('UPDATE products SET stock = ? WHERE id = ?').run(newAvail, productRow.id);
+          recordMovement({
+            product_id: productRow.id, product_name: productRow.name,
+            type: 'return_good', quantity_delta: +qty,
+            balance_after_available: newAvail,
+            balance_after_reserved:  productRow.stock_reserved || 0,
+            balance_after_damaged:   productRow.stock_damaged || 0,
+            reason: 'مرتجع سليم — رجع للمخزون', reference: String(cur.id),
+          });
         } else {
-          db.prepare('UPDATE products SET stock_damaged = COALESCE(stock_damaged,0) + ? WHERE id = ?').run(qty, productRow.id);
+          const newDam = (productRow.stock_damaged || 0) + qty;
+          db.prepare('UPDATE products SET stock_damaged = ? WHERE id = ?').run(newDam, productRow.id);
           // Auto-expense for damaged unit @ cost
           const unitCost = Number(productRow.cost) || 0;
           if (unitCost > 0) {
@@ -906,6 +983,15 @@ app.patch('/api/returns/:id', (req, res) => {
               VALUES (?, 'general', ?, ?, ?, ?, date('now'), ?)
             `).run(expId, `هالك — ${productRow.name}`, qty, unitCost, unitCost * qty, `مرتجع #${cur.id}`);
           }
+          recordMovement({
+            product_id: productRow.id, product_name: productRow.name,
+            type: 'damaged', quantity_delta: 0,
+            balance_after_available: productRow.stock || 0,
+            balance_after_reserved:  productRow.stock_reserved || 0,
+            balance_after_damaged:   newDam,
+            reason: 'هالك — مرتجع معيب', reference: String(cur.id),
+            unit_cost: Number(productRow.cost) || 0,
+          });
         }
       }
       inspectionApplied = true;
@@ -1150,7 +1236,44 @@ app.patch('/api/approvals/:id', (req, res) => {
         let p = {};
         try { p = JSON.parse(cur.payload || '{}'); } catch {}
         if (Number.isFinite(+p.new_qty)) {
-          try { db.prepare('UPDATE products SET stock = ? WHERE id = ?').run(Math.max(0, +p.new_qty), cur.target_id); } catch {}
+          const productRow = db.prepare('SELECT * FROM products WHERE id = ?').get(cur.target_id);
+          if (productRow) {
+            const newQty = Math.max(0, +p.new_qty);
+            const oldQty = productRow.stock || 0;
+            const delta  = newQty - oldQty;
+            db.prepare('UPDATE products SET stock = ? WHERE id = ?').run(newQty, cur.target_id);
+            recordMovement({
+              product_id: productRow.id, product_name: productRow.name,
+              type: 'stock_take_legacy', quantity_delta: delta,
+              balance_after_available: newQty,
+              balance_after_reserved:  productRow.stock_reserved || 0,
+              balance_after_damaged:   productRow.stock_damaged || 0,
+              reason: cur.reason || 'تعديل كمية', reference: cur.id,
+              user_id: cur.requester_id, user_name: cur.requester_name,
+            });
+          }
+        }
+      }
+      // New movement-based stock out — payload carries { quantity, reason, unit_cost }
+      if (cur.type === 'stock_out_movement' && cur.target_id) {
+        let p = {};
+        try { p = JSON.parse(cur.payload || '{}'); } catch {}
+        const qty = Math.max(0, Number(p.quantity) || 0);
+        const productRow = db.prepare('SELECT * FROM products WHERE id = ?').get(cur.target_id);
+        if (productRow && qty > 0) {
+          const newAvail = Math.max(0, (productRow.stock || 0) - qty);
+          db.prepare('UPDATE products SET stock = ? WHERE id = ?').run(newAvail, productRow.id);
+          recordMovement({
+            product_id: productRow.id, product_name: productRow.name,
+            type: 'out', quantity_delta: -qty,
+            balance_after_available: newAvail,
+            balance_after_reserved:  productRow.stock_reserved || 0,
+            balance_after_damaged:   productRow.stock_damaged || 0,
+            reason: p.reason || cur.reason || 'صرف',
+            reference: cur.id,
+            unit_cost: Number(p.unit_cost) || Number(productRow.cost) || 0,
+            user_id: cur.requester_id, user_name: cur.requester_name,
+          });
         }
       }
     }
@@ -1509,6 +1632,167 @@ app.get('/api/finance/expenses', (req, res) => {
     }).sort((a,b) => b.amount - a.amount);
     res.json({ rows, total: cur.expensesTotal, revenue: cur.revenue });
   } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// ── INVENTORY (current state across all products) ────────────────────────────
+app.get('/api/inventory', (_req, res) => {
+  try {
+    const rows = db.prepare(`
+      SELECT id, name, sku, category, brand, cost, alert_threshold,
+             stock AS available, stock_reserved AS reserved, stock_damaged AS damaged,
+             images, updated_at
+      FROM products ORDER BY name ASC
+    `).all();
+    const out = rows.map(r => {
+      let images = [];
+      try { images = JSON.parse(r.images || '[]'); } catch {}
+      const available = Number(r.available) || 0;
+      const reserved  = Number(r.reserved)  || 0;
+      const damaged   = Number(r.damaged)   || 0;
+      const cost      = Number(r.cost)      || 0;
+      return {
+        ...r, images,
+        available, reserved, damaged,
+        total: available + reserved + damaged,
+        value_at_cost: cost * available,
+      };
+    });
+    res.json(out);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// ── STOCK MOVEMENTS (audit history + new mutation surface) ───────────────────
+app.get('/api/stock-movements', (req, res) => {
+  try {
+    const { product_id, type, from, to } = req.query;
+    let sql = 'SELECT * FROM stock_movements WHERE 1=1';
+    const params = [];
+    if (product_id) { sql += ' AND product_id = ?'; params.push(product_id); }
+    if (type)       { sql += ' AND type = ?';       params.push(type); }
+    if (from)       { sql += ' AND created_at >= ?'; params.push(from); }
+    if (to)         { sql += ' AND created_at <= ?'; params.push(to); }
+    sql += ' ORDER BY created_at DESC LIMIT 500';
+    res.json(db.prepare(sql).all(...params));
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// Stock In — immediate. Adds to available + auto-creates an expense row
+// for the purchase cost so Finance reflects the spend right away.
+app.post('/api/stock-movements/in', (req, res) => {
+  try {
+    const b = req.body || {};
+    if (!b.product_id) return res.status(400).json({ error: 'product_id required' });
+    const qty = Math.max(0, Number(b.quantity) || 0);
+    if (!qty) return res.status(400).json({ error: 'quantity must be > 0' });
+    const product = db.prepare('SELECT * FROM products WHERE id = ?').get(b.product_id);
+    if (!product) return res.status(404).json({ error: 'product not found' });
+    const unitCost = Number(b.unit_cost) || Number(product.cost) || 0;
+
+    const newAvail = (product.stock || 0) + qty;
+    db.prepare('UPDATE products SET stock = ?, cost = COALESCE(NULLIF(?,0), cost) WHERE id = ?')
+      .run(newAvail, unitCost, product.id);
+
+    const mvId = recordMovement({
+      product_id: product.id, product_name: product.name,
+      type: 'in', quantity_delta: +qty,
+      balance_after_available: newAvail,
+      balance_after_reserved:  product.stock_reserved || 0,
+      balance_after_damaged:   product.stock_damaged || 0,
+      reason: b.supplier ? `وارد جديد — مورد: ${b.supplier}` : 'وارد جديد',
+      reference: b.reference || null, unit_cost: unitCost,
+      user_id: b.user_id || null, user_name: b.user_name || null,
+    });
+
+    // Auto-expense: stock purchase cost
+    if (unitCost > 0) {
+      const expId = `ex_${Date.now().toString(36)}_${Math.random().toString(36).slice(2,5)}`;
+      db.prepare(`
+        INSERT INTO expenses (id, category, description, quantity, unit_price, amount, date, notes)
+        VALUES (?, 'general', ?, ?, ?, ?, date('now'), ?)
+      `).run(expId,
+        `وارد — ${product.name}${b.supplier ? ' (' + b.supplier + ')' : ''}`,
+        qty, unitCost, unitCost * qty, b.notes || `حركة #${mvId}`);
+    }
+
+    res.json({ ok: true, movement_id: mvId, available: newAvail });
+  } catch (e) { console.error('POST /api/stock-movements/in', e); res.status(500).json({ error: e.message }); }
+});
+
+// Stock Out — needs super-admin approval. Does NOT touch stock here; just
+// creates an approval request. The PATCH /api/approvals handler applies the
+// movement when status === approved (see stock_out_movement branch above).
+app.post('/api/stock-movements/out', (req, res) => {
+  try {
+    const b = req.body || {};
+    if (!b.product_id) return res.status(400).json({ error: 'product_id required' });
+    const qty = Math.max(0, Number(b.quantity) || 0);
+    if (!qty) return res.status(400).json({ error: 'quantity must be > 0' });
+    const product = db.prepare('SELECT * FROM products WHERE id = ?').get(b.product_id);
+    if (!product) return res.status(404).json({ error: 'product not found' });
+    if (qty > (product.stock || 0))
+      return res.status(400).json({ error: 'الكمية أكبر من المتاح' });
+
+    const apId = `ap_${Date.now().toString(36)}_${Math.random().toString(36).slice(2,5)}`;
+    db.prepare(`
+      INSERT INTO approvals
+        (id, type, target_id, target_label, requester, requester_id, requester_name, payload, reason, status)
+      VALUES (?, 'stock_out_movement', ?, ?, ?, ?, ?, ?, ?, 'pending')
+    `).run(apId, product.id, product.name,
+      b.user_id || null, b.user_id || null, b.user_name || null,
+      JSON.stringify({ quantity: qty, reason: b.reason || '', unit_cost: Number(b.unit_cost) || Number(product.cost) || 0, notes: b.notes || '' }),
+      b.reason || null);
+
+    sendMessage({
+      from_user_id: b.user_id || null,
+      from_user_name: b.user_name || null,
+      to_user_id: SUPER_ADMIN_FALLBACK,
+      type: 'request',
+      subject: `طلب صرف مخزون — ${product.name}`,
+      body: [
+        `المنتج: ${product.name}`,
+        `الكمية: ${qty}`,
+        `السبب: ${b.reason || '—'}`,
+        b.notes ? `ملاحظات: ${b.notes}` : null,
+        b.user_name ? `الطالب: ${b.user_name}` : null,
+      ].filter(Boolean).join('\n'),
+      metadata: { approval_id: apId, approval_type: 'stock_out_movement', target_id: product.id, requires_action: true },
+    });
+    res.json({ ok: true, approval_id: apId, status: 'pending' });
+  } catch (e) { console.error('POST /api/stock-movements/out', e); res.status(500).json({ error: e.message }); }
+});
+
+// Stock Take — bulk update. Body: { counts: [{product_id, counted}, ...] }
+// Records one `stock_take` movement per product that has a non-zero diff and
+// updates stock to the counted value. Immediate.
+app.post('/api/stock-movements/stock-take', (req, res) => {
+  try {
+    const b = req.body || {};
+    const counts = Array.isArray(b.counts) ? b.counts : [];
+    if (!counts.length) return res.status(400).json({ error: 'counts array required' });
+    const results = [];
+    counts.forEach(c => {
+      if (!c.product_id) return;
+      const product = db.prepare('SELECT * FROM products WHERE id = ?').get(c.product_id);
+      if (!product) return;
+      const counted = Math.max(0, Number(c.counted) || 0);
+      const oldQty  = product.stock || 0;
+      const delta   = counted - oldQty;
+      if (delta === 0) return;
+      db.prepare('UPDATE products SET stock = ? WHERE id = ?').run(counted, product.id);
+      const mvId = recordMovement({
+        product_id: product.id, product_name: product.name,
+        type: 'stock_take', quantity_delta: delta,
+        balance_after_available: counted,
+        balance_after_reserved:  product.stock_reserved || 0,
+        balance_after_damaged:   product.stock_damaged || 0,
+        reason: b.reason || 'تعديل جرد',
+        reference: b.reference || null,
+        user_id: b.user_id || null, user_name: b.user_name || null,
+      });
+      results.push({ product_id: product.id, delta, movement_id: mvId });
+    });
+    res.json({ ok: true, applied: results.length, results });
+  } catch (e) { console.error('POST /api/stock-movements/stock-take', e); res.status(500).json({ error: e.message }); }
 });
 
 app.listen(PORT, '127.0.0.1', () =>

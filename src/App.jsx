@@ -1145,6 +1145,119 @@ function AdminDash({ go }) {
   // Shape: { product, fromQty, toQty, reason, onConfirm: () => void }
   const [reduceAsk, setReduceAsk] = useState(null);
 
+  // ── Movement-based inventory state ─────────────────────────────────────────
+  const [invSubTab, setInvSubTab]   = useState("current"); // current | history | alerts
+  const [movements, setMovements]   = useState([]);
+  const [movementFilter, setMovementFilter] = useState({ product_id: "", type: "" });
+  const [stockInOpen,    setStockInOpen]    = useState(false);
+  const [stockOutOpen,   setStockOutOpen]   = useState(false);
+  const [stockTakeOpen,  setStockTakeOpen]  = useState(false);
+  const [stockInForm,    setStockInForm]    = useState({ product_id:"", quantity:"", unit_cost:"", supplier:"", notes:"" });
+  const [stockOutForm,   setStockOutForm]   = useState({ product_id:"", quantity:"", reason:"تالف", notes:"" });
+  const [stockTakeRows,  setStockTakeRows]  = useState({}); // { [product_id]: countedString }
+  const [invBusy, setInvBusy] = useState(false);
+
+  const refreshMovements = async (opts = {}) => {
+    try {
+      const qs = new URLSearchParams();
+      if (opts.product_id || movementFilter.product_id) qs.set("product_id", opts.product_id || movementFilter.product_id);
+      if (opts.type       || movementFilter.type)       qs.set("type",       opts.type       || movementFilter.type);
+      const r = await fetch(`/api/stock-movements?${qs.toString()}`);
+      if (r.ok) setMovements(await r.json());
+    } catch {}
+  };
+  useEffect(() => {
+    if (tab === "inventory") {
+      refreshProducts();
+      if (invSubTab === "history") refreshMovements();
+    }
+  // eslint-disable-next-line
+  }, [tab, invSubTab, movementFilter.product_id, movementFilter.type]);
+
+  const submitStockIn = async () => {
+    if (!stockInForm.product_id || !stockInForm.quantity) return;
+    setInvBusy(true);
+    try {
+      const r = await fetch("/api/stock-movements/in", {
+        method:"POST", headers:{"Content-Type":"application/json"},
+        body: JSON.stringify({
+          product_id: stockInForm.product_id,
+          quantity:   Number(stockInForm.quantity) || 0,
+          unit_cost:  Number(stockInForm.unit_cost) || 0,
+          supplier:   stockInForm.supplier || null,
+          notes:      stockInForm.notes || null,
+          user_id:    (authUser && authUser.email) || activeRole,
+          user_name:  (authUser && authUser.name)  || null,
+        })
+      });
+      if (r.ok) {
+        setStockInOpen(false);
+        setStockInForm({ product_id:"", quantity:"", unit_cost:"", supplier:"", notes:"" });
+        refreshProducts(); refreshMovements();
+        setSavedToast("تم تسجيل الوارد وتحديث المخزون");
+        setTimeout(()=>setSavedToast(""), 2500);
+      }
+    } catch {}
+    setInvBusy(false);
+  };
+
+  const submitStockOut = async () => {
+    if (!stockOutForm.product_id || !stockOutForm.quantity) return;
+    setInvBusy(true);
+    try {
+      const r = await fetch("/api/stock-movements/out", {
+        method:"POST", headers:{"Content-Type":"application/json"},
+        body: JSON.stringify({
+          product_id: stockOutForm.product_id,
+          quantity:   Number(stockOutForm.quantity) || 0,
+          reason:     stockOutForm.reason,
+          notes:      stockOutForm.notes || null,
+          user_id:    (authUser && authUser.email) || activeRole,
+          user_name:  (authUser && authUser.name)  || null,
+        })
+      });
+      if (r.ok) {
+        setStockOutOpen(false);
+        setStockOutForm({ product_id:"", quantity:"", reason:"تالف", notes:"" });
+        refreshApprovals(); refreshMessages();
+        setSavedToast("تم إرسال طلب الصرف لـ Super Admin للموافقة");
+        setTimeout(()=>setSavedToast(""), 3000);
+      } else {
+        const err = await r.json().catch(()=>({}));
+        alert(err.error || "فشل إرسال الطلب");
+      }
+    } catch {}
+    setInvBusy(false);
+  };
+
+  const submitStockTake = async () => {
+    const counts = Object.entries(stockTakeRows)
+      .map(([product_id, counted]) => ({ product_id, counted: Number(counted) || 0 }))
+      .filter(c => Number.isFinite(c.counted));
+    if (!counts.length) return;
+    setInvBusy(true);
+    try {
+      const r = await fetch("/api/stock-movements/stock-take", {
+        method:"POST", headers:{"Content-Type":"application/json"},
+        body: JSON.stringify({
+          counts,
+          reason: "تعديل جرد",
+          user_id:   (authUser && authUser.email) || activeRole,
+          user_name: (authUser && authUser.name)  || null,
+        })
+      });
+      if (r.ok) {
+        const data = await r.json();
+        setStockTakeOpen(false);
+        setStockTakeRows({});
+        refreshProducts(); refreshMovements();
+        setSavedToast(`تم تطبيق الجرد على ${data.applied} منتج`);
+        setTimeout(()=>setSavedToast(""), 3000);
+      }
+    } catch {}
+    setInvBusy(false);
+  };
+
   // ── Active role ────────────────────────────────────────────────────────────
   // Derived strictly from the logged-in user (set by AuthProvider after the
   // /api/auth/login round-trip). No client-side switcher — the role on the
@@ -2957,10 +3070,23 @@ function AdminDash({ go }) {
             );
           })()}
 
-          {/* ─── INVENTORY ───────────────────────────────────────────────── */}
+          {/* ─── INVENTORY — movement-based ─────────────────────────────── */}
           {tab === "inventory" && (() => {
-            // Filter products
-            const filtered = dbProducts.filter(p => {
+            // Aggregates (per product calc — never depends on others' state)
+            const totalProducts = dbProducts.length;
+            const totalAvailable = dbProducts.reduce((s,p)=>s+(p.stock||0), 0);
+            const totalReserved  = dbProducts.reduce((s,p)=>s+(p.stock_reserved||0), 0);
+            const totalDamaged   = dbProducts.reduce((s,p)=>s+(p.stock_damaged||0),  0);
+            const totalCostValue = dbProducts.reduce((s,p)=>s+((Number(p.cost)||0) * (p.stock||0)), 0);
+
+            const stockBadge = (p) => {
+              if ((p.stock||0) <= 0) return { bg:"#FEE2E2", fg:"#B91C1C", l:"نفد" };
+              if ((p.stock||0) <= (p.alert_threshold||0)) return { bg:"#FEF3C7", fg:"#92400E", l:"قارب النفاد" };
+              return { bg:"#DCFCE7", fg:"#15803D", l:"متاح" };
+            };
+            const lowStock = dbProducts.filter(p => (p.stock||0) <= (p.alert_threshold||0));
+
+            const filteredProducts = dbProducts.filter(p => {
               if (invSearch) {
                 const q = invSearch.toLowerCase();
                 if (!(p.name||"").toLowerCase().includes(q)
@@ -2976,359 +3102,475 @@ function AdminDash({ go }) {
               return true;
             });
 
-            // Metrics — from ALL products, not filtered
-            const totalProducts = dbProducts.length;
-            const totalStock    = dbProducts.reduce((s,p)=>s+(p.stock||0),0);
-            const lowCount      = dbProducts.filter(p => (p.stock||0) > 0 && (p.stock||0) <= (p.alert_threshold||0)).length;
-            const outCount      = dbProducts.filter(p => (p.stock||0) <= 0).length;
-
-            const stockBadge = (p) => {
-              if ((p.stock||0) <= 0) return { bg:"#FEE2E2", fg:"#B91C1C", l:"نفد" };
-              if ((p.stock||0) <= (p.alert_threshold||0)) return { bg:"#FEF3C7", fg:"#92400E", l:"قارب النفاد" };
-              return { bg:"#DCFCE7", fg:"#15803D", l:"متاح" };
+            const MOVEMENT_META = {
+              in:               { l:"وارد جديد",       color:"#16A34A", icon:"↓" },
+              out:              { l:"صرف",             color:"#F97316", icon:"↑" },
+              customer_order:   { l:"طلب عميل",        color:"#3B82F6", icon:"⇆" },
+              shipped:          { l:"شحن",             color:"#0EA5E9", icon:"🚚" },
+              order_cancelled:  { l:"إلغاء طلب",       color:"#6B7280", icon:"↩" },
+              return_good:      { l:"مرتجع صالح",      color:"#22C55E", icon:"↩" },
+              damaged:          { l:"هالك",             color:"#DC2626", icon:"⚠" },
+              stock_take:       { l:"جرد",             color:"#6B7280", icon:"≡" },
+              stock_take_legacy:{ l:"تعديل كمية",      color:"#9CA3AF", icon:"≡" },
             };
 
-            // Per-product progress: stock measured against the product's own
-            // alert threshold (×3 for headroom), capped at 100%. NEVER depends
-            // on other products' stock — fixes the bug where increasing one
-            // product appeared to reduce others.
-            const fillPctOf = (p) => {
-              const target = Math.max(1, (Number(p.alert_threshold) || 5) * 3);
-              const pct = Math.round(((Number(p.stock) || 0) / target) * 100);
-              return Math.max(0, Math.min(100, pct));
-            };
-
-            const inputSm = {
-              padding:"6px 10px", border:ui.border, borderRadius:6, background:ui.cardBg,
-              fontFamily:ui.fontBody, fontSize:13, color:ui.text, outline:"none", direction:"rtl"
+            const fmtDate = (s) => {
+              if (!s) return "—";
+              try {
+                const d = new Date(s.replace(" ","T")+"Z");
+                return d.toLocaleDateString("ar-EG", { day:"2-digit", month:"2-digit" }) + " " +
+                       d.toLocaleTimeString("ar-EG", { hour:"2-digit", minute:"2-digit" });
+              } catch { return s; }
             };
 
             return (
               <div>
-                {/* Metric cards */}
-                <div style={{display:"grid",gridTemplateColumns:mob?"1fr 1fr":"repeat(4,1fr)",gap:10,marginBottom:14}}>
-                  <Metric label="إجمالي المنتجات" value={totalProducts} />
-                  <Metric label="المخزون الكلي"   value={totalStock.toLocaleString()} suffix="قطعة" />
-                  <Metric label="قارب على النفاد" value={lowCount} hint={lowCount ? "بحاجة لمراجعة" : "—"} />
-                  <Metric label="نفد من المخزون"  value={outCount} hint={outCount ? "تجديد عاجل" : "—"} />
-                </div>
-
-                {/* Filters */}
-                <div style={{background:ui.cardBg,border:ui.border,borderRadius:ui.radius,padding:"12px 14px",marginBottom:12,
-                  display:"grid",gridTemplateColumns:mob?"1fr":"1fr 180px 180px auto",gap:10,alignItems:"center"}}>
-                  <input type="search" placeholder="ابحث بالاسم أو SKU أو الماركة..."
-                    value={invSearch} onChange={e=>setInvSearch(e.target.value)}
-                    style={{...inputSm, padding:"8px 12px", width:"100%"}}/>
-                  <select value={invStatusFil} onChange={e=>setInvStatusFil(e.target.value)}
-                    style={{...inputSm, padding:"8px 12px", width:"100%"}}>
-                    <option value="all">كل الحالات</option>
-                    <option value="available">متاح</option>
-                    <option value="low">قارب النفاد</option>
-                    <option value="out">نفد</option>
-                  </select>
-                  <select value={invCatFil} onChange={e=>setInvCatFil(e.target.value)}
-                    style={{...inputSm, padding:"8px 12px", width:"100%"}}>
-                    <option value="all">كل الفئات</option>
-                    {PRODUCT_CATEGORIES.map(c=><option key={c} value={c}>{c}</option>)}
-                  </select>
-                  <button onClick={refreshProducts}
-                    style={{display:"flex",alignItems:"center",gap:5,background:ui.cardBg,color:ui.text,
-                      border:ui.border,padding:"8px 14px",cursor:"pointer",fontFamily:ui.fontBody,
-                      fontSize:12,borderRadius:6,justifyContent:"center"}}>
-                    <AdmIcon name="refresh" size={13}/> تحديث
+                {/* Top action bar */}
+                <div style={{display:"grid",gridTemplateColumns:mob?"1fr":"repeat(3,1fr)",gap:10,marginBottom:14}}>
+                  <button onClick={()=>setStockInOpen(true)}
+                    style={{display:"flex",alignItems:"center",justifyContent:"center",gap:8,
+                      background:"#16A34A",color:"#fff",border:"none",padding:"12px",cursor:"pointer",
+                      fontSize:13,fontFamily:ui.fontBody,fontWeight:500,borderRadius:6}}>
+                    <AdmIcon name="plus" size={15}/> وارد جديد
+                  </button>
+                  <button onClick={()=>setStockOutOpen(true)}
+                    style={{display:"flex",alignItems:"center",justifyContent:"center",gap:8,
+                      background:"#F97316",color:"#fff",border:"none",padding:"12px",cursor:"pointer",
+                      fontSize:13,fontFamily:ui.fontBody,fontWeight:500,borderRadius:6}}>
+                    <AdmIcon name="package" size={15}/> صرف / تخفيض
+                  </button>
+                  <button onClick={()=>{
+                      const init = {};
+                      dbProducts.forEach(p => { init[p.id] = String(p.stock || 0); });
+                      setStockTakeRows(init); setStockTakeOpen(true);
+                    }}
+                    style={{display:"flex",alignItems:"center",justifyContent:"center",gap:8,
+                      background:ui.text,color:"#fff",border:"none",padding:"12px",cursor:"pointer",
+                      fontSize:13,fontFamily:ui.fontBody,fontWeight:500,borderRadius:6}}>
+                    <AdmIcon name="chart-bar" size={15}/> جرد المخزون
                   </button>
                 </div>
 
-                {/* Auto-import status banner + manual fallback */}
-                {invImporting && (
-                  <div style={{padding:"10px 14px",borderRadius:6,marginBottom:10,background:"#DBEAFE",color:"#1D4ED8",fontSize:12.5,fontFamily:ui.fontBody,border:"0.5px solid #93C5FD"}}>
-                    جاري استيراد المنتجات الموجودة في المتجر...
+                {/* 5 metric cards */}
+                <div style={{display:"grid",gridTemplateColumns:mob?"1fr 1fr":"repeat(5,1fr)",gap:10,marginBottom:14}}>
+                  <div style={{background:ui.cardBg,border:ui.border,borderRadius:ui.radius,padding:"14px 16px"}}>
+                    <div style={{fontSize:11.5,color:ui.textSub,fontFamily:ui.fontBody,marginBottom:6}}>إجمالي المنتجات</div>
+                    <div style={{fontSize:mob?20:24,color:ui.text,fontFamily:ui.fontHead,fontWeight:500}}>{totalProducts}</div>
                   </div>
-                )}
-                {invNotice && !invImporting && (
-                  <div style={{padding:"10px 14px",borderRadius:6,marginBottom:10,background:"#DCFCE7",color:"#15803D",fontSize:12.5,fontFamily:ui.fontBody,border:"0.5px solid #86EFAC"}}>
-                    {invNotice}
+                  <div style={{background:ui.cardBg,border:ui.border,borderRadius:ui.radius,padding:"14px 16px",borderTop:`3px solid #16A34A`}}>
+                    <div style={{fontSize:11.5,color:ui.textSub,fontFamily:ui.fontBody,marginBottom:6}}>المتاح للبيع</div>
+                    <div style={{fontSize:mob?20:24,color:ui.text,fontFamily:ui.fontHead,fontWeight:500}}>{totalAvailable.toLocaleString()}</div>
                   </div>
-                )}
+                  <div style={{background:ui.cardBg,border:ui.border,borderRadius:ui.radius,padding:"14px 16px",borderTop:`3px solid #F97316`}}>
+                    <div style={{fontSize:11.5,color:ui.textSub,fontFamily:ui.fontBody,marginBottom:6}}>المحجوز للطلبات</div>
+                    <div style={{fontSize:mob?20:24,color:ui.text,fontFamily:ui.fontHead,fontWeight:500}}>{totalReserved.toLocaleString()}</div>
+                  </div>
+                  <div style={{background:ui.cardBg,border:ui.border,borderRadius:ui.radius,padding:"14px 16px",borderTop:`3px solid #DC2626`}}>
+                    <div style={{fontSize:11.5,color:ui.textSub,fontFamily:ui.fontBody,marginBottom:6}}>الهالك</div>
+                    <div style={{fontSize:mob?20:24,color:ui.text,fontFamily:ui.fontHead,fontWeight:500}}>{totalDamaged.toLocaleString()}</div>
+                  </div>
+                  <div style={{background:ui.cardBg,border:ui.border,borderRadius:ui.radius,padding:"14px 16px"}}>
+                    <div style={{fontSize:11.5,color:ui.textSub,fontFamily:ui.fontBody,marginBottom:6}}>قيمة المخزون (تكلفة)</div>
+                    <div style={{fontSize:mob?17:20,color:ui.text,fontFamily:ui.fontHead,fontWeight:500}}>
+                      {totalCostValue.toLocaleString()}
+                      <span style={{fontSize:11.5,color:ui.textSub,marginInlineStart:5,fontFamily:ui.fontBody}}>ج</span>
+                    </div>
+                  </div>
+                </div>
 
-                {dbProducts.length === 0 ? (
-                  <div>
-                    <Placeholder icon="package"
-                      title={prods && prods.length ? "المخزون لسه فاضي" : "لا توجد منتجات بعد"}
-                      body={prods && prods.length
-                        ? `عندك ${prods.length} منتج في المتجر، اضغط الزر تحت عشان تستوردهم.`
-                        : 'روح لتاب "إضافة منتج" عشان تضيف أول منتج.'} />
-                    {prods && prods.length > 0 && (
-                      <div style={{textAlign:"center",marginTop:12}}>
-                        <button onClick={() => { importedRef.current = false; refreshProducts(); }}
-                          disabled={invImporting}
-                          style={{background:ui.text,color:"#fff",border:"none",padding:"10px 22px",cursor:invImporting?"wait":"pointer",fontSize:13,fontFamily:ui.fontBody,fontWeight:500,borderRadius:6}}>
-                          {invImporting ? "جاري الاستيراد..." : `استيراد ${prods.length} منتج`}
-                        </button>
+                {/* Sub-tabs */}
+                <div style={{background:ui.cardBg,border:ui.border,borderRadius:ui.radius,padding:"6px 6px",marginBottom:12,display:"flex",gap:4,overflowX:"auto"}}>
+                  {[["current","المخزون الحالي"],["history","سجل الحركات"],["alerts",`تنبيهات النفاد${lowStock.length ? ` (${lowStock.length})` : ""}`]].map(([k,l])=>(
+                    <button key={k} onClick={()=>setInvSubTab(k)}
+                      style={{padding:"7px 14px",border:"none",cursor:"pointer",borderRadius:6,
+                        background: invSubTab===k ? ui.text : "transparent",
+                        color: invSubTab===k ? "#fff" : ui.textSub,
+                        fontSize:12.5, fontFamily:ui.fontBody, whiteSpace:"nowrap"}}>{l}</button>
+                  ))}
+                </div>
+
+                {/* ── Current inventory (READ-ONLY) ─────────────────────── */}
+                {invSubTab === "current" && (
+                  <>
+                    {/* Filters */}
+                    <div style={{background:ui.cardBg,border:ui.border,borderRadius:ui.radius,padding:"10px 12px",marginBottom:12,
+                      display:"grid",gridTemplateColumns:mob?"1fr":"1fr 180px 180px auto",gap:10,alignItems:"center"}}>
+                      <input type="search" placeholder="ابحث بالاسم أو SKU أو الماركة..."
+                        value={invSearch} onChange={e=>setInvSearch(e.target.value)}
+                        style={{padding:"8px 12px",border:ui.border,borderRadius:6,background:ui.cardBg,
+                          fontFamily:ui.fontBody,fontSize:13,color:ui.text,outline:"none",direction:"rtl",width:"100%"}}/>
+                      <select value={invStatusFil} onChange={e=>setInvStatusFil(e.target.value)}
+                        style={{padding:"8px 12px",border:ui.border,borderRadius:6,background:ui.cardBg,
+                          fontFamily:ui.fontBody,fontSize:13,color:ui.text,outline:"none",direction:"rtl",width:"100%"}}>
+                        <option value="all">كل الحالات</option>
+                        <option value="available">متاح</option>
+                        <option value="low">قارب النفاد</option>
+                        <option value="out">نفد</option>
+                      </select>
+                      <select value={invCatFil} onChange={e=>setInvCatFil(e.target.value)}
+                        style={{padding:"8px 12px",border:ui.border,borderRadius:6,background:ui.cardBg,
+                          fontFamily:ui.fontBody,fontSize:13,color:ui.text,outline:"none",direction:"rtl",width:"100%"}}>
+                        <option value="all">كل الفئات</option>
+                        {PRODUCT_CATEGORIES.map(c=><option key={c} value={c}>{c}</option>)}
+                      </select>
+                      <button onClick={refreshProducts}
+                        style={{display:"flex",alignItems:"center",gap:5,background:ui.cardBg,color:ui.text,
+                          border:ui.border,padding:"8px 14px",cursor:"pointer",fontFamily:ui.fontBody,
+                          fontSize:12,borderRadius:6,justifyContent:"center"}}>
+                        <AdmIcon name="refresh" size={13}/> تحديث
+                      </button>
+                    </div>
+
+                    {filteredProducts.length === 0 ? (
+                      <Placeholder icon="package" title="لا توجد منتجات في النطاق المحدد"
+                        body='عدّل الفلاتر أو أضف منتجات جديدة من تاب "إضافة منتج".' />
+                    ) : (
+                      <div style={{background:ui.cardBg,border:ui.border,borderRadius:ui.radius,overflow:"hidden",overflowX:"auto"}}>
+                        <table style={{width:"100%",borderCollapse:"collapse",direction:"rtl",fontFamily:ui.fontBody,minWidth:880}}>
+                          <thead>
+                            <tr style={{background:ui.sideBg,borderBottom:`0.5px solid #E5E5E5`}}>
+                              {["المنتج","الحالة","متاح","محجوز","هالك","الإجمالي","آخر حركة",""].map(h=>(
+                                <th key={h} style={{padding:"11px 12px",textAlign:"right",fontSize:11.5,color:ui.textSub,fontWeight:500,whiteSpace:"nowrap"}}>{h}</th>
+                              ))}
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {filteredProducts.map(p => {
+                              const b = stockBadge(p);
+                              const total = (p.stock||0) + (p.stock_reserved||0) + (p.stock_damaged||0);
+                              return (
+                                <tr key={p.id} style={{borderTop:"0.5px solid #EEE"}}>
+                                  <td style={{padding:"11px 12px"}}>
+                                    <div style={{display:"flex",alignItems:"center",gap:10}}>
+                                      <div style={{width:38,height:38,borderRadius:6,background:ui.sideBg,overflow:"hidden",flexShrink:0,display:"flex",alignItems:"center",justifyContent:"center"}}>
+                                        {p.images && p.images[0]
+                                          ? <img src={p.images[0]} alt="" style={{width:"100%",height:"100%",objectFit:"cover"}}/>
+                                          : <AdmIcon name="package" size={18}/>}
+                                      </div>
+                                      <div style={{minWidth:0}}>
+                                        <div style={{fontSize:13,color:ui.text,fontWeight:500,fontFamily:ui.fontBody,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",maxWidth:220}}>{p.name}</div>
+                                        <div style={{fontSize:10.5,color:ui.textSub,fontFamily:"monospace",marginTop:2}}>{p.sku || "—"}</div>
+                                      </div>
+                                    </div>
+                                  </td>
+                                  <td style={{padding:"11px 12px"}}>
+                                    <span style={{fontSize:10.5,padding:"3px 10px",borderRadius:20,background:b.bg,color:b.fg,fontFamily:ui.fontBody,whiteSpace:"nowrap"}}>{b.l}</span>
+                                  </td>
+                                  <td style={{padding:"11px 12px",fontSize:13,color:"#16A34A",fontWeight:500,fontFamily:ui.fontBody,textAlign:"center"}}>{p.stock||0}</td>
+                                  <td style={{padding:"11px 12px",fontSize:13,color:"#F97316",fontFamily:ui.fontBody,textAlign:"center"}}>{p.stock_reserved||0}</td>
+                                  <td style={{padding:"11px 12px",fontSize:13,color:(p.stock_damaged||0)>0?"#DC2626":ui.textSub,fontFamily:ui.fontBody,textAlign:"center"}}>{p.stock_damaged||0}</td>
+                                  <td style={{padding:"11px 12px",fontSize:13,color:ui.text,fontWeight:500,fontFamily:ui.fontBody,textAlign:"center"}}>{total}</td>
+                                  <td style={{padding:"11px 12px",fontSize:11.5,color:ui.textSub,fontFamily:ui.fontBody,whiteSpace:"nowrap"}}>
+                                    {p.updated_at ? fmtDate(p.updated_at) : "—"}
+                                  </td>
+                                  <td style={{padding:"11px 12px",textAlign:"left"}}>
+                                    <button onClick={()=>{ setInvSubTab("history"); setMovementFilter({ product_id: p.id, type: "" }); }}
+                                      title="سجل حركات هذا المنتج"
+                                      style={{background:"transparent",border:ui.border,padding:"5px 10px",cursor:"pointer",fontFamily:ui.fontBody,fontSize:11,color:ui.text,borderRadius:4}}>
+                                      السجل
+                                    </button>
+                                  </td>
+                                </tr>
+                              );
+                            })}
+                          </tbody>
+                        </table>
                       </div>
                     )}
-                  </div>
-                ) : filtered.length === 0 ? (
-                  <div style={{background:ui.cardBg,border:ui.border,borderRadius:ui.radius,padding:"40px",textAlign:"center",color:ui.textSub,fontFamily:ui.fontBody,fontSize:13}}>
-                    لا توجد منتجات تطابق الفلتر الحالي
-                  </div>
-                ) : (
-                  <div style={{background:ui.cardBg,border:ui.border,borderRadius:ui.radius,overflow:"hidden",overflowX:"auto"}}>
-                    <table style={{width:"100%",borderCollapse:"collapse",direction:"rtl",fontFamily:ui.fontBody,minWidth:900}}>
-                      <thead>
-                        <tr style={{background:ui.sideBg,borderBottom:`0.5px solid #E5E5E5`}}>
-                          {["المنتج","الحالة","المتاح","المحجوز","الهالك","حد التنبيه","مستوى المخزون","آخر تحديث",""].map(h=>(
-                            <th key={h} style={{padding:"11px 14px",textAlign:"right",fontSize:11.5,color:ui.textSub,fontWeight:500,whiteSpace:"nowrap"}}>{h}</th>
-                          ))}
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {filtered.map(p => {
-                          const b = stockBadge(p);
-                          const fillPct = fillPctOf(p);
-                          const fillColor = (p.stock||0) <= 0 ? "#DC2626"
-                            : (p.stock||0) <= (p.alert_threshold||0) ? "#D97706" : "#16A34A";
-                          return (
-                            <tr key={p.id} style={{borderTop:"0.5px solid #EEE"}}>
-                              {/* Product cell */}
-                              <td style={{padding:"11px 14px"}}>
-                                <div style={{display:"flex",alignItems:"center",gap:10}}>
-                                  <div style={{width:42,height:42,borderRadius:6,background:ui.sideBg,overflow:"hidden",flexShrink:0,display:"flex",alignItems:"center",justifyContent:"center"}}>
-                                    {p.images && p.images[0]
-                                      ? <img src={p.images[0]} alt="" style={{width:"100%",height:"100%",objectFit:"cover"}}/>
-                                      : <AdmIcon name="package" size={20}/>}
-                                  </div>
-                                  <div style={{minWidth:0}}>
-                                    <div style={{fontSize:13,color:ui.text,fontWeight:500,fontFamily:ui.fontBody,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",maxWidth:220}}>{p.name}</div>
-                                    <div style={{fontSize:10.5,color:ui.textSub,fontFamily:"monospace",marginTop:2}}>{p.sku || "—"}</div>
-                                  </div>
-                                </div>
-                              </td>
-                              {/* Status */}
-                              <td style={{padding:"11px 14px"}}>
-                                <span style={{fontSize:10.5,padding:"3px 10px",borderRadius:20,background:b.bg,color:b.fg,fontFamily:ui.fontBody,whiteSpace:"nowrap"}}>{b.l}</span>
-                              </td>
-                              {/* Available — directly editable; defaultValue+onBlur prevents
-                                  focus loss while typing. Reductions route through the
-                                  approval workflow (server holds the stock until approved). */}
-                              <td style={{padding:"11px 14px"}}>
-                                <input type="number" min="0" defaultValue={p.stock||0}
-                                  key={`stock-${p.id}-${p.updated_at || ''}`}
-                                  onBlur={e=>{
-                                    const v = Math.max(0, parseInt(e.target.value, 10) || 0);
-                                    if (v === (p.stock||0)) return;
-                                    if (v < (p.stock||0)) {
-                                      // Reduction → goes through reason modal + approval
-                                      applyStockChange(p, v, { onDone: () => { e.target.blur(); } });
-                                      // Revert the input until approval lands (server is authoritative)
-                                      e.target.value = String(p.stock || 0);
-                                    } else {
-                                      // Pure increase
-                                      patchProduct(p.id, { stock: v });
-                                    }
-                                  }}
-                                  style={{...inputSm, width:74, padding:"6px 8px", textAlign:"center"}}/>
-                              </td>
-                              {/* Reserved (locked to live orders) — read-only */}
-                              <td style={{padding:"11px 14px",fontSize:13,color:ui.text,fontFamily:ui.fontBody,whiteSpace:"nowrap"}}>
-                                <span title="كمية محجوزة لطلبات لم تشحن بعد">{p.stock_reserved || 0}</span>
-                              </td>
-                              {/* Damaged — read-only */}
-                              <td style={{padding:"11px 14px",fontSize:13,color: (p.stock_damaged||0) > 0 ? "#B91C1C" : ui.textSub, fontFamily:ui.fontBody,whiteSpace:"nowrap"}}>
-                                <span title="كمية تالفة من المرتجعات">{p.stock_damaged || 0}</span>
-                              </td>
-                              {/* Threshold (editable) */}
-                              <td style={{padding:"11px 14px"}}>
-                                <input type="number" min="0" defaultValue={p.alert_threshold||0}
-                                  key={`thr-${p.id}-${p.updated_at || ''}`}
-                                  onBlur={e=>{
-                                    const v = Math.max(0, parseInt(e.target.value, 10) || 0);
-                                    if (v !== (p.alert_threshold||0)) patchProduct(p.id, { alert_threshold: v });
-                                  }}
-                                  style={{...inputSm, width:60, padding:"4px 8px", textAlign:"center"}}/>
-                              </td>
-                              {/* Progress bar — per-product, NEVER depends on other products */}
-                              <td style={{padding:"11px 14px",minWidth:140}}>
-                                <div style={{display:"flex",alignItems:"center",gap:8}}>
-                                  <div style={{flex:1,height:6,background:"#F3F4F6",borderRadius:3,overflow:"hidden"}}>
-                                    <div style={{width:`${fillPct}%`,height:"100%",background:fillColor,transition:"width .25s"}}/>
-                                  </div>
-                                  <span style={{fontSize:11,color:ui.textSub,fontFamily:ui.fontBody,minWidth:36,textAlign:"left"}}>{fillPct}%</span>
-                                </div>
-                              </td>
-                              {/* Last updated */}
-                              <td style={{padding:"11px 14px",fontSize:11.5,color:ui.textSub,fontFamily:ui.fontBody,whiteSpace:"nowrap"}}>
-                                {p.updated_at ? new Date(p.updated_at.replace(" ","T")+"Z").toLocaleDateString("ar-EG",{day:"2-digit",month:"2-digit"}) : "—"}
-                              </td>
-                              {/* Edit — opens deep-edit modal that requires
-                                  a reason when stock is being reduced. */}
-                              <td style={{padding:"11px 14px",textAlign:"left"}}>
-                                <button onClick={()=>setEditProdModal({
-                                    id: p.id, name: p.name,
-                                    origStock: p.stock||0,
-                                    stock: String(p.stock||0),
-                                    origThreshold: p.alert_threshold||0,
-                                    alert_threshold: String(p.alert_threshold||0),
-                                    reason: ""
-                                  })}
-                                  style={{background:"transparent",border:ui.border,padding:"5px 10px",cursor:"pointer",fontFamily:ui.fontBody,fontSize:11.5,color:ui.text,borderRadius:4}}>
-                                  تعديل
-                                </button>
-                              </td>
+                  </>
+                )}
+
+                {/* ── Movement history ──────────────────────────────────── */}
+                {invSubTab === "history" && (
+                  <>
+                    <div style={{background:ui.cardBg,border:ui.border,borderRadius:ui.radius,padding:"10px 12px",marginBottom:12,
+                      display:"grid",gridTemplateColumns:mob?"1fr":"1fr 200px auto",gap:10,alignItems:"center"}}>
+                      <select value={movementFilter.product_id}
+                        onChange={e=>setMovementFilter({...movementFilter, product_id:e.target.value})}
+                        style={{padding:"8px 12px",border:ui.border,borderRadius:6,background:ui.cardBg,
+                          fontFamily:ui.fontBody,fontSize:13,color:ui.text,outline:"none",direction:"rtl",width:"100%"}}>
+                        <option value="">كل المنتجات</option>
+                        {dbProducts.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
+                      </select>
+                      <select value={movementFilter.type}
+                        onChange={e=>setMovementFilter({...movementFilter, type:e.target.value})}
+                        style={{padding:"8px 12px",border:ui.border,borderRadius:6,background:ui.cardBg,
+                          fontFamily:ui.fontBody,fontSize:13,color:ui.text,outline:"none",direction:"rtl",width:"100%"}}>
+                        <option value="">كل أنواع الحركات</option>
+                        {Object.entries(MOVEMENT_META).map(([k,v]) => <option key={k} value={k}>{v.l}</option>)}
+                      </select>
+                      <button onClick={()=>refreshMovements()}
+                        style={{display:"flex",alignItems:"center",gap:5,background:ui.cardBg,color:ui.text,
+                          border:ui.border,padding:"8px 14px",cursor:"pointer",fontFamily:ui.fontBody,
+                          fontSize:12,borderRadius:6,justifyContent:"center"}}>
+                        <AdmIcon name="refresh" size={13}/> تحديث
+                      </button>
+                    </div>
+
+                    {movements.length === 0 ? (
+                      <Placeholder icon="package" title="لا توجد حركات بعد"
+                        body="هتظهر الحركات هنا — وارد، صرف، طلبات، شحن، مرتجعات." />
+                    ) : (
+                      <div style={{background:ui.cardBg,border:ui.border,borderRadius:ui.radius,overflow:"hidden",overflowX:"auto"}}>
+                        <table style={{width:"100%",borderCollapse:"collapse",direction:"rtl",fontFamily:ui.fontBody,minWidth:860}}>
+                          <thead>
+                            <tr style={{background:ui.sideBg,borderBottom:`0.5px solid #E5E5E5`}}>
+                              {["المنتج","نوع الحركة","الكمية","السبب/المرجع","المستخدم","التاريخ"].map(h=>(
+                                <th key={h} style={{padding:"11px 12px",textAlign:"right",fontSize:11.5,color:ui.textSub,fontWeight:500,whiteSpace:"nowrap"}}>{h}</th>
+                              ))}
                             </tr>
-                          );
-                        })}
-                      </tbody>
-                    </table>
+                          </thead>
+                          <tbody>
+                            {movements.map(m => {
+                              const meta = MOVEMENT_META[m.type] || { l:m.type, color:ui.textSub, icon:"·" };
+                              const delta = Number(m.quantity_delta) || 0;
+                              return (
+                                <tr key={m.id} style={{borderTop:"0.5px solid #EEE"}}>
+                                  <td style={{padding:"11px 12px",fontSize:13,color:ui.text,fontFamily:ui.fontBody}}>{m.product_name || m.product_id}</td>
+                                  <td style={{padding:"11px 12px"}}>
+                                    <span style={{display:"inline-flex",alignItems:"center",gap:6,fontSize:11,padding:"3px 10px",borderRadius:20,
+                                      background: meta.color + "22", color: meta.color, fontFamily:ui.fontBody, fontWeight:500, whiteSpace:"nowrap"}}>
+                                      <span>{meta.icon}</span>{meta.l}
+                                    </span>
+                                  </td>
+                                  <td style={{padding:"11px 12px",fontSize:13,fontFamily:"monospace",fontWeight:500,
+                                    color: delta > 0 ? "#16A34A" : delta < 0 ? "#DC2626" : ui.textSub}}>
+                                    {delta > 0 ? `+${delta}` : delta}
+                                  </td>
+                                  <td style={{padding:"11px 12px",fontSize:11.5,color:ui.textSub,fontFamily:ui.fontBody,maxWidth:260,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>
+                                    {m.reason || "—"}{m.reference ? ` · #${m.reference}` : ""}
+                                  </td>
+                                  <td style={{padding:"11px 12px",fontSize:12,color:ui.textSub,fontFamily:ui.fontBody}}>{m.user_name || m.user_id || "—"}</td>
+                                  <td style={{padding:"11px 12px",fontSize:11.5,color:ui.textSub,fontFamily:ui.fontBody,whiteSpace:"nowrap"}}>{fmtDate(m.created_at)}</td>
+                                </tr>
+                              );
+                            })}
+                          </tbody>
+                        </table>
+                      </div>
+                    )}
+                  </>
+                )}
+
+                {/* ── Low-stock alerts ──────────────────────────────────── */}
+                {invSubTab === "alerts" && (
+                  lowStock.length === 0 ? (
+                    <Placeholder icon="package" title="ولا منتج قارب على النفاد"
+                      body="هتظهر هنا أي منتجات وصلت لحد التنبيه أو أقل." />
+                  ) : (
+                    <div style={{background:ui.cardBg,border:ui.border,borderRadius:ui.radius,overflow:"hidden",overflowX:"auto"}}>
+                      <table style={{width:"100%",borderCollapse:"collapse",direction:"rtl",fontFamily:ui.fontBody,minWidth:680}}>
+                        <thead>
+                          <tr style={{background:ui.sideBg,borderBottom:`0.5px solid #E5E5E5`}}>
+                            {["المنتج","المتاح","حد التنبيه","الناقص","إجراء"].map(h=>(
+                              <th key={h} style={{padding:"11px 12px",textAlign:"right",fontSize:11.5,color:ui.textSub,fontWeight:500,whiteSpace:"nowrap"}}>{h}</th>
+                            ))}
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {lowStock.map(p => {
+                            const shortfall = Math.max(0, (p.alert_threshold||0) * 3 - (p.stock||0));
+                            return (
+                              <tr key={p.id} style={{borderTop:"0.5px solid #EEE"}}>
+                                <td style={{padding:"11px 12px",fontSize:13,color:ui.text,fontWeight:500,fontFamily:ui.fontBody}}>{p.name}</td>
+                                <td style={{padding:"11px 12px",fontSize:13,color: (p.stock||0)===0 ? "#DC2626" : "#F97316",fontWeight:500,textAlign:"center"}}>{p.stock||0}</td>
+                                <td style={{padding:"11px 12px",fontSize:12.5,color:ui.textSub,textAlign:"center"}}>{p.alert_threshold||0}</td>
+                                <td style={{padding:"11px 12px",fontSize:12.5,color:"#B91C1C",fontWeight:500,fontFamily:"monospace",textAlign:"center"}}>{shortfall}</td>
+                                <td style={{padding:"11px 12px"}}>
+                                  <button onClick={()=>{ setStockInForm({ ...stockInForm, product_id: p.id }); setStockInOpen(true); }}
+                                    style={{background:"#16A34A",color:"#fff",border:"none",padding:"5px 12px",cursor:"pointer",fontSize:11.5,fontFamily:ui.fontBody,borderRadius:4}}>
+                                    وارد جديد
+                                  </button>
+                                </td>
+                              </tr>
+                            );
+                          })}
+                        </tbody>
+                      </table>
+                    </div>
+                  )
+                )}
+
+                {/* ── Stock In modal ───────────────────────────────────── */}
+                {stockInOpen && (
+                  <div onClick={()=>!invBusy && setStockInOpen(false)}
+                    style={{position:"fixed",inset:0,background:"rgba(0,0,0,.5)",zIndex:500,display:"flex",alignItems:"center",justifyContent:"center",padding:16,direction:"rtl"}}>
+                    <div onClick={e=>e.stopPropagation()}
+                      style={{background:ui.cardBg,maxWidth:480,width:"100%",padding:22,borderRadius:8,boxShadow:"0 12px 48px rgba(0,0,0,.25)"}}>
+                      <h3 style={{fontSize:15,fontWeight:600,color:ui.text,fontFamily:ui.fontBody,margin:"0 0 14px",display:"flex",alignItems:"center",gap:8}}>
+                        <span style={{width:8,height:8,background:"#16A34A",borderRadius:"50%"}}/>
+                        تسجيل وارد جديد
+                      </h3>
+                      <div style={{marginBottom:12}}>
+                        <label style={{display:"block",fontSize:12,color:ui.text,fontFamily:ui.fontBody,marginBottom:5}}>المنتج</label>
+                        <select value={stockInForm.product_id} onChange={e=>setStockInForm({...stockInForm, product_id:e.target.value})}
+                          style={{padding:"8px 12px",border:ui.border,borderRadius:6,background:ui.cardBg,fontFamily:ui.fontBody,fontSize:13,color:ui.text,outline:"none",direction:"rtl",width:"100%"}}>
+                          <option value="">— اختر منتج —</option>
+                          {dbProducts.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
+                        </select>
+                      </div>
+                      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,marginBottom:12}}>
+                        <div>
+                          <label style={{display:"block",fontSize:12,color:ui.text,fontFamily:ui.fontBody,marginBottom:5}}>الكمية</label>
+                          <input type="text" inputMode="numeric" value={stockInForm.quantity}
+                            onChange={e=>setStockInForm({...stockInForm, quantity:e.target.value.replace(/[^0-9]/g,"")})}
+                            style={{padding:"8px 12px",border:ui.border,borderRadius:6,background:ui.cardBg,fontFamily:ui.fontBody,fontSize:13,color:ui.text,outline:"none",direction:"ltr",textAlign:"left",width:"100%",boxSizing:"border-box"}}/>
+                        </div>
+                        <div>
+                          <label style={{display:"block",fontSize:12,color:ui.text,fontFamily:ui.fontBody,marginBottom:5}}>تكلفة الوحدة (ج)</label>
+                          <input type="text" inputMode="decimal" value={stockInForm.unit_cost}
+                            onChange={e=>setStockInForm({...stockInForm, unit_cost:e.target.value.replace(/[^0-9.]/g,"")})}
+                            style={{padding:"8px 12px",border:ui.border,borderRadius:6,background:ui.cardBg,fontFamily:ui.fontBody,fontSize:13,color:ui.text,outline:"none",direction:"ltr",textAlign:"left",width:"100%",boxSizing:"border-box"}}/>
+                        </div>
+                      </div>
+                      <div style={{marginBottom:12}}>
+                        <label style={{display:"block",fontSize:12,color:ui.text,fontFamily:ui.fontBody,marginBottom:5}}>المورد</label>
+                        <input value={stockInForm.supplier} onChange={e=>setStockInForm({...stockInForm, supplier:e.target.value})}
+                          placeholder="اسم المورد"
+                          style={{padding:"8px 12px",border:ui.border,borderRadius:6,background:ui.cardBg,fontFamily:ui.fontBody,fontSize:13,color:ui.text,outline:"none",direction:"rtl",width:"100%",boxSizing:"border-box"}}/>
+                      </div>
+                      <div style={{marginBottom:14}}>
+                        <label style={{display:"block",fontSize:12,color:ui.text,fontFamily:ui.fontBody,marginBottom:5}}>ملاحظات</label>
+                        <textarea rows={2} value={stockInForm.notes} onChange={e=>setStockInForm({...stockInForm, notes:e.target.value})}
+                          style={{padding:"8px 12px",border:ui.border,borderRadius:6,background:ui.cardBg,fontFamily:ui.fontBody,fontSize:13,color:ui.text,outline:"none",direction:"rtl",width:"100%",resize:"vertical",minHeight:50,boxSizing:"border-box"}}/>
+                      </div>
+                      <div style={{padding:"8px 12px",background:"#F0FDF4",borderRadius:6,fontSize:11.5,color:"#15803D",fontFamily:ui.fontBody,marginBottom:12}}>
+                        ℹ سيتم إضافة الكمية لـ "المتاح للبيع" وإنشاء قيد مصروف تلقائي بالتكلفة في المالية.
+                      </div>
+                      <div style={{display:"flex",gap:8,justifyContent:"flex-end"}}>
+                        <button onClick={()=>setStockInOpen(false)} disabled={invBusy}
+                          style={{padding:"9px 18px",background:"transparent",border:ui.border,borderRadius:6,fontSize:13,color:ui.textSub,fontFamily:ui.fontBody,cursor:"pointer"}}>إلغاء</button>
+                        <button onClick={submitStockIn}
+                          disabled={invBusy || !stockInForm.product_id || !stockInForm.quantity}
+                          style={{padding:"9px 20px",background: (!invBusy && stockInForm.product_id && stockInForm.quantity) ? "#16A34A" : "#9CA3AF",
+                            color:"#fff",border:"none",borderRadius:6,fontSize:13,fontWeight:500,fontFamily:ui.fontBody,cursor:"pointer"}}>
+                          {invBusy ? "جاري الحفظ..." : "تسجيل الوارد"}
+                        </button>
+                      </div>
+                    </div>
                   </div>
                 )}
 
-                {/* Deep-edit modal — quantity + threshold, with reason
-                    required when reducing stock. */}
-                {editProdModal && (() => {
-                  const newQty = Number(editProdModal.stock) || 0;
-                  const newThr = Number(editProdModal.alert_threshold) || 0;
-                  const reducing = newQty < editProdModal.origStock;
-                  const reasonOK = !reducing || (editProdModal.reason || "").trim().length >= 5;
-                  return (
-                    <div onClick={()=>setEditProdModal(null)}
-                      style={{position:"fixed",inset:0,background:"rgba(0,0,0,.55)",zIndex:500,display:"flex",alignItems:"center",justifyContent:"center",padding:16,direction:"rtl"}}>
-                      <div onClick={e=>e.stopPropagation()}
-                        style={{background:ui.cardBg,maxWidth:480,width:"100%",padding:22,borderRadius:8,boxShadow:"0 12px 48px rgba(0,0,0,.25)"}}>
-                        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:14,paddingBottom:10,borderBottom:`0.5px solid #EEE`}}>
-                          <div>
-                            <h2 style={{fontSize:15,fontWeight:600,color:ui.text,fontFamily:ui.fontBody,margin:0}}>تعديل المنتج</h2>
-                            <div style={{fontSize:12,color:ui.textSub,fontFamily:ui.fontBody,marginTop:3}}>{editProdModal.name}</div>
-                          </div>
-                          <button onClick={()=>setEditProdModal(null)}
-                            style={{background:"none",border:"none",fontSize:22,color:ui.textSub,cursor:"pointer",lineHeight:1,padding:4}}>✕</button>
+                {/* ── Stock Out modal ──────────────────────────────────── */}
+                {stockOutOpen && (
+                  <div onClick={()=>!invBusy && setStockOutOpen(false)}
+                    style={{position:"fixed",inset:0,background:"rgba(0,0,0,.5)",zIndex:500,display:"flex",alignItems:"center",justifyContent:"center",padding:16,direction:"rtl"}}>
+                    <div onClick={e=>e.stopPropagation()}
+                      style={{background:ui.cardBg,maxWidth:460,width:"100%",padding:22,borderRadius:8,boxShadow:"0 12px 48px rgba(0,0,0,.25)"}}>
+                      <h3 style={{fontSize:15,fontWeight:600,color:ui.text,fontFamily:ui.fontBody,margin:"0 0 14px",display:"flex",alignItems:"center",gap:8}}>
+                        <span style={{width:8,height:8,background:"#F97316",borderRadius:"50%"}}/>
+                        طلب صرف / تخفيض
+                      </h3>
+                      <div style={{marginBottom:12}}>
+                        <label style={{display:"block",fontSize:12,color:ui.text,fontFamily:ui.fontBody,marginBottom:5}}>المنتج</label>
+                        <select value={stockOutForm.product_id} onChange={e=>setStockOutForm({...stockOutForm, product_id:e.target.value})}
+                          style={{padding:"8px 12px",border:ui.border,borderRadius:6,background:ui.cardBg,fontFamily:ui.fontBody,fontSize:13,color:ui.text,outline:"none",direction:"rtl",width:"100%"}}>
+                          <option value="">— اختر منتج —</option>
+                          {dbProducts.map(p => <option key={p.id} value={p.id}>{p.name} (متاح: {p.stock||0})</option>)}
+                        </select>
+                      </div>
+                      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,marginBottom:12}}>
+                        <div>
+                          <label style={{display:"block",fontSize:12,color:ui.text,fontFamily:ui.fontBody,marginBottom:5}}>الكمية</label>
+                          <input type="text" inputMode="numeric" value={stockOutForm.quantity}
+                            onChange={e=>setStockOutForm({...stockOutForm, quantity:e.target.value.replace(/[^0-9]/g,"")})}
+                            style={{padding:"8px 12px",border:ui.border,borderRadius:6,background:ui.cardBg,fontFamily:ui.fontBody,fontSize:13,color:ui.text,outline:"none",direction:"ltr",textAlign:"left",width:"100%",boxSizing:"border-box"}}/>
                         </div>
-
-                        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12,marginBottom:14}}>
-                          <div>
-                            <label style={{display:"block",fontSize:12,color:ui.text,fontFamily:ui.fontBody,marginBottom:5}}>الكمية المتاحة</label>
-                            <input type="text" inputMode="numeric" pattern="[0-9]*"
-                              value={editProdModal.stock}
-                              onChange={e=>setEditProdModal({...editProdModal, stock: e.target.value.replace(/[^0-9]/g, "")})}
-                              style={{padding:"8px 12px",border:ui.border,borderRadius:6,background:ui.cardBg,fontFamily:ui.fontBody,fontSize:13,color:ui.text,outline:"none",width:"100%",direction:"ltr",textAlign:"left"}}/>
-                            <div style={{fontSize:11,color:ui.textSub,fontFamily:ui.fontBody,marginTop:4}}>كانت: {editProdModal.origStock}</div>
-                          </div>
-                          <div>
-                            <label style={{display:"block",fontSize:12,color:ui.text,fontFamily:ui.fontBody,marginBottom:5}}>حد التنبيه</label>
-                            <input type="text" inputMode="numeric" pattern="[0-9]*"
-                              value={editProdModal.alert_threshold}
-                              onChange={e=>setEditProdModal({...editProdModal, alert_threshold: e.target.value.replace(/[^0-9]/g, "")})}
-                              style={{padding:"8px 12px",border:ui.border,borderRadius:6,background:ui.cardBg,fontFamily:ui.fontBody,fontSize:13,color:ui.text,outline:"none",width:"100%",direction:"ltr",textAlign:"left"}}/>
-                            <div style={{fontSize:11,color:ui.textSub,fontFamily:ui.fontBody,marginTop:4}}>كان: {editProdModal.origThreshold}</div>
-                          </div>
+                        <div>
+                          <label style={{display:"block",fontSize:12,color:ui.text,fontFamily:ui.fontBody,marginBottom:5}}>السبب</label>
+                          <select value={stockOutForm.reason} onChange={e=>setStockOutForm({...stockOutForm, reason:e.target.value})}
+                            style={{padding:"8px 12px",border:ui.border,borderRadius:6,background:ui.cardBg,fontFamily:ui.fontBody,fontSize:13,color:ui.text,outline:"none",direction:"rtl",width:"100%"}}>
+                            <option value="تالف">تالف</option>
+                            <option value="عينات">عينات</option>
+                            <option value="استخدام شخصي">استخدام شخصي</option>
+                            <option value="تخفيض جرد">تخفيض جرد</option>
+                          </select>
                         </div>
+                      </div>
+                      <div style={{marginBottom:14}}>
+                        <label style={{display:"block",fontSize:12,color:ui.text,fontFamily:ui.fontBody,marginBottom:5}}>ملاحظات</label>
+                        <textarea rows={2} value={stockOutForm.notes} onChange={e=>setStockOutForm({...stockOutForm, notes:e.target.value})}
+                          style={{padding:"8px 12px",border:ui.border,borderRadius:6,background:ui.cardBg,fontFamily:ui.fontBody,fontSize:13,color:ui.text,outline:"none",direction:"rtl",width:"100%",resize:"vertical",minHeight:50,boxSizing:"border-box"}}/>
+                      </div>
+                      <div style={{padding:"8px 12px",background:"#FFF7ED",borderRadius:6,fontSize:11.5,color:"#9A3412",fontFamily:ui.fontBody,marginBottom:12}}>
+                        ⚠ سيتم إرسال الطلب لـ Super Admin للموافقة. لن يتم خصم الكمية إلا بعد الموافقة.
+                      </div>
+                      <div style={{display:"flex",gap:8,justifyContent:"flex-end"}}>
+                        <button onClick={()=>setStockOutOpen(false)} disabled={invBusy}
+                          style={{padding:"9px 18px",background:"transparent",border:ui.border,borderRadius:6,fontSize:13,color:ui.textSub,fontFamily:ui.fontBody,cursor:"pointer"}}>إلغاء</button>
+                        <button onClick={submitStockOut}
+                          disabled={invBusy || !stockOutForm.product_id || !stockOutForm.quantity}
+                          style={{padding:"9px 20px",background: (!invBusy && stockOutForm.product_id && stockOutForm.quantity) ? "#F97316" : "#9CA3AF",
+                            color:"#fff",border:"none",borderRadius:6,fontSize:13,fontWeight:500,fontFamily:ui.fontBody,cursor:"pointer"}}>
+                          {invBusy ? "جاري الإرسال..." : "إرسال الطلب"}
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                )}
 
-                        {reducing && (
-                          <div style={{marginBottom:14}}>
-                            <label style={{display:"block",fontSize:12,color:"#B91C1C",fontFamily:ui.fontBody,marginBottom:5,fontWeight:500}}>
-                              ⚠ سبب التقليل (إلزامي)
-                            </label>
-                            <textarea rows={3}
-                              value={editProdModal.reason}
-                              onChange={e=>setEditProdModal({...editProdModal, reason:e.target.value})}
-                              placeholder="مثال: تالف، تم استرجاعه، خطأ في الجرد..."
-                              style={{padding:"8px 12px",border:`1px solid #FCA5A5`,borderRadius:6,background:"#FEF2F2",fontFamily:ui.fontBody,fontSize:13,color:ui.text,outline:"none",width:"100%",direction:"rtl",resize:"vertical",minHeight:70}}/>
-                            <div style={{fontSize:11,color:ui.textSub,fontFamily:ui.fontBody,marginTop:4}}>
-                              تقليل: {editProdModal.origStock} → {newQty} (—{editProdModal.origStock - newQty} قطعة).
-                              السبب هيتسجل في سجل التغييرات وهيوصل Super Admin.
-                            </div>
-                          </div>
-                        )}
-
-                        <div style={{display:"flex",gap:8,justifyContent:"flex-end"}}>
-                          <button onClick={()=>setEditProdModal(null)}
-                            style={{padding:"9px 18px",background:"transparent",border:ui.border,borderRadius:6,fontSize:12.5,color:ui.textSub,fontFamily:ui.fontBody,cursor:"pointer"}}>إلغاء</button>
-                          <button
-                            disabled={!reasonOK}
-                            onClick={async () => {
-                              // Always update threshold first (no reason needed).
-                              if (newThr !== editProdModal.origThreshold) {
-                                await patchProduct(editProdModal.id, { alert_threshold: newThr });
-                              }
-                              // For stock changes, route through the central helper
-                              // so audit log + approvals fire consistently (with the
-                              // reason captured inline by this modal).
-                              if (newQty !== editProdModal.origStock) {
-                                // Manually mirror what applyStockChange's commit does,
-                                // using the reason captured in this modal.
-                                await patchProduct(editProdModal.id, { stock: newQty });
-                                if (reducing) {
-                                  try {
-                                    await fetch("/api/stock-changes", {
-                                      method:"POST", headers:{"Content-Type":"application/json"},
-                                      body: JSON.stringify({
-                                        product_id: editProdModal.id, product_name: editProdModal.name,
-                                        old_qty: editProdModal.origStock, new_qty: newQty,
-                                        reason: editProdModal.reason, actor: activeRole
-                                      })
-                                    });
-                                    await fetch("/api/approvals", {
-                                      method:"POST", headers:{"Content-Type":"application/json"},
-                                      body: JSON.stringify({
-                                        type: "stock_reduce",
-                                        target_id: String(editProdModal.id), target_label: editProdModal.name,
-                                        requester: activeRole, reason: editProdModal.reason,
-                                        payload: { old_qty: editProdModal.origStock, new_qty: newQty }
-                                      })
-                                    });
-                                    refreshApprovals();
-                                  } catch {}
-                                }
-                              }
-                              setEditProdModal(null);
-                            }}
-                            style={{padding:"9px 18px",background: reasonOK ? ui.text : "#9CA3AF",color:"#fff",border:"none",borderRadius:6,fontSize:12.5,fontFamily:ui.fontBody,cursor: reasonOK ? "pointer" : "not-allowed"}}>
-                            حفظ التعديل
+                {/* ── Stock Take modal ────────────────────────────────── */}
+                {stockTakeOpen && (
+                  <div onClick={()=>!invBusy && setStockTakeOpen(false)}
+                    style={{position:"fixed",inset:0,background:"rgba(0,0,0,.5)",zIndex:500,display:"flex",alignItems:"center",justifyContent:"center",padding:16,direction:"rtl"}}>
+                    <div onClick={e=>e.stopPropagation()}
+                      style={{background:ui.cardBg,maxWidth:680,width:"100%",maxHeight:"85vh",padding:0,borderRadius:8,boxShadow:"0 12px 48px rgba(0,0,0,.25)",display:"flex",flexDirection:"column"}}>
+                      <div style={{padding:"18px 22px",borderBottom:ui.border}}>
+                        <h3 style={{fontSize:15,fontWeight:600,color:ui.text,fontFamily:ui.fontBody,margin:0}}>جرد المخزون</h3>
+                        <div style={{fontSize:11.5,color:ui.textSub,fontFamily:ui.fontBody,marginTop:4}}>
+                          أدخل الكمية المعدودة فعلياً لكل منتج. سيتم تسجيل الفرق كحركة تعديل جرد.
+                        </div>
+                      </div>
+                      <div style={{flex:1,overflowY:"auto",padding:"6px 0"}}>
+                        <table style={{width:"100%",borderCollapse:"collapse",fontFamily:ui.fontBody}}>
+                          <thead>
+                            <tr style={{background:ui.sideBg,borderBottom:`0.5px solid #E5E5E5`}}>
+                              {["المنتج","الكمية الحالية","الكمية الفعلية","الفرق"].map(h=>(
+                                <th key={h} style={{padding:"10px 14px",textAlign:"right",fontSize:11.5,color:ui.textSub,fontWeight:500,whiteSpace:"nowrap"}}>{h}</th>
+                              ))}
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {dbProducts.map(p => {
+                              const cur     = p.stock || 0;
+                              const counted = Number(stockTakeRows[p.id] ?? cur);
+                              const delta   = (Number.isFinite(counted) ? counted : cur) - cur;
+                              return (
+                                <tr key={p.id} style={{borderTop:"0.5px solid #EEE"}}>
+                                  <td style={{padding:"10px 14px",fontSize:13,color:ui.text,fontFamily:ui.fontBody}}>{p.name}</td>
+                                  <td style={{padding:"10px 14px",fontSize:13,color:ui.textSub,textAlign:"center"}}>{cur}</td>
+                                  <td style={{padding:"10px 14px"}}>
+                                    <input type="text" inputMode="numeric"
+                                      value={stockTakeRows[p.id] ?? String(cur)}
+                                      onChange={e=>setStockTakeRows({...stockTakeRows, [p.id]: e.target.value.replace(/[^0-9]/g,"")})}
+                                      style={{padding:"5px 10px",border:ui.border,borderRadius:5,background:ui.cardBg,fontFamily:ui.fontBody,fontSize:13,color:ui.text,outline:"none",direction:"ltr",textAlign:"center",width:70,boxSizing:"border-box"}}/>
+                                  </td>
+                                  <td style={{padding:"10px 14px",fontSize:12.5,fontFamily:"monospace",fontWeight:500,
+                                    color: delta > 0 ? "#16A34A" : delta < 0 ? "#DC2626" : ui.textSub}}>
+                                    {delta > 0 ? `+${delta}` : delta || 0}
+                                  </td>
+                                </tr>
+                              );
+                            })}
+                          </tbody>
+                        </table>
+                      </div>
+                      <div style={{padding:"14px 22px",borderTop:ui.border,display:"flex",justifyContent:"space-between",alignItems:"center",gap:10,flexWrap:"wrap"}}>
+                        <div style={{fontSize:11.5,color:ui.textSub,fontFamily:ui.fontBody}}>
+                          سيتم تسجيل حركة "جرد" لكل منتج له فرق فقط.
+                        </div>
+                        <div style={{display:"flex",gap:8}}>
+                          <button onClick={()=>setStockTakeOpen(false)} disabled={invBusy}
+                            style={{padding:"9px 18px",background:"transparent",border:ui.border,borderRadius:6,fontSize:13,color:ui.textSub,fontFamily:ui.fontBody,cursor:"pointer"}}>إلغاء</button>
+                          <button onClick={submitStockTake} disabled={invBusy}
+                            style={{padding:"9px 20px",background: ui.text,color:"#fff",border:"none",borderRadius:6,fontSize:13,fontWeight:500,fontFamily:ui.fontBody,cursor:"pointer"}}>
+                            {invBusy ? "جاري التطبيق..." : "تطبيق الجرد"}
                           </button>
                         </div>
                       </div>
                     </div>
-                  );
-                })()}
-
-                {/* Reason-required modal for any inline stock REDUCTION
-                    (− button). Gates the action — save is disabled until 5+
-                    chars of reason are typed. */}
-                {reduceAsk && (() => {
-                  const reasonOk = (reduceAsk.reason || "").trim().length >= 5;
-                  return (
-                    <div onClick={()=>setReduceAsk(null)}
-                      style={{position:"fixed",inset:0,background:"rgba(0,0,0,.55)",zIndex:500,display:"flex",alignItems:"center",justifyContent:"center",padding:16,direction:"rtl"}}>
-                      <div onClick={e=>e.stopPropagation()}
-                        style={{background:ui.cardBg,maxWidth:420,width:"100%",padding:22,borderRadius:8,boxShadow:"0 12px 48px rgba(0,0,0,.25)"}}>
-                        <h3 style={{fontSize:14.5,fontWeight:600,color:ui.text,fontFamily:ui.fontBody,margin:"0 0 6px"}}>
-                          ⚠ سبب تقليل الكمية
-                        </h3>
-                        <div style={{fontSize:12.5,color:ui.textSub,fontFamily:ui.fontBody,marginBottom:14}}>
-                          {reduceAsk.product.name} · {reduceAsk.fromQty} → {reduceAsk.toQty}
-                          {" "}(—{reduceAsk.fromQty - reduceAsk.toQty} قطعة)
-                        </div>
-                        <textarea rows={3} autoFocus
-                          value={reduceAsk.reason}
-                          onChange={e=>setReduceAsk({...reduceAsk, reason:e.target.value})}
-                          placeholder="مثال: تالف، استرجاع عميل، خطأ في الجرد... (5 أحرف على الأقل)"
-                          style={{padding:"8px 12px",border:`1px solid #FCA5A5`,borderRadius:6,background:"#FEF2F2",fontFamily:ui.fontBody,fontSize:13,color:ui.text,outline:"none",width:"100%",direction:"rtl",resize:"vertical",minHeight:80,boxSizing:"border-box"}}/>
-                        <div style={{display:"flex",gap:8,justifyContent:"flex-end",marginTop:12}}>
-                          <button onClick={()=>setReduceAsk(null)}
-                            style={{padding:"8px 16px",background:"transparent",border:ui.border,borderRadius:6,fontSize:12.5,color:ui.textSub,fontFamily:ui.fontBody,cursor:"pointer"}}>
-                            إلغاء
-                          </button>
-                          <button
-                            disabled={!reasonOk}
-                            onClick={()=>reduceAsk.onConfirm(reduceAsk.reason.trim())}
-                            style={{padding:"8px 18px",background: reasonOk ? "#DC2626" : "#9CA3AF",color:"#fff",border:"none",borderRadius:6,fontSize:12.5,fontFamily:ui.fontBody,cursor: reasonOk ? "pointer" : "not-allowed"}}>
-                            تأكيد التقليل
-                          </button>
-                        </div>
-                      </div>
-                    </div>
-                  );
-                })()}
+                  </div>
+                )}
               </div>
             );
           })()}
