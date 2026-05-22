@@ -1163,6 +1163,36 @@ function AdminDash({ go }) {
   const refreshApprovals = async () => {
     try { const r = await fetch("/api/approvals?status=pending"); if (r.ok) setApprovals(await r.json()); } catch {}
   };
+
+  // ── Messages inbox ─────────────────────────────────────────────────────────
+  const [messages, setMessages] = useState([]);
+  const [inboxOpen, setInboxOpen] = useState(false);
+  const [rejectionFor, setRejectionFor] = useState(null); // { msgId, approvalId, label, note }
+  const myInboxAddr = (authUser && authUser.email) || activeRole;
+
+  const refreshMessages = async () => {
+    try {
+      const r = await fetch(`/api/messages?to=${encodeURIComponent(myInboxAddr)}`);
+      if (r.ok) setMessages(await r.json());
+    } catch {}
+  };
+  // Poll the inbox every 10 seconds — works on every admin tab.
+  useEffect(() => {
+    refreshMessages();
+    const i = setInterval(refreshMessages, 10000);
+    return () => clearInterval(i);
+  // eslint-disable-next-line
+  }, [myInboxAddr]);
+
+  const markMessageRead = async (id) => {
+    setMessages(prev => prev.map(m => m.id === id && !m.read_at ? { ...m, read_at: new Date().toISOString() } : m));
+    try { await fetch(`/api/messages/${id}/read`, { method:"PATCH" }); } catch {}
+  };
+  const markAllRead = async () => {
+    setMessages(prev => prev.map(m => m.read_at ? m : { ...m, read_at: new Date().toISOString() }));
+    try { await fetch(`/api/messages/read-all`, { method:"PATCH", headers:{"Content-Type":"application/json"}, body: JSON.stringify({ to: myInboxAddr }) }); } catch {}
+  };
+  const unreadCount = messages.filter(m => !m.read_at).length;
   // Overview poller — every 10s — fans out to orders / users / products / approvals
   useEffect(() => {
     if (tab !== "overview") return;
@@ -1293,6 +1323,7 @@ function AdminDash({ go }) {
       if (r.ok) {
         refreshApprovals();
         refreshProducts({ allowImport: false });
+        refreshMessages();
         setSavedToast(status === "approved" ? "تمت الموافقة" : "تم الرفض");
         setTimeout(()=>setSavedToast(""), 2000);
       }
@@ -1622,10 +1653,12 @@ function AdminDash({ go }) {
     }
   };
 
-  // Single entry-point for changing a product's stock. Any reduction routes
-  // through the inline reason modal — no path bypasses it. Increases go
-  // straight to the API. Also writes to /api/stock-changes (audit) and posts
-  // a stock_reduce notification when reducing.
+  // Single entry-point for changing a product's stock.
+  // - Increases → applied immediately via PATCH.
+  // - Decreases → capture reason via modal, then ALWAYS create a
+  //   `stock_reduce` approval request. The server only writes the new stock
+  //   value when super admin approves the request. Until then, the row's
+  //   visible stock stays at its old value.
   const applyStockChange = (product, newQty, opts = {}) => {
     const id   = product.id;
     const name = product.name || "—";
@@ -1633,40 +1666,45 @@ function AdminDash({ go }) {
     const to   = Math.max(0, Number(newQty) || 0);
     if (from === to) return;
 
-    const commit = async (reason) => {
-      await patchProduct(id, { stock: to });
-      if (to < from) {
+    if (to > from) {
+      // Increase — straight PATCH.
+      patchProduct(id, { stock: to }).then(() => { if (opts.onDone) opts.onDone(); });
+      return;
+    }
+
+    // Decrease — open reason modal, then submit approval.
+    setReduceAsk({
+      product, fromQty: from, toQty: to, reason: "",
+      onConfirm: async (reason) => {
+        setReduceAsk(null);
+        const requester     = (authUser && authUser.email) || activeRole;
+        const requesterName = (authUser && authUser.name)  || activeRole;
         try {
+          // Audit log
           await fetch("/api/stock-changes", {
             method: "POST", headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
               product_id: id, product_name: name,
-              old_qty: from, new_qty: to,
-              reason, actor: activeRole
-            })
+              old_qty: from, new_qty: to, reason, actor: requester,
+            }),
           });
+          // Approval request — server applies the new stock value only on approve
           await fetch("/api/approvals", {
             method: "POST", headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
               type: "stock_reduce",
               target_id: String(id), target_label: name,
-              requester: activeRole, reason,
-              payload: { old_qty: from, new_qty: to }
-            })
+              requester, requester_id: requester, requester_name: requesterName,
+              reason, payload: { old_qty: from, new_qty: to },
+            }),
           });
           refreshApprovals();
+          refreshMessages();
+          setSavedToast("تم إرسال طلب تقليل الكمية للمراجعة من Super Admin");
+          setTimeout(()=>setSavedToast(""), 2500);
         } catch {}
-      }
-      if (opts.onDone) opts.onDone();
-    };
-
-    // Increase → no reason needed
-    if (to > from) { commit(""); return; }
-
-    // Decrease → require reason via the inline modal
-    setReduceAsk({
-      product, fromQty: from, toQty: to, reason: "",
-      onConfirm: (reason) => { setReduceAsk(null); commit(reason); },
+        if (opts.onDone) opts.onDone();
+      },
     });
   };
 
@@ -2136,120 +2174,6 @@ function AdminDash({ go }) {
         </div>
       </div>
 
-      {/* ── Notifications panel (live) ─────────────────────────────────── */}
-      {(() => {
-        // Build a unified feed of recent events. Each item has { id, ts, icon, title, body, action? }
-        const feed = [];
-        approvals.forEach(a => {
-          const titleMap = {
-            product_delete: "طلب حذف منتج",
-            product_add:    "طلب إضافة منتج",
-            stock_reduce:   "تقليل كمية مخزون",
-          };
-          feed.push({
-            id: "a-"+a.id, ts: new Date(a.created_at.replace(" ","T")+"Z").getTime(),
-            icon: a.type==="product_delete" ? "🗑️" : a.type==="stock_reduce" ? "📉" : "📦",
-            title: titleMap[a.type] || a.type,
-            body: `${a.target_label || a.target_id || ""} · بواسطة ${a.requester || "—"}${a.reason ? ` · السبب: ${a.reason}` : ""}`,
-            approval: a,
-          });
-        });
-        // New orders
-        orderList.slice(0, 30).forEach(o => {
-          const ts = o.created_at ? new Date(o.created_at.replace(" ","T")+"Z").getTime() : Date.now();
-          feed.push({
-            id: "o-"+o.id, ts,
-            icon: "🛍️",
-            title: "طلب جديد",
-            body: `${o.name} · ${o.city || "—"} · ${(o.total||0).toLocaleString()} ج`,
-          });
-        });
-        // New customers (this month)
-        allUsers.slice(0, 20).forEach(u => {
-          if (!u.firstOrder) return;
-          const ts = new Date(u.firstOrder).getTime();
-          if (ts < Date.now() - 30*24*3600*1000) return;
-          feed.push({
-            id: "u-"+u.email, ts,
-            icon: "👤",
-            title: "عميل جديد",
-            body: `${u.name || u.email} · ${u.email}`,
-          });
-        });
-        // Low-stock alerts
-        dbProducts.forEach(p => {
-          if ((p.stock||0) <= 0 || (p.stock||0) > (p.alert_threshold||0)) return;
-          feed.push({
-            id: "lo-"+p.id, ts: Date.now() - 1000,
-            icon: "⚠️",
-            title: "تنبيه: مخزون منخفض",
-            body: `${p.name} · باقي ${p.stock} قطعة (الحد ${p.alert_threshold})`,
-          });
-        });
-        feed.sort((a,b) => b.ts - a.ts);
-        const top = feed.slice(0, 12);
-
-        return (
-          <div style={{background:ui.cardBg,border:ui.border,borderRadius:ui.radius,padding:"14px 16px",marginBottom:10}}>
-            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10,flexWrap:"wrap",gap:6}}>
-              <h3 style={{fontSize:13,fontWeight:500,color:ui.text,margin:0,fontFamily:ui.fontBody}}>
-                الإشعارات المباشرة
-                {approvals.length > 0 && (
-                  <span style={{marginInlineStart:8,padding:"2px 9px",borderRadius:20,background:"#FEE2E2",color:"#B91C1C",fontSize:10.5}}>
-                    {approvals.length} بانتظار الموافقة
-                  </span>
-                )}
-              </h3>
-              <span style={{fontSize:10.5,color:ui.textSub,fontFamily:ui.fontBody}}>تحديث كل 10 ثوانٍ</span>
-            </div>
-            {top.length === 0 ? (
-              <div style={{padding:"20px 0",textAlign:"center",color:ui.textSub,fontFamily:ui.fontBody,fontSize:12}}>
-                لا يوجد نشاط لعرضه حالياً
-              </div>
-            ) : (
-              <div style={{maxHeight:300,overflow:"auto"}}>
-                {top.map(item => (
-                  <div key={item.id} style={{display:"flex",alignItems:"flex-start",gap:10,padding:"8px 0",borderBottom:`0.5px solid #EEE`}}>
-                    <div style={{width:26,height:26,borderRadius:"50%",background:ui.sideBg,display:"flex",alignItems:"center",justifyContent:"center",fontSize:14,flexShrink:0}}>{item.icon}</div>
-                    <div style={{flex:1,minWidth:0}}>
-                      <div style={{fontSize:12.5,color:ui.text,fontWeight:500,fontFamily:ui.fontBody}}>{item.title}</div>
-                      <div style={{fontSize:11.5,color:ui.textSub,fontFamily:ui.fontBody,marginTop:2,wordBreak:"break-word"}}>{item.body}</div>
-                      {item.approval && isSuper && (
-                        <div style={{display:"flex",gap:6,marginTop:6}}>
-                          {/* Stock reductions are informational — no approve/reject needed.
-                              Only product_delete / product_add need a decision. */}
-                          {(item.approval.type === "product_delete" || item.approval.type === "product_add") ? (
-                            <>
-                              <button onClick={()=>resolveApproval(item.approval.id, "approved")}
-                                style={{background:"#DCFCE7",border:"0.5px solid #86EFAC",padding:"3px 9px",cursor:"pointer",fontSize:11,fontFamily:ui.fontBody,color:"#15803D",borderRadius:4}}>موافقة</button>
-                              <button onClick={()=>{
-                                const note = prompt("سبب الرفض (اختياري):") || "";
-                                resolveApproval(item.approval.id, "rejected", note);
-                              }} style={{background:"#FEE2E2",border:"0.5px solid #FCA5A5",padding:"3px 9px",cursor:"pointer",fontSize:11,fontFamily:ui.fontBody,color:"#B91C1C",borderRadius:4}}>رفض</button>
-                            </>
-                          ) : (
-                            <button onClick={()=>resolveApproval(item.approval.id, "approved")}
-                              style={{background:"transparent",border:ui.border,padding:"3px 9px",cursor:"pointer",fontSize:11,fontFamily:ui.fontBody,color:ui.textSub,borderRadius:4}}>وضع علامة كمقروء</button>
-                          )}
-                        </div>
-                      )}
-                    </div>
-                    <div style={{fontSize:10.5,color:ui.textSub,fontFamily:ui.fontBody,flexShrink:0,whiteSpace:"nowrap"}}>
-                      {(() => {
-                        const m = Math.round((Date.now() - item.ts)/60000);
-                        if (m < 1) return "الآن";
-                        if (m < 60) return `${m} د`;
-                        if (m < 60*24) return `${Math.round(m/60)} س`;
-                        return `${Math.round(m/(60*24))} ي`;
-                      })()}
-                    </div>
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
-        );
-      })()}
 
       {/* Top selling products */}
       <div style={{background:ui.cardBg,border:ui.border,borderRadius:ui.radius,padding:"14px 16px"}}>
@@ -2328,11 +2252,157 @@ function AdminDash({ go }) {
 
         {/* MAIN */}
         <main style={{padding:mob?"14px":"20px 24px",overflow:"auto"}}>
-          {/* Topbar */}
-          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:14}}>
-            <h2 style={{fontSize:17,fontWeight:500,color:ui.text,fontFamily:ui.fontHead,margin:0}}>{topbarTitle}</h2>
+          {/* Topbar with messages bell */}
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:14,gap:12}}>
+            <h2 style={{fontSize:17,fontWeight:500,color:ui.text,fontFamily:ui.fontHead,margin:0,flex:1}}>{topbarTitle}</h2>
             <span style={{fontSize:12,color:ui.textSub,fontFamily:ui.fontBody}}>{monthLabel}</span>
+            <button type="button"
+              onClick={()=>setInboxOpen(true)}
+              title={`الرسائل (${unreadCount} غير مقروءة)`}
+              style={{position:"relative",background:ui.cardBg,border:ui.border,borderRadius:"50%",
+                width:36,height:36,cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",
+                color: unreadCount > 0 ? ui.text : ui.textSub, flexShrink:0}}>
+              {/* Bell icon */}
+              <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M18 8a6 6 0 0 0-12 0c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/>
+              </svg>
+              {unreadCount > 0 && (
+                <span style={{position:"absolute",top:-2,insetInlineStart:-2,
+                  minWidth:18,height:18,padding:"0 5px",borderRadius:9,
+                  background:"#DC2626",color:"#fff",fontSize:10,fontWeight:600,
+                  display:"flex",alignItems:"center",justifyContent:"center",fontFamily:ui.fontBody}}>
+                  {unreadCount > 99 ? "99+" : unreadCount}
+                </span>
+              )}
+            </button>
           </div>
+
+          {/* Inbox drawer */}
+          {inboxOpen && (
+            <div onClick={()=>setInboxOpen(false)}
+              style={{position:"fixed",inset:0,background:"rgba(0,0,0,.45)",zIndex:600,display:"flex",justifyContent:"flex-start",direction:"rtl"}}>
+              <aside onClick={e=>e.stopPropagation()}
+                style={{width: mob ? "100%" : 420, height:"100%", background:ui.cardBg, borderInlineEnd:ui.border, overflow:"auto", display:"flex", flexDirection:"column"}}>
+                <header style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"14px 16px",borderBottom:ui.border}}>
+                  <div>
+                    <div style={{fontSize:14.5,fontWeight:600,color:ui.text,fontFamily:ui.fontBody}}>صندوق الرسائل</div>
+                    <div style={{fontSize:11,color:ui.textSub,fontFamily:ui.fontBody,marginTop:2}}>
+                      {messages.length} رسالة · {unreadCount} غير مقروءة
+                    </div>
+                  </div>
+                  <div style={{display:"flex",gap:6}}>
+                    {unreadCount > 0 && (
+                      <button onClick={markAllRead}
+                        style={{background:"transparent",border:ui.border,padding:"5px 10px",cursor:"pointer",fontSize:11,fontFamily:ui.fontBody,color:ui.text,borderRadius:5}}>
+                        تحديد الكل كمقروء
+                      </button>
+                    )}
+                    <button onClick={()=>setInboxOpen(false)} style={{background:"none",border:"none",fontSize:22,color:ui.textSub,cursor:"pointer",lineHeight:1,padding:4}}>✕</button>
+                  </div>
+                </header>
+                <div style={{flex:1,overflowY:"auto"}}>
+                  {messages.length === 0 ? (
+                    <div style={{padding:"40px 20px",textAlign:"center",color:ui.textSub,fontFamily:ui.fontBody,fontSize:13}}>
+                      لا توجد رسائل
+                    </div>
+                  ) : messages.map(m => {
+                    const isReq = m.type === 'request';
+                    const isApp = m.type === 'approval';
+                    const isRej = m.type === 'rejection';
+                    const accent = isReq ? "#F59E0B" : isApp ? "#16A34A" : isRej ? "#DC2626" : ui.textSub;
+                    const needsAction = isReq && m.metadata && m.metadata.requires_action && m.metadata.approval_id && isSuper;
+                    return (
+                      <article key={m.id}
+                        onClick={()=>!m.read_at && markMessageRead(m.id)}
+                        style={{padding:"12px 16px",borderBottom:`0.5px solid #EEE`,
+                          background: m.read_at ? "transparent" : "#FFFBEA",
+                          cursor: m.read_at ? "default" : "pointer", borderInlineStart:`3px solid ${accent}`}}>
+                        <div style={{display:"flex",justifyContent:"space-between",alignItems:"baseline",gap:8,marginBottom:4}}>
+                          <div style={{fontSize:13,fontWeight:600,color:ui.text,fontFamily:ui.fontBody,flex:1,minWidth:0}}>{m.subject || "—"}</div>
+                          <div style={{fontSize:10.5,color:ui.textSub,fontFamily:ui.fontBody,whiteSpace:"nowrap"}}>
+                            {(() => {
+                              const t = new Date((m.created_at || "").replace(" ","T")+"Z").getTime();
+                              if (!t) return "—";
+                              const min = Math.round((Date.now() - t) / 60000);
+                              if (min < 1) return "الآن";
+                              if (min < 60) return `${min} د`;
+                              if (min < 60*24) return `${Math.round(min/60)} س`;
+                              return `${Math.round(min/(60*24))} ي`;
+                            })()}
+                          </div>
+                        </div>
+                        {m.from_user_name && (
+                          <div style={{fontSize:10.5,color:ui.textSub,fontFamily:ui.fontBody,marginBottom:6}}>
+                            من: {m.from_user_name}
+                          </div>
+                        )}
+                        {m.body && (
+                          <pre style={{fontSize:12.5,color:ui.text,fontFamily:ui.fontBody,whiteSpace:"pre-wrap",lineHeight:1.7,margin:0,wordBreak:"break-word"}}>{m.body}</pre>
+                        )}
+                        {needsAction && (
+                          <div style={{display:"flex",gap:6,marginTop:10}}>
+                            <button onClick={async (e)=>{
+                              e.stopPropagation();
+                              await resolveApproval(m.metadata.approval_id, "approved");
+                              markMessageRead(m.id);
+                            }}
+                              style={{background:"#DCFCE7",border:"0.5px solid #86EFAC",padding:"5px 12px",cursor:"pointer",fontSize:11.5,fontFamily:ui.fontBody,color:"#15803D",borderRadius:5}}>
+                              ✓ موافقة
+                            </button>
+                            <button onClick={(e)=>{
+                              e.stopPropagation();
+                              setRejectionFor({ msgId: m.id, approvalId: m.metadata.approval_id, label: m.subject, note: "" });
+                            }}
+                              style={{background:"#FEE2E2",border:"0.5px solid #FCA5A5",padding:"5px 12px",cursor:"pointer",fontSize:11.5,fontFamily:ui.fontBody,color:"#B91C1C",borderRadius:5}}>
+                              ✗ رفض
+                            </button>
+                          </div>
+                        )}
+                      </article>
+                    );
+                  })}
+                </div>
+              </aside>
+            </div>
+          )}
+
+          {/* Rejection modal — requires a reason that's delivered to the original requester */}
+          {rejectionFor && (
+            <div onClick={()=>setRejectionFor(null)}
+              style={{position:"fixed",inset:0,background:"rgba(0,0,0,.55)",zIndex:700,display:"flex",alignItems:"center",justifyContent:"center",padding:16,direction:"rtl"}}>
+              <div onClick={e=>e.stopPropagation()}
+                style={{background:ui.cardBg,maxWidth:440,width:"100%",padding:22,borderRadius:8,boxShadow:"0 12px 48px rgba(0,0,0,.25)"}}>
+                <h3 style={{fontSize:15,fontWeight:600,color:ui.text,fontFamily:ui.fontBody,margin:"0 0 4px"}}>
+                  رفض الطلب
+                </h3>
+                <div style={{fontSize:12.5,color:ui.textSub,fontFamily:ui.fontBody,marginBottom:14}}>
+                  {rejectionFor.label || "—"}
+                </div>
+                <label style={{display:"block",fontSize:12,color:ui.text,marginBottom:5,fontFamily:ui.fontBody,fontWeight:500}}>
+                  سبب الرفض (هيوصل للطالب)
+                </label>
+                <textarea rows={3} autoFocus
+                  value={rejectionFor.note}
+                  onChange={e=>setRejectionFor({...rejectionFor, note:e.target.value})}
+                  placeholder="مثال: المخزون ضروري للطلبات الحالية..."
+                  style={{padding:"8px 12px",border:`1px solid #FCA5A5`,borderRadius:6,background:"#FEF2F2",fontFamily:ui.fontBody,fontSize:13,color:ui.text,outline:"none",width:"100%",direction:"rtl",resize:"vertical",minHeight:80,boxSizing:"border-box"}}/>
+                <div style={{display:"flex",gap:8,justifyContent:"flex-end",marginTop:12}}>
+                  <button onClick={()=>setRejectionFor(null)}
+                    style={{padding:"8px 16px",background:"transparent",border:ui.border,borderRadius:6,fontSize:12.5,color:ui.textSub,fontFamily:ui.fontBody,cursor:"pointer"}}>إلغاء</button>
+                  <button
+                    disabled={(rejectionFor.note || "").trim().length < 3}
+                    onClick={async () => {
+                      await resolveApproval(rejectionFor.approvalId, "rejected", rejectionFor.note.trim());
+                      if (rejectionFor.msgId) markMessageRead(rejectionFor.msgId);
+                      setRejectionFor(null);
+                    }}
+                    style={{padding:"8px 18px",background: (rejectionFor.note||"").trim().length >= 3 ? "#DC2626" : "#9CA3AF",color:"#fff",border:"none",borderRadius:6,fontSize:12.5,fontFamily:ui.fontBody,cursor:(rejectionFor.note||"").trim().length >= 3 ? "pointer" : "not-allowed"}}>
+                    إرسال الرفض
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
 
           {tab === "overview" && <Overview />}
 
@@ -2918,8 +2988,15 @@ function AdminDash({ go }) {
               return { bg:"#DCFCE7", fg:"#15803D", l:"متاح" };
             };
 
-            // Progress %: stock / max(stock seen for THIS sku since admin opened tab)
-            const stockMax = Math.max(10, ...dbProducts.map(p=>p.stock||0));
+            // Per-product progress: stock measured against the product's own
+            // alert threshold (×3 for headroom), capped at 100%. NEVER depends
+            // on other products' stock — fixes the bug where increasing one
+            // product appeared to reduce others.
+            const fillPctOf = (p) => {
+              const target = Math.max(1, (Number(p.alert_threshold) || 5) * 3);
+              const pct = Math.round(((Number(p.stock) || 0) / target) * 100);
+              return Math.max(0, Math.min(100, pct));
+            };
 
             const inputSm = {
               padding:"6px 10px", border:ui.border, borderRadius:6, background:ui.cardBg,
@@ -2997,10 +3074,10 @@ function AdminDash({ go }) {
                   </div>
                 ) : (
                   <div style={{background:ui.cardBg,border:ui.border,borderRadius:ui.radius,overflow:"hidden",overflowX:"auto"}}>
-                    <table style={{width:"100%",borderCollapse:"collapse",direction:"rtl",fontFamily:ui.fontBody,minWidth:760}}>
+                    <table style={{width:"100%",borderCollapse:"collapse",direction:"rtl",fontFamily:ui.fontBody,minWidth:900}}>
                       <thead>
                         <tr style={{background:ui.sideBg,borderBottom:`0.5px solid #E5E5E5`}}>
-                          {["المنتج","الحالة","الكمية","حد التنبيه","مستوى المخزون","آخر تحديث",""].map(h=>(
+                          {["المنتج","الحالة","المتاح","المحجوز","الهالك","حد التنبيه","مستوى المخزون","آخر تحديث",""].map(h=>(
                             <th key={h} style={{padding:"11px 14px",textAlign:"right",fontSize:11.5,color:ui.textSub,fontWeight:500,whiteSpace:"nowrap"}}>{h}</th>
                           ))}
                         </tr>
@@ -3008,7 +3085,7 @@ function AdminDash({ go }) {
                       <tbody>
                         {filtered.map(p => {
                           const b = stockBadge(p);
-                          const fillPct = Math.max(0, Math.min(100, Math.round(((p.stock||0)/stockMax)*100)));
+                          const fillPct = fillPctOf(p);
                           const fillColor = (p.stock||0) <= 0 ? "#DC2626"
                             : (p.stock||0) <= (p.alert_threshold||0) ? "#D97706" : "#16A34A";
                           return (
@@ -3031,34 +3108,46 @@ function AdminDash({ go }) {
                               <td style={{padding:"11px 14px"}}>
                                 <span style={{fontSize:10.5,padding:"3px 10px",borderRadius:20,background:b.bg,color:b.fg,fontFamily:ui.fontBody,whiteSpace:"nowrap"}}>{b.l}</span>
                               </td>
-                              {/* Quantity with +/-  — every reduction triggers the reason modal.
-                                  The middle cell is a READ-ONLY display to keep the
-                                  +/- buttons the only mutation path. Use the تعديل
-                                  modal for arbitrary edits. */}
+                              {/* Available — directly editable; defaultValue+onBlur prevents
+                                  focus loss while typing. Reductions route through the
+                                  approval workflow (server holds the stock until approved). */}
                               <td style={{padding:"11px 14px"}}>
-                                <div style={{display:"inline-flex",alignItems:"center",gap:4,border:ui.border,borderRadius:6,padding:"2px"}}>
-                                  <button onClick={()=>applyStockChange(p, (p.stock||0) - 1)}
-                                    disabled={invEditing===p.id || (p.stock||0)<=0}
-                                    title="تقليل الكمية (سيُطلب منك سبب)"
-                                    style={{width:24,height:24,border:"none",background:"transparent",cursor: ((p.stock||0)<=0 || invEditing===p.id) ? "not-allowed" : "pointer",fontSize:16,color:ui.textSub,borderRadius:4}}>−</button>
-                                  <span style={{minWidth:46,textAlign:"center",fontFamily:ui.fontBody,fontSize:13,color:ui.text,padding:"0 4px"}}>
-                                    {p.stock||0}
-                                  </span>
-                                  <button onClick={()=>applyStockChange(p, (p.stock||0) + 1)}
-                                    disabled={invEditing===p.id}
-                                    style={{width:24,height:24,border:"none",background:"transparent",cursor: invEditing===p.id ? "not-allowed" : "pointer",fontSize:16,color:ui.textSub,borderRadius:4}}>+</button>
-                                </div>
+                                <input type="number" min="0" defaultValue={p.stock||0}
+                                  key={`stock-${p.id}-${p.updated_at || ''}`}
+                                  onBlur={e=>{
+                                    const v = Math.max(0, parseInt(e.target.value, 10) || 0);
+                                    if (v === (p.stock||0)) return;
+                                    if (v < (p.stock||0)) {
+                                      // Reduction → goes through reason modal + approval
+                                      applyStockChange(p, v, { onDone: () => { e.target.blur(); } });
+                                      // Revert the input until approval lands (server is authoritative)
+                                      e.target.value = String(p.stock || 0);
+                                    } else {
+                                      // Pure increase
+                                      patchProduct(p.id, { stock: v });
+                                    }
+                                  }}
+                                  style={{...inputSm, width:74, padding:"6px 8px", textAlign:"center"}}/>
+                              </td>
+                              {/* Reserved (locked to live orders) — read-only */}
+                              <td style={{padding:"11px 14px",fontSize:13,color:ui.text,fontFamily:ui.fontBody,whiteSpace:"nowrap"}}>
+                                <span title="كمية محجوزة لطلبات لم تشحن بعد">{p.stock_reserved || 0}</span>
+                              </td>
+                              {/* Damaged — read-only */}
+                              <td style={{padding:"11px 14px",fontSize:13,color: (p.stock_damaged||0) > 0 ? "#B91C1C" : ui.textSub, fontFamily:ui.fontBody,whiteSpace:"nowrap"}}>
+                                <span title="كمية تالفة من المرتجعات">{p.stock_damaged || 0}</span>
                               </td>
                               {/* Threshold (editable) */}
                               <td style={{padding:"11px 14px"}}>
-                                <input type="number" defaultValue={p.alert_threshold||0}
+                                <input type="number" min="0" defaultValue={p.alert_threshold||0}
+                                  key={`thr-${p.id}-${p.updated_at || ''}`}
                                   onBlur={e=>{
-                                    const v = Math.max(0, Number(e.target.value)||0);
+                                    const v = Math.max(0, parseInt(e.target.value, 10) || 0);
                                     if (v !== (p.alert_threshold||0)) patchProduct(p.id, { alert_threshold: v });
                                   }}
                                   style={{...inputSm, width:60, padding:"4px 8px", textAlign:"center"}}/>
                               </td>
-                              {/* Progress bar */}
+                              {/* Progress bar — per-product, NEVER depends on other products */}
                               <td style={{padding:"11px 14px",minWidth:140}}>
                                 <div style={{display:"flex",alignItems:"center",gap:8}}>
                                   <div style={{flex:1,height:6,background:"#F3F4F6",borderRadius:3,overflow:"hidden"}}>
@@ -3318,12 +3407,24 @@ function AdminDash({ go }) {
                                       style={{background:"#FEE2E2",border:"0.5px solid #FCA5A5",padding:"4px 9px",cursor:"pointer",fontSize:11,fontFamily:ui.fontBody,color:"#B91C1C",borderRadius:4}}>رفض</button>
                                   </div>
                                 )}
-                                {r.status === "approved" && (
+                                {r.status === "approved" && r.inspection_status !== "good" && r.inspection_status !== "damaged" && (
+                                  <div style={{display:"flex",gap:5}}>
+                                    <button title="القطعة سليمة — ترجع للمخزون"
+                                      onClick={()=>patchReturn(r.id, { inspection_status:"good" })}
+                                      style={{background:"#DCFCE7",border:"0.5px solid #86EFAC",padding:"4px 9px",cursor:"pointer",fontSize:11,fontFamily:ui.fontBody,color:"#15803D",borderRadius:4}}>صالح</button>
+                                    <button title="القطعة معيبة — تروح للهالك وتتسجل تكلفتها"
+                                      onClick={()=>patchReturn(r.id, { inspection_status:"damaged" })}
+                                      style={{background:"#FEE2E2",border:"0.5px solid #FCA5A5",padding:"4px 9px",cursor:"pointer",fontSize:11,fontFamily:ui.fontBody,color:"#B91C1C",borderRadius:4}}>معيب</button>
+                                  </div>
+                                )}
+                                {r.status === "approved" && (r.inspection_status === "good" || r.inspection_status === "damaged") && (
                                   <button onClick={()=>patchReturn(r.id, { status:"refunded" })}
                                     style={{background:ui.text,color:"#fff",border:"none",padding:"4px 11px",cursor:"pointer",fontSize:11,fontFamily:ui.fontBody,borderRadius:4}}>تمت الإعادة</button>
                                 )}
                                 {(r.status==="rejected"||r.status==="refunded") && (
-                                  <span style={{fontSize:11,color:ui.textSub,fontFamily:ui.fontBody}}>—</span>
+                                  <span style={{fontSize:11,color:ui.textSub,fontFamily:ui.fontBody}}>
+                                    {r.inspection_status === "good" ? "سليم ✓" : r.inspection_status === "damaged" ? "هالك" : "—"}
+                                  </span>
                                 )}
                               </td>
                             </tr>
@@ -3932,34 +4033,9 @@ function AdminDash({ go }) {
                   </div>
                 </Section>
 
-                <Section title="الشحن المجاني">
-                  <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"6px 0"}}>
-                    <span style={{fontSize:13,color:ui.text,fontFamily:ui.fontBody}}>تفعيل الشحن المجاني للطلبات الكبيرة</span>
-                    <Toggle value={shipping.free_shipping_enabled} onChange={v=>{ const next={...shipping, free_shipping_enabled:v}; setShipping(next); saveSetting("shipping", next); }}/>
-                  </div>
-                  <div style={{marginTop:12,display:"grid",gridTemplateColumns:mob?"1fr":"1fr auto",gap:10,alignItems:"end"}}>
-                    <div>
-                      <label style={{display:"block",fontSize:12,color:ui.text,fontFamily:ui.fontBody,marginBottom:5}}>الحد الأدنى للطلب (جنيه)</label>
-                      {/* Keep the visible value as a string so the user can type
-                          intermediate states like "" or "1" without it being
-                          coerced to 0 mid-typing. We only parse on save. */}
-                      <input type="text" inputMode="numeric" pattern="[0-9]*"
-                        style={{...inputSm, padding:"8px 12px", width:"100%", direction:"ltr", textAlign:"left", letterSpacing:".5px"}}
-                        value={String(shipping.free_shipping_min_order ?? "")}
-                        onChange={e=>{
-                          // strip non-digits so paste/IME junk doesn't sneak in
-                          const cleaned = e.target.value.replace(/[^0-9]/g, "");
-                          setShipping({...shipping, free_shipping_min_order: cleaned === "" ? "" : parseInt(cleaned, 10) });
-                        }}
-                        placeholder="مثال: 500" />
-                    </div>
-                    <button onClick={()=>saveSetting("shipping", {
-                      ...shipping,
-                      free_shipping_min_order: Number(shipping.free_shipping_min_order) || 0
-                    })}
-                      style={{background:ui.text,color:"#fff",border:"none",padding:"9px 18px",cursor:"pointer",fontSize:12.5,borderRadius:6,fontFamily:ui.fontBody}}>حفظ</button>
-                  </div>
-                </Section>
+                <div style={{padding:"10px 14px",background:"#FAFAFA",border:"0.5px dashed #D4D4D4",borderRadius:6,marginBottom:12,fontSize:11.5,color:ui.textSub,fontFamily:ui.fontBody,lineHeight:1.7}}>
+                  ℹ إعدادات الشحن المجاني (التفعيل + الحد الأدنى) تم نقلها لـ <strong>الإعدادات → الشحن</strong> ويتحكم فيها <strong>Super Admin</strong> فقط.
+                </div>
 
                 <Section title="شركات الشحن">
                   {[
@@ -4134,8 +4210,8 @@ function AdminDash({ go }) {
                 <div style={{background:ui.cardBg,border:ui.border,borderRadius:ui.radius,padding:"6px 6px",marginBottom:12,display:"flex",gap:4,flexWrap:"wrap"}}>
                   {[
                     ["store","المتجر"],["account","الحساب"],["emails","الإيميلات"],
-                    ["payment","الدفع"],["notifications","الإشعارات"],
-                    ["team","الفريق"],["seo","SEO"]
+                    ["payment","الدفع"],["shipping_free","الشحن"],
+                    ["notifications","الإشعارات"],["team","الفريق"],["seo","SEO"]
                   ].map(([k,l])=>(
                     <button key={k} onClick={()=>setSettingsTab(k)}
                       style={{padding:"8px 14px",border:"none",cursor:"pointer",borderRadius:6,
@@ -4388,6 +4464,61 @@ function AdminDash({ go }) {
                       style={{background:ui.text,color:"#fff",border:"none",padding:"11px 22px",cursor:"pointer",fontSize:13,fontFamily:ui.fontBody,fontWeight:500,borderRadius:6}}>
                       حفظ قوالب الإيميل
                     </button>
+                  </div>
+                )}
+
+                {/* ── SHIPPING (super-admin only) ──────────────────────── */}
+                {settingsTab === "shipping_free" && (
+                  <div>
+                    <div style={sectionCard}>
+                      <div style={sectionTitle}>الشحن المجاني</div>
+                      <div style={{fontSize:11.5,color:ui.textSub,fontFamily:ui.fontBody,marginBottom:14,padding:"8px 12px",background:"#FAFAFA",borderRadius:6}}>
+                        🔒 يتحكم فيها Super Admin فقط. التغيير ينعكس فوراً على البانر في الصفحة الرئيسية وعربة التسوق.
+                      </div>
+                      <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"6px 0",borderBottom:`0.5px solid #EEE`,marginBottom:14}}>
+                        <span style={{fontSize:13,color:ui.text,fontFamily:ui.fontBody,fontWeight:500}}>تفعيل الشحن المجاني للطلبات الكبيرة</span>
+                        <button type="button"
+                          onClick={()=>{
+                            const next = { ...shipping, free_shipping_enabled: !shipping.free_shipping_enabled };
+                            setShipping(next); saveSetting("shipping", next);
+                          }}
+                          style={{ width:38, height:22, borderRadius:11, border:"none",
+                            background: shipping.free_shipping_enabled ? "#16A34A" : "#D4D4D4",
+                            position:"relative", cursor:"pointer", flexShrink:0 }}>
+                          <span style={{ position:"absolute", top:2,
+                            [shipping.free_shipping_enabled ? "left" : "right"]: 2,
+                            width:18, height:18, background:"#fff", borderRadius:"50%",
+                            boxShadow:"0 1px 2px rgba(0,0,0,.2)" }}/>
+                        </button>
+                      </div>
+
+                      <label style={{display:"block",fontSize:12,color:ui.text,fontFamily:ui.fontBody,marginBottom:5}}>الحد الأدنى للطلب (جنيه)</label>
+                      {/* Uncontrolled input: defaultValue + onBlur. The `key`
+                          forces a remount only when the saved value actually
+                          changes server-side, so typing doesn't lose focus. */}
+                      <div style={{display:"grid",gridTemplateColumns:mob?"1fr":"1fr auto",gap:10,alignItems:"end"}}>
+                        <input type="text" inputMode="numeric" pattern="[0-9]*"
+                          key={`fsmin-${shipping.free_shipping_min_order}`}
+                          defaultValue={String(shipping.free_shipping_min_order ?? "500")}
+                          onBlur={e=>{
+                            const v = Math.max(0, parseInt(e.target.value.replace(/[^0-9]/g,""), 10) || 0);
+                            const next = { ...shipping, free_shipping_min_order: v };
+                            setShipping(next); saveSetting("shipping", next);
+                          }}
+                          placeholder="مثال: 500"
+                          style={{padding:"10px 14px",border:ui.border,borderRadius:6,background:ui.cardBg,fontFamily:ui.fontBody,fontSize:14,color:ui.text,outline:"none",width:"100%",direction:"ltr",textAlign:"left",boxSizing:"border-box"}}/>
+                        <button onClick={()=>saveSetting("shipping", shipping)}
+                          style={{background:ui.text,color:"#fff",border:"none",padding:"10px 22px",cursor:"pointer",fontSize:13,borderRadius:6,fontFamily:ui.fontBody,fontWeight:500}}>حفظ</button>
+                      </div>
+                      <div style={{fontSize:11,color:ui.textSub,fontFamily:ui.fontBody,marginTop:8}}>
+                        القيمة الحالية المعلنة على الموقع:
+                        <strong style={{marginInlineStart:6,color: shipping.free_shipping_enabled ? "#16A34A" : "#DC2626"}}>
+                          {shipping.free_shipping_enabled
+                            ? `شحن مجاني فوق ${Number(shipping.free_shipping_min_order) || 0} ج`
+                            : "الشحن المجاني معطّل"}
+                        </strong>
+                      </div>
+                    </div>
                   </div>
                 )}
 
@@ -4932,6 +5063,7 @@ function Home({ go, allProds }) {
   const { prods: _p } = useProds();
   const { user } = useAuth();
   const { t, dir } = useLang();
+  const cartCtxForBanner = useCart();
   const homProds = allProds || _p || PRODS;
   const mob = useMob();
   const px = mob ? "16px" : "56px";
@@ -4943,11 +5075,17 @@ function Home({ go, allProds }) {
           {t("welcomeBack")} <strong>{user.name}</strong>! 🌸 &nbsp;—&nbsp; <span onClick={() => go("#myorders")} style={{ cursor: "pointer", textDecoration: "underline" }}>{t("welcomeViewOrders")}</span>
         </div>
       )}
-      {/* Announcement banner */}
+      {/* Announcement banner — free-shipping line reads live from /api/settings */}
       <div style={{ background: C.dk, color: C.go, textAlign: "center", padding: "10px 24px", fontSize: 13, letterSpacing: "0.05em", fontFamily: C.fb }}>
-        {t("topBanner").split("✦").map((part, i, arr) => (
-          <span key={i}>{part.trim()}{i < arr.length - 1 && <span style={{color:C.gom,margin:"0 14px"}}>✦</span>}</span>
-        ))}
+        {(() => {
+          const liveFreeMin = (cartCtxForBanner && cartCtxForBanner.freeShipMin) || 500;
+          // Substitute the live number into the translated banner, replacing any
+          // hardcoded "500"/"1000" that was in the locale string.
+          const banner = String(t("topBanner")).replace(/\d{2,}/, String(liveFreeMin));
+          return banner.split("✦").map((part, i, arr) => (
+            <span key={i}>{part.trim()}{i < arr.length - 1 && <span style={{color:C.gom,margin:"0 14px"}}>✦</span>}</span>
+          ));
+        })()}
       </div>
       {/* Hero — split editorial layout */}
       <section style={{

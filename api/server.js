@@ -132,6 +132,20 @@ db.exec(`
 `);
 
 db.exec(`
+  CREATE TABLE IF NOT EXISTS messages (
+    id            TEXT PRIMARY KEY,
+    from_user_id  TEXT,
+    from_user_name TEXT,
+    to_user_id    TEXT NOT NULL,
+    type          TEXT NOT NULL,         -- request | approval | rejection | info
+    subject       TEXT,
+    body          TEXT,
+    metadata      TEXT DEFAULT '{}',
+    read_at       DATETIME,
+    created_at    DATETIME DEFAULT CURRENT_TIMESTAMP
+  )
+`);
+db.exec(`
   CREATE TABLE IF NOT EXISTS expenses (
     id          TEXT PRIMARY KEY,
     category    TEXT NOT NULL,
@@ -239,8 +253,17 @@ function ensureColumn(table, col, type) {
 ensureColumn('orders',    'lat',       'REAL');
 ensureColumn('orders',    'lng',       'REAL');
 ensureColumn('orders',    'userEmail', 'TEXT');
+ensureColumn('orders',    'stock_applied', 'INTEGER DEFAULT 0'); // 1 once available→reserved ran
+ensureColumn('orders',    'stock_released', 'INTEGER DEFAULT 0'); // 1 once reserved→0 ran
 ensureColumn('addresses', 'lat',       'REAL');
 ensureColumn('addresses', 'lng',       'REAL');
+ensureColumn('products',  'stock_reserved', 'INTEGER DEFAULT 0');
+ensureColumn('products',  'stock_damaged',  'INTEGER DEFAULT 0');
+ensureColumn('returns',   'inspection_status', "TEXT DEFAULT 'pending'"); // pending | good | damaged
+ensureColumn('returns',   'inspected_at',      'DATETIME');
+ensureColumn('returns',   'stock_settled',     'INTEGER DEFAULT 0'); // 1 once available/damaged was updated
+ensureColumn('approvals', 'requester_id',  'TEXT');  // email of the requester
+ensureColumn('approvals', 'requester_name','TEXT');
 
 console.log('[nawra-api] DB ready:', path.join(__dirname, 'orders.db'));
 
@@ -411,6 +434,79 @@ const upsertUser = db.prepare(`
     totalSpent  = users.totalSpent + excluded.totalSpent
 `);
 
+// \u2500\u2500 Stock lifecycle helpers \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+// Items are stored on orders as JSON arrays of { id?, name, qty, price }.
+// Matching to a product row is done by id when present, otherwise by name.
+function findProductForItem(item) {
+  if (item && item.id != null) {
+    const byId = db.prepare('SELECT * FROM products WHERE id = ?').get(String(item.id));
+    if (byId) return byId;
+  }
+  if (item && item.name) {
+    return db.prepare('SELECT * FROM products WHERE name = ?').get(item.name);
+  }
+  return null;
+}
+const SUPER_ADMIN_FALLBACK = 'nawraskincare@gmail.com';
+
+// Reserve stock when an order is placed: available -=, reserved +=.
+// Idempotent via orders.stock_applied flag.
+function reserveStockForOrder(order, items) {
+  if (!order || order.stock_applied) return;
+  (items || []).forEach(it => {
+    const qty = Number(it.qty) || 0;
+    if (!qty) return;
+    const p = findProductForItem(it);
+    if (!p) return;
+    const newAvail = Math.max(0, (p.stock || 0) - qty);
+    db.prepare('UPDATE products SET stock = ?, stock_reserved = COALESCE(stock_reserved,0) + ? WHERE id = ?')
+      .run(newAvail, qty, p.id);
+  });
+  db.prepare('UPDATE orders SET stock_applied = 1 WHERE id = ?').run(String(order.id));
+}
+
+// Release reserved stock once the order ships out (the goods physically left).
+// Available is NOT changed \u2014 reservation just unwinds because the units are gone.
+function shipStockForOrder(order, items) {
+  if (!order || order.stock_released) return;
+  (items || []).forEach(it => {
+    const qty = Number(it.qty) || 0;
+    if (!qty) return;
+    const p = findProductForItem(it);
+    if (!p) return;
+    const newRes = Math.max(0, (p.stock_reserved || 0) - qty);
+    db.prepare('UPDATE products SET stock_reserved = ? WHERE id = ?').run(newRes, p.id);
+  });
+  db.prepare('UPDATE orders SET stock_released = 1 WHERE id = ?').run(String(order.id));
+}
+
+// Cancellation while still reserved: put units back to available.
+function cancelStockForOrder(order, items) {
+  if (!order || !order.stock_applied || order.stock_released) return;
+  (items || []).forEach(it => {
+    const qty = Number(it.qty) || 0;
+    if (!qty) return;
+    const p = findProductForItem(it);
+    if (!p) return;
+    const newRes = Math.max(0, (p.stock_reserved || 0) - qty);
+    db.prepare('UPDATE products SET stock = stock + ?, stock_reserved = ? WHERE id = ?')
+      .run(qty, newRes, p.id);
+  });
+  db.prepare('UPDATE orders SET stock_released = 1 WHERE id = ?').run(String(order.id));
+}
+
+// \u2500\u2500 Messages helper \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+function sendMessage({ from_user_id, from_user_name, to_user_id, type, subject, body, metadata }) {
+  if (!to_user_id) return null;
+  const id = `msg_${Date.now().toString(36)}_${Math.random().toString(36).slice(2,5)}`;
+  db.prepare(`
+    INSERT INTO messages (id, from_user_id, from_user_name, to_user_id, type, subject, body, metadata)
+    VALUES (?,?,?,?,?,?,?,?)
+  `).run(id, from_user_id || null, from_user_name || null, to_user_id, type, subject || null,
+         body || null, JSON.stringify(metadata || {}));
+  return id;
+}
+
 app.post('/api/orders', (req, res) => {
   try {
     const { id, date, name, phone, city, address, items, total, status, lat, lng, userEmail } = req.body;
@@ -423,6 +519,21 @@ app.post('/api/orders', (req, res) => {
            lat||null, lng||null, userEmail||null);
 
     if (userEmail) upsertUser.run(userEmail, name||null, phone||null, Number(total)||0);
+
+    // Reserve stock so the inventory page reflects what's locked to this order.
+    const order = db.prepare('SELECT * FROM orders WHERE id = ?').get(String(id));
+    reserveStockForOrder(order, items || []);
+
+    // Notify the super admin so they see the new order in their inbox.
+    sendMessage({
+      from_user_id: userEmail || null,
+      from_user_name: name || null,
+      to_user_id: SUPER_ADMIN_FALLBACK,
+      type: 'info',
+      subject: `\u0637\u0644\u0628 \u062c\u062f\u064a\u062f #${id}`,
+      body: `${name} \u00b7 ${city || '\u2014'} \u00b7 ${(Number(total)||0).toLocaleString()} \u062c`,
+      metadata: { kind: 'new_order', order_id: String(id) },
+    });
 
     console.log('[nawra-api] order saved:', id, name, total, 'user:', userEmail||'guest');
 
@@ -446,6 +557,18 @@ app.get('/api/orders', (req, res) => {
 app.patch('/api/orders/:id', (req, res) => {
   try {
     const { status } = req.body;
+    const cur = db.prepare('SELECT * FROM orders WHERE id = ?').get(req.params.id);
+    if (!cur) return res.status(404).json({ error: 'not found' });
+
+    const items = (() => { try { return JSON.parse(cur.items || '[]'); } catch { return []; } })();
+
+    // Stock lifecycle reacts to status transitions.
+    if (status === '\u062a\u0645 \u0627\u0644\u0634\u062d\u0646' && !cur.stock_released) {
+      shipStockForOrder(cur, items);
+    } else if (status === '\u0645\u0644\u063a\u064a') {
+      cancelStockForOrder(cur, items);
+    }
+
     const info = db.prepare('UPDATE orders SET status=? WHERE id=?').run(status, req.params.id);
     if (!info.changes) return res.status(404).json({ error: 'not found' });
     res.json({ ok: true });
@@ -750,17 +873,51 @@ app.post('/api/returns', (req, res) => {
 app.patch('/api/returns/:id', (req, res) => {
   try {
     const r = req.body || {};
+    const cur = db.prepare('SELECT * FROM returns WHERE id = ?').get(req.params.id);
+    if (!cur) return res.status(404).json({ error: 'not found' });
+
     const sets = []; const vals = [];
     ['status','admin_note','amount','reason'].forEach(k => {
       if (Object.prototype.hasOwnProperty.call(r, k)) { sets.push(`${k} = ?`); vals.push(r[k]); }
     });
+    // Inspection: 'good' returns units to stock_available; 'damaged' adds
+    // to stock_damaged AND creates a "damaged" expense for the cost.
+    let inspectionApplied = false;
+    if (r.inspection_status && ['good','damaged'].includes(r.inspection_status) && !cur.stock_settled) {
+      sets.push('inspection_status = ?'); vals.push(r.inspection_status);
+      sets.push('inspected_at = datetime(\'now\')');
+      sets.push('stock_settled = 1');
+      // Resolve target product by name (returns store a single product string).
+      const productRow = cur.product
+        ? db.prepare('SELECT * FROM products WHERE name = ?').get(cur.product)
+        : null;
+      const qty = 1; // Returns table doesn't carry qty granularity yet; settle 1 unit per return.
+      if (productRow) {
+        if (r.inspection_status === 'good') {
+          db.prepare('UPDATE products SET stock = stock + ? WHERE id = ?').run(qty, productRow.id);
+        } else {
+          db.prepare('UPDATE products SET stock_damaged = COALESCE(stock_damaged,0) + ? WHERE id = ?').run(qty, productRow.id);
+          // Auto-expense for damaged unit @ cost
+          const unitCost = Number(productRow.cost) || 0;
+          if (unitCost > 0) {
+            const expId = `ex_${Date.now().toString(36)}_${Math.random().toString(36).slice(2,5)}`;
+            db.prepare(`
+              INSERT INTO expenses (id, category, description, quantity, unit_price, amount, date, notes)
+              VALUES (?, 'general', ?, ?, ?, ?, date('now'), ?)
+            `).run(expId, `هالك — ${productRow.name}`, qty, unitCost, unitCost * qty, `مرتجع #${cur.id}`);
+          }
+        }
+      }
+      inspectionApplied = true;
+    }
+
     if (!sets.length) return res.json({ ok: true, noop: true });
     sets.push("updated_at = datetime('now')");
     vals.push(req.params.id);
-    const info = db.prepare(`UPDATE returns SET ${sets.join(', ')} WHERE id = ?`).run(...vals);
-    if (!info.changes) return res.status(404).json({ error: 'not found' });
-    res.json(db.prepare('SELECT * FROM returns WHERE id=?').get(req.params.id));
-  } catch (e) { res.status(500).json({ error: e.message }); }
+    db.prepare(`UPDATE returns SET ${sets.join(', ')} WHERE id = ?`).run(...vals);
+    const fresh = db.prepare('SELECT * FROM returns WHERE id=?').get(req.params.id);
+    res.json({ ...fresh, inspectionApplied });
+  } catch (e) { console.error('PATCH /api/returns', e); res.status(500).json({ error: e.message }); }
 });
 
 // ── SETTINGS (key/value JSON blobs) ───────────────────────────────────────────
@@ -935,13 +1092,44 @@ app.post('/api/approvals', (req, res) => {
     const a = req.body || {};
     if (!a.type) return res.status(400).json({ error: 'type required' });
     const id = a.id || `ap_${Date.now().toString(36)}_${Math.random().toString(36).slice(2,5)}`;
+    const requesterId = a.requester_id || a.requester || null;
     db.prepare(`
-      INSERT INTO approvals (id, type, target_id, target_label, requester, payload, reason, status)
-      VALUES (?,?,?,?,?,?,?, 'pending')
-    `).run(id, a.type, a.target_id || null, a.target_label || null, a.requester || null,
+      INSERT INTO approvals (id, type, target_id, target_label, requester, requester_id, requester_name, payload, reason, status)
+      VALUES (?,?,?,?,?,?,?,?,?, 'pending')
+    `).run(id, a.type, a.target_id || null, a.target_label || null,
+           a.requester || null, requesterId, a.requester_name || null,
            JSON.stringify(a.payload || {}), a.reason || null);
+
+    // ONE consolidated message to super admin's inbox containing everything.
+    const labelMap = {
+      product_delete: 'حذف منتج',
+      product_add:    'إضافة منتج',
+      stock_reduce:   'تقليل كمية مخزون',
+    };
+    const subject = `طلب ${labelMap[a.type] || a.type} — ${a.target_label || a.target_id || ''}`;
+    const bodyLines = [];
+    if (a.target_label) bodyLines.push(`المنتج: ${a.target_label}`);
+    if (a.requester_name || requesterId) bodyLines.push(`الطالب: ${a.requester_name || requesterId}`);
+    if (a.reason) bodyLines.push(`السبب: ${a.reason}`);
+    if (a.payload) {
+      try {
+        const p = typeof a.payload === 'string' ? JSON.parse(a.payload) : a.payload;
+        if (p.old_qty != null && p.new_qty != null)
+          bodyLines.push(`الكمية: ${p.old_qty} → ${p.new_qty} (—${p.old_qty - p.new_qty})`);
+      } catch {}
+    }
+    sendMessage({
+      from_user_id: requesterId,
+      from_user_name: a.requester_name || requesterId || null,
+      to_user_id: SUPER_ADMIN_FALLBACK,
+      type: 'request',
+      subject,
+      body: bodyLines.join('\n'),
+      metadata: { approval_id: id, approval_type: a.type, target_id: a.target_id || null, requires_action: true },
+    });
+
     res.json({ ok: true, id });
-  } catch (e) { res.status(500).json({ error: e.message }); }
+  } catch (e) { console.error('POST /api/approvals', e); res.status(500).json({ error: e.message }); }
 });
 
 app.patch('/api/approvals/:id', (req, res) => {
@@ -953,18 +1141,91 @@ app.patch('/api/approvals/:id', (req, res) => {
     if (!cur) return res.status(404).json({ error: 'not found' });
     if (cur.status !== 'pending') return res.status(409).json({ error: 'already resolved' });
 
-    // When a product-delete request is approved, actually delete the product.
-    if (status === 'approved' && cur.type === 'product_delete' && cur.target_id) {
-      try { db.prepare('DELETE FROM products WHERE id = ?').run(cur.target_id); } catch {}
+    // Side-effects on approval:
+    if (status === 'approved') {
+      if (cur.type === 'product_delete' && cur.target_id) {
+        try { db.prepare('DELETE FROM products WHERE id = ?').run(cur.target_id); } catch {}
+      }
+      if (cur.type === 'stock_reduce' && cur.target_id) {
+        let p = {};
+        try { p = JSON.parse(cur.payload || '{}'); } catch {}
+        if (Number.isFinite(+p.new_qty)) {
+          try { db.prepare('UPDATE products SET stock = ? WHERE id = ?').run(Math.max(0, +p.new_qty), cur.target_id); } catch {}
+        }
+      }
     }
 
     db.prepare(`
       UPDATE approvals SET status = ?, resolution_note = ?, resolved_at = datetime('now')
       WHERE id = ?
     `).run(status, resolution_note || null, req.params.id);
+
     const fresh = db.prepare('SELECT * FROM approvals WHERE id = ?').get(req.params.id);
     try { fresh.payload = JSON.parse(fresh.payload || '{}'); } catch { fresh.payload = {}; }
+
+    // Reply message → routes to the *original requester* only.
+    const recipient = cur.requester_id || cur.requester;
+    if (recipient && recipient !== SUPER_ADMIN_FALLBACK) {
+      const subject = status === 'approved'
+        ? `تمت الموافقة على طلبك: ${cur.target_label || cur.type}`
+        : `تم رفض طلبك: ${cur.target_label || cur.type}`;
+      const bodyLines = [];
+      if (cur.target_label) bodyLines.push(`الموضوع: ${cur.target_label}`);
+      if (cur.reason)        bodyLines.push(`السبب الأصلي: ${cur.reason}`);
+      if (resolution_note)   bodyLines.push(`${status === 'rejected' ? 'سبب الرفض' : 'ملاحظة Super Admin'}: ${resolution_note}`);
+      sendMessage({
+        from_user_id: SUPER_ADMIN_FALLBACK,
+        from_user_name: 'Super Admin',
+        to_user_id: recipient,
+        type: status, // 'approval' or 'rejection'
+        subject,
+        body: bodyLines.join('\n'),
+        metadata: { approval_id: cur.id, approval_type: cur.type, original_request: true },
+      });
+    }
     res.json(fresh);
+  } catch (e) { console.error('PATCH /api/approvals', e); res.status(500).json({ error: e.message }); }
+});
+
+// ── MESSAGES (inbox) ──────────────────────────────────────────────────────────
+// GET /api/messages?to=<email>&unread=1 — inbox for one user.
+// POST /api/messages — send a one-off (used for tests / direct admin notes).
+// PATCH /api/messages/:id/read — mark single message as read.
+app.get('/api/messages', (req, res) => {
+  try {
+    const { to, unread } = req.query;
+    let sql = 'SELECT * FROM messages WHERE 1=1';
+    const params = [];
+    if (to)     { sql += ' AND LOWER(to_user_id) = LOWER(?)'; params.push(to); }
+    if (unread) { sql += ' AND read_at IS NULL'; }
+    sql += ' ORDER BY created_at DESC LIMIT 200';
+    const rows = db.prepare(sql).all(...params).map(r => {
+      try { r.metadata = JSON.parse(r.metadata || '{}'); } catch { r.metadata = {}; }
+      return r;
+    });
+    res.json(rows);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+app.post('/api/messages', (req, res) => {
+  try {
+    const m = req.body || {};
+    if (!m.to_user_id) return res.status(400).json({ error: 'to_user_id required' });
+    const id = sendMessage(m);
+    res.json({ ok: true, id });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+app.patch('/api/messages/:id/read', (req, res) => {
+  try {
+    const info = db.prepare("UPDATE messages SET read_at = datetime('now') WHERE id = ? AND read_at IS NULL").run(req.params.id);
+    res.json({ ok: true, changed: info.changes });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+app.patch('/api/messages/read-all', (req, res) => {
+  try {
+    const { to } = req.body || {};
+    if (!to) return res.status(400).json({ error: 'to required' });
+    db.prepare("UPDATE messages SET read_at = datetime('now') WHERE LOWER(to_user_id) = LOWER(?) AND read_at IS NULL").run(to);
+    res.json({ ok: true });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
