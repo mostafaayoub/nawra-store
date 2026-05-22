@@ -1177,7 +1177,7 @@ app.patch('/api/approvals/:id', (req, res) => {
         from_user_id: SUPER_ADMIN_FALLBACK,
         from_user_name: 'Super Admin',
         to_user_id: recipient,
-        type: status, // 'approval' or 'rejection'
+        type: status === 'approved' ? 'approval' : 'rejection',
         subject,
         body: bodyLines.join('\n'),
         metadata: { approval_id: cur.id, approval_type: cur.type, original_request: true },
