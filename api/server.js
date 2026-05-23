@@ -1021,15 +1021,9 @@ app.get('/api/products', (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-app.get('/api/products/:id', (req, res) => {
-  try {
-    const row = db.prepare('SELECT * FROM products WHERE id = ? OR slug = ?').get(req.params.id, req.params.id);
-    if (!row) return res.status(404).json({ error: 'not found' });
-    res.json(rowToProduct(row));
-  } catch (e) { res.status(500).json({ error: e.message }); }
-});
-
 // Live slug-uniqueness check used by the admin form's onBlur validation.
+// Must be defined BEFORE /api/products/:id, otherwise Express matches the
+// param route first and we never reach this handler.
 app.get('/api/products/slug-check', (req, res) => {
   try {
     const slug = slugify(req.query.slug || '');
@@ -1037,6 +1031,14 @@ app.get('/api/products/slug-check', (req, res) => {
     const excludeId = String(req.query.exclude || '');
     const hit = db.prepare('SELECT id FROM products WHERE slug = ? AND id <> ?').get(slug, excludeId);
     res.json({ available: !hit, slug });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.get('/api/products/:id', (req, res) => {
+  try {
+    const row = db.prepare('SELECT * FROM products WHERE id = ? OR slug = ?').get(req.params.id, req.params.id);
+    if (!row) return res.status(404).json({ error: 'not found' });
+    res.json(rowToProduct(row));
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
