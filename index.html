@@ -65,6 +65,14 @@
       .font-fe { font-family: var(--fe); }
       .font-fa { font-family: var(--fa); }
       .font-fb { font-family: var(--fb); }
+
+      /* Suppress up/down spinners on number inputs site-wide. The admin
+         product form switched to type="text" + inputmode for prices, but
+         other admin pages (inventory, coupons) still use type="number"
+         and the spinner UI confuses keyboard entry. */
+      input[type="number"]::-webkit-inner-spin-button,
+      input[type="number"]::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
+      input[type="number"] { -moz-appearance: textfield; }
     </style>
   </head>
   <body>

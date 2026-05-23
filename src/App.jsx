@@ -6563,6 +6563,7 @@ function ProductForm({
   onBack, onSaved, onDeleted, submitApproval,
 }) {
   const ADD = mode === "new";
+  const toast = useToast(); // global toast — confirms save/publish/delete
   const blank = () => ({
     name:        { ar: "", en: "" },
     description: { ar: "", en: "" },
@@ -6809,9 +6810,13 @@ function ProductForm({
     tags: f.tags,
   });
 
-  const persist = async (asDraft) => {
-    const willPublish = !asDraft;
-    if (!validate(willPublish)) {
+  // Save with an explicit target status — the caller decides whether we're
+  // saving a draft, publishing, or unpublishing. Validation only blocks when
+  // the target is "published" (drafts can always save mid-edit).
+  // `intent` is one of: "save-draft" | "publish" | "save-edits" | "unpublish"
+  const persist = async (targetStatus, intent) => {
+    const mustValidate = targetStatus === "published";
+    if (mustValidate && !validate(true)) {
       setFeedback({ kind:"err", text:"يوجد أخطاء بالنموذج — راجع الحقول المعلمة" });
       return;
     }
@@ -6819,18 +6824,37 @@ function ProductForm({
     try {
       const url = ADD ? "/api/products" : `/api/products/${encodeURIComponent(productId)}`;
       const method = ADD ? "POST" : "PATCH";
-      const body = buildBody(asDraft ? "draft" : (f.status === "published" ? "published" : (willPublish ? "published" : "draft")));
+      const body = buildBody(targetStatus);
       const r = await fetch(url, { method, headers:{"Content-Type":"application/json"}, body: JSON.stringify(body) });
       if (!r.ok) { const j = await r.json().catch(()=>({})); throw new Error(j.error || `HTTP ${r.status}`); }
       const saved = await r.json();
-      setFeedback({ kind:"ok", text: asDraft ? "تم حفظ المسودة" : (ADD ? "تم نشر المنتج" : "تم حفظ التعديلات") });
-      setOriginal(JSON.stringify(f));
+      // Keep local form state aligned with what the server just persisted
+      update({ status: targetStatus });
+      setOriginal(JSON.stringify({ ...f, status: targetStatus }));
       setAutoSavedAt(new Date());
       onSaved && onSaved(saved);
-      // After a successful "new" save → navigate to edit URL so further edits update in place.
-      if (ADD && (saved.id || (saved && saved.ok))) {
-        const newId = saved.id || (saved && saved.id);
-        if (newId) window.location.hash = `#admin/products/${encodeURIComponent(newId)}/edit`;
+
+      // Success messaging + post-save navigation per intent
+      if (intent === "publish") {
+        toast && toast.show("تم نشر المنتج بنجاح");
+        // Redirect to list when publishing (covers ADD + edit-draft → published)
+        onBack && onBack();
+        return;
+      }
+      if (intent === "unpublish") {
+        toast && toast.show("تم إلغاء نشر المنتج");
+        // Stay on the page — admin probably wants to keep editing
+      }
+      if (intent === "save-edits") {
+        toast && toast.show("تم حفظ التعديلات");
+      }
+      if (intent === "save-draft") {
+        toast && toast.show("تم حفظ المسودة");
+        // When this is the very first save of a new product → redirect to
+        // /edit so further saves PATCH the existing row.
+        if (ADD && saved && saved.id) {
+          window.location.hash = `#admin/products/${encodeURIComponent(saved.id)}/edit`;
+        }
       }
     } catch (e) {
       setFeedback({ kind:"err", text:`فشل الحفظ: ${e.message}` });
@@ -6838,8 +6862,8 @@ function ProductForm({
   };
 
   // ── Auto-save (edit mode only) ────────────────────────────────────────────
-  // Saves silently as a draft every 30s if the form is dirty AND currently a
-  // draft. Avoids re-publishing live products without explicit user action.
+  // Silent PATCH every 30s when the form is dirty AND currently a draft.
+  // Never touches a live product without explicit user action.
   useEffect(() => {
     if (ADD || !productId) return;
     const i = setInterval(() => {
@@ -6849,7 +6873,7 @@ function ProductForm({
           try {
             await fetch(`/api/products/${encodeURIComponent(productId)}`, {
               method:"PATCH", headers:{"Content-Type":"application/json"},
-              body: JSON.stringify(buildBody("draft")),
+              body: JSON.stringify(buildBody(f.status)),
             });
             setOriginal(JSON.stringify(f));
             setAutoSavedAt(new Date());
@@ -6871,6 +6895,25 @@ function ProductForm({
     return () => window.removeEventListener("beforeunload", h);
   }, [f, original]);
 
+  // ── Number input helpers ──────────────────────────────────────────────────
+  // Bug fix: type="number" was forcing arrow-only increments on some browsers
+  // and showing ugly spinner UI. We use type="text" + inputMode for the
+  // correct mobile keyboard, plus an input filter that strips invalid chars.
+  // kind: "int" (whole numbers — stock, threshold) | "dec" (price, cost)
+  const numProps = (kind) => ({
+    type: "text",
+    inputMode: kind === "int" ? "numeric" : "decimal",
+    pattern:   kind === "int" ? "[0-9]*"  : "[0-9]*\\.?[0-9]*",
+    autoComplete: "off",
+  });
+  const cleanNum = (kind) => (raw) => {
+    if (kind === "int") return String(raw).replace(/[^0-9]/g, "");
+    const cleaned = String(raw).replace(/[^0-9.]/g, "");
+    const firstDot = cleaned.indexOf(".");
+    if (firstDot === -1) return cleaned;
+    return cleaned.slice(0, firstDot + 1) + cleaned.slice(firstDot + 1).replace(/\./g, "");
+  };
+
   // ── Styles ────────────────────────────────────────────────────────────────
   const inputStyle = {
     width:"100%", padding:"9px 11px", border:ui.border, borderRadius:6,
@@ -6878,6 +6921,7 @@ function ProductForm({
     outline:"none", direction:"rtl", boxSizing:"border-box",
   };
   const errorInput = { ...inputStyle, border:"1px solid #FCA5A5", background:"#FEF2F2" };
+  const helperText = { fontSize:11, color:ui.textSub, fontFamily:ui.fontBody, marginTop:4 };
   const labelStyle = { display:"block", fontSize:12, color:ui.text, fontFamily:ui.fontBody, marginBottom:5, fontWeight:500 };
   const card = { background:ui.cardBg, border:ui.border, borderRadius:ui.radius, padding: mob?"14px":"18px", marginBottom:12 };
   const cardTitle = { fontSize:13, fontWeight:600, color:ui.text, fontFamily:ui.fontBody, marginBottom:12, paddingBottom:8, borderBottom:"0.5px solid #EEE" };
@@ -6921,19 +6965,8 @@ function ProductForm({
     );
   };
 
-  // Pill toggle (used for publish status).
-  const PillTabs = ({ value, options, onChange, disabled }) => (
-    <div style={{display:"flex",border:ui.border,borderRadius:6,overflow:"hidden"}}>
-      {options.map(([k,l]) => (
-        <button key={k} type="button" onClick={()=>!disabled && onChange(k)}
-          disabled={disabled}
-          style={{flex:1,padding:"7px 0",border:"none",cursor:disabled?"not-allowed":"pointer",
-            background: value===k ? ui.text : "transparent",
-            color: value===k ? "#fff" : ui.textSub,
-            fontSize:12,fontFamily:ui.fontBody,fontWeight: value===k ? 600 : 400}}>{l}</button>
-      ))}
-    </div>
-  );
+  // (PillTabs removed — publish state is now controlled exclusively by the
+  // top-right action buttons.)
 
   // Switch toggle (used for booleans).
   const SwitchToggle = ({ value, onChange, label, disabled, hint }) => (
@@ -7015,19 +7048,43 @@ function ProductForm({
               طلب حذف
             </button>
           )}
+          {/* Cancel — always present */}
           <button onClick={onBack} type="button"
             style={{padding:"8px 14px",background:"transparent",border:ui.border,borderRadius:6,
               fontFamily:ui.fontBody,fontSize:12.5,color:ui.textSub,cursor:"pointer"}}>إلغاء</button>
-          <button onClick={()=>persist(true)} disabled={saving} type="button"
-            style={{padding:"8px 14px",background:"transparent",border:`1px solid ${ui.text}`,borderRadius:6,
-              fontFamily:ui.fontBody,fontSize:12.5,color:ui.text,cursor:saving?"wait":"pointer"}}>
-            حفظ كمسودة
-          </button>
-          <button onClick={()=>persist(false)} disabled={saving} type="button"
-            style={{padding:"8px 18px",background: saving ? "#9CA3AF" : ui.text,color:"#fff",border:"none",borderRadius:6,
-              fontFamily:ui.fontBody,fontSize:12.5,fontWeight:500,cursor:saving?"wait":"pointer"}}>
-            {saving ? "جارٍ الحفظ..." : "نشر المنتج"}
-          </button>
+
+          {/* Contextual save buttons. Three modes:                              */}
+          {/*  - ADD                  : [حفظ كمسودة]  [نشر المنتج]               */}
+          {/*  - EDIT (status=draft)  : [حفظ كمسودة]  [نشر المنتج]               */}
+          {/*  - EDIT (status=published): [إلغاء النشر]  [حفظ التعديلات]         */}
+          {/* The rightmost button is always the obvious primary action.        */}
+          {(ADD || f.status === "draft") ? (
+            <>
+              <button onClick={()=>persist("draft", "save-draft")} disabled={saving} type="button"
+                style={{padding:"8px 14px",background:"transparent",border:`1px solid ${ui.text}`,borderRadius:6,
+                  fontFamily:ui.fontBody,fontSize:12.5,color:ui.text,cursor:saving?"wait":"pointer"}}>
+                حفظ كمسودة
+              </button>
+              <button onClick={()=>persist("published", "publish")} disabled={saving} type="button"
+                style={{padding:"8px 18px",background: saving ? "#9CA3AF" : ui.text,color:"#fff",border:"none",borderRadius:6,
+                  fontFamily:ui.fontBody,fontSize:12.5,fontWeight:500,cursor:saving?"wait":"pointer"}}>
+                {saving ? "جارٍ الحفظ..." : "نشر المنتج"}
+              </button>
+            </>
+          ) : (
+            <>
+              <button onClick={()=>persist("draft", "unpublish")} disabled={saving} type="button"
+                style={{padding:"8px 14px",background:"transparent",border:"1px solid #FCD34D",borderRadius:6,
+                  fontFamily:ui.fontBody,fontSize:12.5,color:"#92400E",cursor:saving?"wait":"pointer"}}>
+                إلغاء النشر
+              </button>
+              <button onClick={()=>persist("published", "save-edits")} disabled={saving} type="button"
+                style={{padding:"8px 18px",background: saving ? "#9CA3AF" : ui.text,color:"#fff",border:"none",borderRadius:6,
+                  fontFamily:ui.fontBody,fontSize:12.5,fontWeight:500,cursor:saving?"wait":"pointer"}}>
+                {saving ? "جارٍ الحفظ..." : "حفظ التعديلات"}
+              </button>
+            </>
+          )}
         </div>
       </div>
 
@@ -7220,9 +7277,9 @@ function ProductForm({
                     {f.variants.map((v, i) => (
                       <tr key={i} style={{borderTop:"0.5px solid #EEE"}}>
                         <td style={{padding:"6px 8px"}}><input style={{...inputStyle,padding:"6px 9px"}} value={v.size} onChange={e=>updateVariant(i, { size:e.target.value })} placeholder="50ml"/></td>
-                        <td style={{padding:"6px 8px"}}><input type="number" style={{...inputStyle,padding:"6px 9px"}} value={v.price} onChange={e=>updateVariant(i, { price:e.target.value })} placeholder="280"/></td>
-                        <td style={{padding:"6px 8px"}}><input type="number" style={{...inputStyle,padding:"6px 9px"}} value={v.price_before} onChange={e=>updateVariant(i, { price_before:e.target.value })} placeholder="350"/></td>
-                        <td style={{padding:"6px 8px"}}><input type="number" style={{...inputStyle,padding:"6px 9px"}} value={v.stock} onChange={e=>updateVariant(i, { stock:e.target.value })} placeholder="10"/></td>
+                        <td style={{padding:"6px 8px"}}><input {...numProps("dec")} style={{...inputStyle,padding:"6px 9px"}} value={v.price}        onChange={e=>updateVariant(i, { price: cleanNum("dec")(e.target.value) })}/></td>
+                        <td style={{padding:"6px 8px"}}><input {...numProps("dec")} style={{...inputStyle,padding:"6px 9px"}} value={v.price_before} onChange={e=>updateVariant(i, { price_before: cleanNum("dec")(e.target.value) })}/></td>
+                        <td style={{padding:"6px 8px"}}><input {...numProps("int")} style={{...inputStyle,padding:"6px 9px"}} value={v.stock}        onChange={e=>updateVariant(i, { stock: cleanNum("int")(e.target.value) })}/></td>
                         <td style={{padding:"6px 8px"}}><input style={{...inputStyle,padding:"6px 9px",fontFamily:"monospace"}} value={v.sku} onChange={e=>updateVariant(i, { sku:e.target.value })} placeholder="auto"/></td>
                         <td style={{padding:"6px 4px",textAlign:"center"}}>
                           <button type="button" onClick={()=>removeVariant(i)}
@@ -7271,47 +7328,51 @@ function ProductForm({
             <div style={onlyStock ? disabledStyle : {}}>
               <div style={{marginBottom:12}}>
                 <label style={labelStyle}>السعر الحالي (ج) *</label>
-                <input type="number" style={errors.price ? errorInput : inputStyle} value={f.price}
-                  onChange={e=>update({ price: e.target.value })} placeholder="280"
+                <input {...numProps("dec")} style={errors.price ? errorInput : inputStyle} value={f.price}
+                  onChange={e=>update({ price: cleanNum("dec")(e.target.value) })}
                   disabled={f.has_variants || onlyStock}/>
-                {f.has_variants && <div style={{fontSize:11,color:ui.textSub,marginTop:3,fontFamily:ui.fontBody}}>السعر مأخوذ من الأحجام</div>}
+                {f.has_variants && <div style={helperText}>السعر مأخوذ من الأحجام</div>}
                 {errors.price && <div style={{fontSize:11.5,color:"#DC2626",marginTop:4,fontFamily:ui.fontBody}}>{errors.price}</div>}
               </div>
               <div style={{marginBottom:12}}>
                 <label style={labelStyle}>السعر قبل الخصم</label>
-                <input type="number" style={inputStyle} value={f.price_before}
-                  onChange={e=>update({ price_before: e.target.value })} placeholder="350"
+                <input {...numProps("dec")} style={inputStyle} value={f.price_before}
+                  onChange={e=>update({ price_before: cleanNum("dec")(e.target.value) })}
                   disabled={f.has_variants || onlyStock}/>
+                <div style={helperText}>اتركه فارغاً إن لم يكن هناك خصم</div>
               </div>
               {canSeeCost && (
                 <div style={{marginBottom:12}}>
                   <label style={labelStyle}>التكلفة (للحسابات الداخلية)</label>
-                  <input type="number" style={inputStyle} value={f.cost}
-                    onChange={e=>update({ cost: e.target.value })} placeholder="180"/>
-                  {margin !== null && (
+                  <input {...numProps("dec")} style={inputStyle} value={f.cost}
+                    onChange={e=>update({ cost: cleanNum("dec")(e.target.value) })}/>
+                  {margin !== null ? (
                     <div style={{fontSize:11.5,marginTop:4,fontFamily:ui.fontBody,color: margin >= 30 ? "#16A34A" : margin >= 10 ? "#D97706" : "#DC2626"}}>
                       هامش الربح: {margin}%
                     </div>
+                  ) : (
+                    <div style={helperText}>سعر شراء المنتج — تظهر منه نسبة الربح</div>
                   )}
                 </div>
               )}
               <div style={{marginBottom:12}}>
                 <label style={labelStyle}>SKU</label>
-                <input style={inputStyle} value={f.sku} onChange={e=>update({ sku: e.target.value })} placeholder="مقترح: BRND-NAME-NNN"
-                  disabled={onlyStock}/>
+                <input style={inputStyle} value={f.sku} onChange={e=>update({ sku: e.target.value })}
+                  disabled={onlyStock} autoComplete="off"/>
+                <div style={helperText}>يتم اقتراحه تلقائياً (BRND-NAME-NNN)</div>
               </div>
             </div>
             <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
               <div>
                 <label style={labelStyle}>الكمية المتاحة</label>
-                <input type="number" style={inputStyle} value={f.stock}
-                  onChange={e=>update({ stock: e.target.value })} placeholder="10"
+                <input {...numProps("int")} style={inputStyle} value={f.stock}
+                  onChange={e=>update({ stock: cleanNum("int")(e.target.value) })}
                   disabled={f.has_variants}/>
               </div>
               <div style={onlyStock ? disabledStyle : {}}>
                 <label style={labelStyle}>حد التنبيه</label>
-                <input type="number" style={inputStyle} value={f.alert_threshold}
-                  onChange={e=>update({ alert_threshold: e.target.value })} placeholder="5"
+                <input {...numProps("int")} style={inputStyle} value={f.alert_threshold}
+                  onChange={e=>update({ alert_threshold: cleanNum("int")(e.target.value) })}
                   disabled={onlyStock}/>
               </div>
             </div>
@@ -7321,13 +7382,10 @@ function ProductForm({
           <div style={card}>
             <div style={cardTitle}>الإعدادات</div>
             <div style={onlyStock ? disabledStyle : {}}>
-              <div style={{padding:"8px 0",borderBottom:"0.5px solid #EEE",display:"flex",alignItems:"center",justifyContent:"space-between"}}>
-                <span style={{fontSize:13,color:ui.text,fontFamily:ui.fontBody}}>حالة النشر</span>
-                <div style={{minWidth:140}}>
-                  <PillTabs value={f.status} onChange={v=>update({ status: v })}
-                    options={[["published","نشر"],["draft","مسودة"]]} disabled={onlyStock}/>
-                </div>
-              </div>
+              {/* Publish state is controlled exclusively by the top-right
+                  action buttons (نشر المنتج / حفظ التعديلات / إلغاء النشر).
+                  Having a duplicate pill here led to confusion + a broken
+                  click handler that didn't actually persist. */}
               <SwitchToggle value={f.in_stock}       onChange={v=>update({ in_stock: v })}        label="متاح في المخزون" disabled={onlyStock}/>
               <SwitchToggle value={f.featured}       onChange={v=>update({ featured: v })}        label="منتج مميز"        hint="يظهر في الصفحة الرئيسية" disabled={onlyStock}/>
               <SwitchToggle value={f.is_best_seller} onChange={v=>update({ is_best_seller: v })}  label="الأكثر مبيعاً"    hint="إضافة لأكثر المبيعات يدوياً" disabled={onlyStock}/>
@@ -7429,8 +7487,10 @@ function ProductForm({
               <button onClick={async ()=>{
                 setConfirmDel(false);
                 try {
-                  await fetch(`/api/products/${encodeURIComponent(productId)}`, { method:"DELETE" });
-                  onDeleted && onDeleted();
+                  const r = await fetch(`/api/products/${encodeURIComponent(productId)}`, { method:"DELETE" });
+                  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+                  toast && toast.show("تم حذف المنتج");
+                  onDeleted && onDeleted(); // redirects back to products list
                 } catch (e) {
                   setFeedback({ kind:"err", text:`فشل الحذف: ${e.message}` });
                 }
