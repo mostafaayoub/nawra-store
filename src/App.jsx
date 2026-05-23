@@ -2429,28 +2429,13 @@ function AdminDash({ go }) {
     );
   };
 
-  // ── Metric card ────────────────────────────────────────────────────────────
-  const Metric = ({ label, value, changePct, suffix, hint }) => {
-    const up = changePct > 0, down = changePct < 0;
-    const showChange = changePct !== undefined && changePct !== null;
-    return (
-      <div style={{background:ui.cardBg,border:ui.border,borderRadius:ui.radius,padding:"14px 16px"}}>
-        <div style={{fontSize:11.5,color:ui.textSub,fontFamily:ui.fontBody,marginBottom:6}}>{label}</div>
-        <div style={{fontSize:mob?20:24,color:ui.text,fontFamily:ui.fontHead,fontWeight:500,lineHeight:1.1}}>
-          {value}{suffix && <span style={{fontSize:13,color:ui.textSub,marginInlineStart:5,fontFamily:ui.fontBody}}>{suffix}</span>}
-        </div>
-        {showChange ? (
-          <div style={{display:"flex",alignItems:"center",gap:4,marginTop:5,fontSize:11,fontFamily:ui.fontBody,
-            color: up?"#16A34A":down?"#DC2626":ui.textSub}}>
-            <AdmIcon name={up?"arrow-up":"arrow-down"} size={12} />
-            <span>{Math.abs(changePct)}% {hint || "هذا الشهر"}</span>
-          </div>
-        ) : hint ? (
-          <div style={{fontSize:11,color:"#16A34A",marginTop:5,fontFamily:ui.fontBody}}>{hint}</div>
-        ) : null}
-      </div>
-    );
-  };
+  // (Metric + Placeholder moved to module scope at the bottom of this file.
+  // We bind ui/mob via closure here so existing call sites keep working
+  // without prop changes — but the underlying component is stable, so
+  // typing in any input inside a tab that renders Metric no longer pays
+  // an unmount+mount cost per keystroke.)
+  const Metric      = useCallback((props) => <MetricCardBase   {...props} ui={ui} mob={mob} />, [ui, mob]);
+  const Placeholder = useCallback((props) => <PlaceholderBase  {...props} ui={ui} mob={mob} />, [ui, mob]);
 
   // ── Overview tab content ───────────────────────────────────────────────────
   const Overview = () => {
@@ -2630,14 +2615,7 @@ function AdminDash({ go }) {
     );
   };
 
-  // ── Placeholder tab for future features ────────────────────────────────────
-  const Placeholder = ({ icon, title, body }) => (
-    <div style={{background:ui.cardBg,border:ui.border,borderRadius:ui.radius,padding:mob?"30px 20px":"60px 40px",textAlign:"center"}}>
-      <div style={{marginBottom:14,color:ui.textSub,display:"flex",justifyContent:"center"}}><AdmIcon name={icon} size={42} /></div>
-      <h3 style={{fontFamily:ui.fontHead,fontSize:18,fontWeight:500,color:ui.text,marginBottom:8}}>{title}</h3>
-      <p style={{fontFamily:ui.fontBody,fontSize:13,color:ui.textSub,maxWidth:380,margin:"0 auto",lineHeight:1.7}}>{body}</p>
-    </div>
-  );
+  // (PlaceholderBase lives at module scope; bound above via useCallback.)
 
   return (
     <div style={{direction:"rtl",minHeight:"100vh",background:ui.pageBg,fontFamily:ui.fontBody}}>
@@ -6517,6 +6495,157 @@ function injectPrintStyles() {
   document.head.appendChild(s);
 }
 
+// ─── Module-scope helpers + sub-components for ProductForm ───────────────────
+// Defining components at module scope (instead of inside ProductForm's body)
+// is the single most important perf fix in this file. When a component is
+// declared inline, every parent re-render creates a NEW function reference;
+// React treats that as a different component type and unmounts + remounts
+// the entire subtree, destroying input focus and any internal useState. The
+// classic "type one letter, wait, type the next letter" symptom.
+//
+// Module-scope means the reference is stable across renders, so React reuses
+// the existing instance, the input keeps focus, and internal state survives.
+
+// URL-safe slug (mirrors the server-side slugify in api/server.js)
+function slugifyClient(s) {
+  return String(s || '')
+    .toLowerCase()
+    .replace(/[‏‎]/g, '')
+    .replace(/[\s_]+/g, '-')
+    .replace(/[^\p{L}\p{N}-]+/gu, '')
+    .replace(/-+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 80);
+}
+
+// Input filtering / keyboard hints for the price/stock fields.
+// kind: "int" (whole numbers) | "dec" (decimals allowed)
+const numProps = (kind) => ({
+  type: "text",
+  inputMode: kind === "int" ? "numeric" : "decimal",
+  pattern:   kind === "int" ? "[0-9]*"  : "[0-9]*\\.?[0-9]*",
+  autoComplete: "off",
+});
+function cleanNumInt(raw) { return String(raw).replace(/[^0-9]/g, ""); }
+function cleanNumDec(raw) {
+  const cleaned = String(raw).replace(/[^0-9.]/g, "");
+  const firstDot = cleaned.indexOf(".");
+  if (firstDot === -1) return cleaned;
+  return cleaned.slice(0, firstDot + 1) + cleaned.slice(firstDot + 1).replace(/\./g, "");
+}
+
+// Bilingual input with an inline AR/EN tab toggle. Owns its own `side` state.
+// CRITICAL: must live at module scope so React doesn't tear down the input on
+// every parent re-render. Wrapped in React.memo so props equality lets us
+// short-circuit re-renders when only sibling fields change.
+const Bilingual = React.memo(function Bilingual({
+  value,         // { ar, en }
+  onChange,      // (side, newValue) => void
+  label,
+  multiline,
+  rows = 3,
+  maxLen,
+  enWarn,
+  publishing,    // true when the product is published — gates the EN-empty warning
+  ui,
+  inputStyle,
+  labelStyle,
+}) {
+  const [side, setSide] = useState("ar");
+  const v = (value && value[side]) || "";
+  const setAr = useCallback((e) => onChange("ar", e.target.value), [onChange]);
+  const setEn = useCallback((e) => onChange("en", e.target.value), [onChange]);
+  const handleChange = side === "ar" ? setAr : setEn;
+  return (
+    <div style={{marginBottom:12}}>
+      <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:5}}>
+        <label style={{...labelStyle, marginBottom:0}}>{label}</label>
+        <div style={{display:"flex",border:ui.border,borderRadius:4,overflow:"hidden"}}>
+          {["ar","en"].map(s => (
+            <button key={s} type="button" onClick={()=>setSide(s)}
+              style={{padding:"2px 10px",border:"none",cursor:"pointer",fontFamily:ui.fontBody,fontSize:11,
+                background: side===s ? ui.text : "transparent",
+                color: side===s ? "#fff" : ui.textSub}}>
+              {s.toUpperCase()}
+            </button>
+          ))}
+        </div>
+      </div>
+      {multiline ? (
+        <textarea rows={rows} value={v} onChange={handleChange}
+          style={{...inputStyle, direction: side==="ar"?"rtl":"ltr", resize:"vertical", minHeight: rows*22}}/>
+      ) : (
+        <input value={v} onChange={handleChange} maxLength={maxLen}
+          style={{...inputStyle, direction: side==="ar"?"rtl":"ltr"}}/>
+      )}
+      {maxLen && (
+        <div style={{fontSize:10.5,color: v.length > maxLen*0.9 ? "#D97706" : ui.textSub, fontFamily:ui.fontBody,marginTop:3,textAlign:"left"}}>
+          {v.length} / {maxLen}
+        </div>
+      )}
+      {enWarn && side==="en" && !v && publishing && (
+        <div style={{fontSize:11,color:"#D97706",marginTop:3,fontFamily:ui.fontBody}}>⚠ النسخة الإنجليزية فارغة — سيتم استخدام العربية</div>
+      )}
+    </div>
+  );
+});
+
+// Metric card used across admin tabs (Overview KPIs, Products KPIs, etc.).
+// Hoisted to module scope so React reuses the same instance across re-renders
+// of AdminDash — that's important because typing in ANY input inside a tab
+// that mounts Metric cards used to recreate them on every keystroke.
+const MetricCardBase = React.memo(function MetricCardBase({ label, value, changePct, suffix, hint, ui, mob }) {
+  const up = changePct > 0, down = changePct < 0;
+  const showChange = changePct !== undefined && changePct !== null;
+  return (
+    <div style={{background:ui.cardBg,border:ui.border,borderRadius:ui.radius,padding:"14px 16px"}}>
+      <div style={{fontSize:11.5,color:ui.textSub,fontFamily:ui.fontBody,marginBottom:6}}>{label}</div>
+      <div style={{fontSize:mob?20:24,color:ui.text,fontFamily:ui.fontHead,fontWeight:500,lineHeight:1.1}}>
+        {value}{suffix && <span style={{fontSize:13,color:ui.textSub,marginInlineStart:5,fontFamily:ui.fontBody}}>{suffix}</span>}
+      </div>
+      {showChange ? (
+        <div style={{display:"flex",alignItems:"center",gap:4,marginTop:5,fontSize:11,fontFamily:ui.fontBody,
+          color: up?"#16A34A":down?"#DC2626":ui.textSub}}>
+          <AdmIcon name={up?"arrow-up":"arrow-down"} size={12} />
+          <span>{Math.abs(changePct)}% {hint || "هذا الشهر"}</span>
+        </div>
+      ) : hint ? (
+        <div style={{fontSize:11,color:"#16A34A",marginTop:5,fontFamily:ui.fontBody}}>{hint}</div>
+      ) : null}
+    </div>
+  );
+});
+
+// Empty-state placeholder card. Module-scope for the same perf reason.
+const PlaceholderBase = React.memo(function PlaceholderBase({ icon, title, body, ui, mob }) {
+  return (
+    <div style={{background:ui.cardBg,border:ui.border,borderRadius:ui.radius,padding:mob?"30px 20px":"60px 40px",textAlign:"center"}}>
+      <div style={{marginBottom:14,color:ui.textSub,display:"flex",justifyContent:"center"}}><AdmIcon name={icon} size={42} /></div>
+      <h3 style={{fontFamily:ui.fontHead,fontSize:18,fontWeight:500,color:ui.text,marginBottom:8}}>{title}</h3>
+      <p style={{fontFamily:ui.fontBody,fontSize:13,color:ui.textSub,maxWidth:380,margin:"0 auto",lineHeight:1.7}}>{body}</p>
+    </div>
+  );
+});
+
+// Switch toggle for booleans (in_stock / featured / is_best_seller / etc.)
+const SwitchToggle = React.memo(function SwitchToggle({ value, onChange, label, disabled, hint, ui }) {
+  return (
+    <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"8px 0",borderBottom:"0.5px solid #EEE"}}>
+      <div>
+        <div style={{fontSize:13,color:ui.text,fontFamily:ui.fontBody}}>{label}</div>
+        {hint && <div style={{fontSize:11,color:ui.textSub,fontFamily:ui.fontBody,marginTop:2}}>{hint}</div>}
+      </div>
+      <button type="button" onClick={()=>!disabled && onChange(!value)} disabled={disabled}
+        style={{ width:38, height:22, borderRadius:11, border:"none",
+          background: value ? "#16A34A" : "#D4D4D4", position:"relative",
+          cursor: disabled ? "not-allowed" : "pointer", opacity: disabled ? 0.6 : 1, flexShrink:0 }}>
+        <span style={{ position:"absolute", top:2, [value?"left":"right"]:2, width:18, height:18,
+          background:"#fff", borderRadius:"50%", boxShadow:"0 1px 2px rgba(0,0,0,.2)" }}/>
+      </button>
+    </div>
+  );
+});
+
 // ─── Product Row Menu (3-dots menu in admin Products list) ───────────────────
 // Tiny popover with تكرار / حذف / أرشفة actions. Closing on outside click
 // is handled by a transparent full-screen overlay div behind the menu.
@@ -6607,19 +6736,14 @@ function ProductForm({
   const [dragIdx, setDragIdx] = useState(null);
   const [showCatNew, setShowCatNew] = useState(false);
 
-  const update = (patch) => setF(prev => ({ ...prev, ...patch }));
-  const setBilingual = (key, side, value) =>
-    setF(prev => ({ ...prev, [key]: { ...prev[key], [side]: value } }));
+  // useCallback so child components (Bilingual, SwitchToggle) wrapped in
+  // React.memo can actually short-circuit re-renders.
+  const update = useCallback((patch) => setF(prev => ({ ...prev, ...patch })), []);
+  const setBilingual = useCallback((key, side, value) =>
+    setF(prev => ({ ...prev, [key]: { ...prev[key], [side]: value } })), []);
 
-  // Auto-suggest slug from AR name (only when user hasn't manually edited).
-  const slugify = (s) => String(s||'')
-    .toLowerCase()
-    .replace(/[‏‎]/g, '')
-    .replace(/[\s_]+/g, '-')
-    .replace(/[^\p{L}\p{N}-]+/gu, '')
-    .replace(/-+/g, '-')
-    .replace(/^-+|-+$/g, '')
-    .slice(0, 80);
+  // (slugifyClient lives at module scope — see top of file.)
+  const slugify = slugifyClient;
   const [slugTouched, setSlugTouched] = useState(false);
 
   // Auto-suggest SKU from brand + name (only in add mode, only when empty).
@@ -6895,24 +7019,8 @@ function ProductForm({
     return () => window.removeEventListener("beforeunload", h);
   }, [f, original]);
 
-  // ── Number input helpers ──────────────────────────────────────────────────
-  // Bug fix: type="number" was forcing arrow-only increments on some browsers
-  // and showing ugly spinner UI. We use type="text" + inputMode for the
-  // correct mobile keyboard, plus an input filter that strips invalid chars.
-  // kind: "int" (whole numbers — stock, threshold) | "dec" (price, cost)
-  const numProps = (kind) => ({
-    type: "text",
-    inputMode: kind === "int" ? "numeric" : "decimal",
-    pattern:   kind === "int" ? "[0-9]*"  : "[0-9]*\\.?[0-9]*",
-    autoComplete: "off",
-  });
-  const cleanNum = (kind) => (raw) => {
-    if (kind === "int") return String(raw).replace(/[^0-9]/g, "");
-    const cleaned = String(raw).replace(/[^0-9.]/g, "");
-    const firstDot = cleaned.indexOf(".");
-    if (firstDot === -1) return cleaned;
-    return cleaned.slice(0, firstDot + 1) + cleaned.slice(firstDot + 1).replace(/\./g, "");
-  };
+  // numProps / cleanNumInt / cleanNumDec / slugifyClient are defined at module
+  // scope (above) so they aren't reallocated per render.
 
   // ── Styles ────────────────────────────────────────────────────────────────
   const inputStyle = {
@@ -6926,64 +7034,18 @@ function ProductForm({
   const card = { background:ui.cardBg, border:ui.border, borderRadius:ui.radius, padding: mob?"14px":"18px", marginBottom:12 };
   const cardTitle = { fontSize:13, fontWeight:600, color:ui.text, fontFamily:ui.fontBody, marginBottom:12, paddingBottom:8, borderBottom:"0.5px solid #EEE" };
 
-  // Small bilingual input with a tab toggle at the top-right corner.
-  const Bilingual = ({ field, label, multiline, rows = 3, maxLen, en_warn }) => {
-    const [side, setSide] = useState("ar");
-    const value = f[field][side] || "";
-    const onChange = (v) => setBilingual(field, side, v);
-    return (
-      <div style={{marginBottom:12}}>
-        <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:5}}>
-          <label style={{...labelStyle, marginBottom:0}}>{label}</label>
-          <div style={{display:"flex",border:ui.border,borderRadius:4,overflow:"hidden"}}>
-            {["ar","en"].map(s => (
-              <button key={s} type="button" onClick={()=>setSide(s)}
-                style={{padding:"2px 10px",border:"none",cursor:"pointer",fontFamily:ui.fontBody,fontSize:11,
-                  background: side===s ? ui.text : "transparent",
-                  color: side===s ? "#fff" : ui.textSub}}>
-                {s.toUpperCase()}
-              </button>
-            ))}
-          </div>
-        </div>
-        {multiline ? (
-          <textarea rows={rows} value={value} onChange={e=>onChange(e.target.value)}
-            style={{...inputStyle, direction: side==="ar"?"rtl":"ltr", resize:"vertical", minHeight: rows*22}}/>
-        ) : (
-          <input value={value} onChange={e=>onChange(e.target.value)} maxLength={maxLen}
-            style={{...inputStyle, direction: side==="ar"?"rtl":"ltr"}}/>
-        )}
-        {maxLen && (
-          <div style={{fontSize:10.5,color: value.length > maxLen*0.9 ? "#D97706" : ui.textSub, fontFamily:ui.fontBody,marginTop:3,textAlign:"left"}}>
-            {value.length} / {maxLen}
-          </div>
-        )}
-        {en_warn && side==="en" && !value && f.status==="published" && (
-          <div style={{fontSize:11,color:"#D97706",marginTop:3,fontFamily:ui.fontBody}}>⚠ النسخة الإنجليزية فارغة — سيتم استخدام العربية</div>
-        )}
-      </div>
-    );
-  };
-
-  // (PillTabs removed — publish state is now controlled exclusively by the
-  // top-right action buttons.)
-
-  // Switch toggle (used for booleans).
-  const SwitchToggle = ({ value, onChange, label, disabled, hint }) => (
-    <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"8px 0",borderBottom:"0.5px solid #EEE"}}>
-      <div>
-        <div style={{fontSize:13,color:ui.text,fontFamily:ui.fontBody}}>{label}</div>
-        {hint && <div style={{fontSize:11,color:ui.textSub,fontFamily:ui.fontBody,marginTop:2}}>{hint}</div>}
-      </div>
-      <button type="button" onClick={()=>!disabled && onChange(!value)} disabled={disabled}
-        style={{ width:38, height:22, borderRadius:11, border:"none",
-          background: value ? "#16A34A" : "#D4D4D4", position:"relative",
-          cursor: disabled ? "not-allowed" : "pointer", opacity: disabled ? 0.6 : 1, flexShrink:0 }}>
-        <span style={{ position:"absolute", top:2, [value?"left":"right"]:2, width:18, height:18,
-          background:"#fff", borderRadius:"50%", boxShadow:"0 1px 2px rgba(0,0,0,.2)" }}/>
-      </button>
-    </div>
-  );
+  // Bilingual + SwitchToggle live at module scope. The single biggest perf
+  // win on this page: stable component identity → React keeps the input
+  // mounted and focused across keystrokes. Stable bilingual onChange refs
+  // are needed so React.memo can actually skip re-renders of OTHER fields
+  // when one field's text changes.
+  const onChangeName        = useCallback((side, v) => setBilingual("name",        side, v), [setBilingual]);
+  const onChangeDescription = useCallback((side, v) => setBilingual("description", side, v), [setBilingual]);
+  const onChangeIngredients = useCallback((side, v) => setBilingual("ingredients", side, v), [setBilingual]);
+  const onChangeUsage       = useCallback((side, v) => setBilingual("usage",       side, v), [setBilingual]);
+  const onChangeSeoTitle    = useCallback((side, v) => setBilingual("seo_title",        side, v), [setBilingual]);
+  const onChangeSeoDesc     = useCallback((side, v) => setBilingual("seo_description", side, v), [setBilingual]);
+  const isPublished = f.status === "published";
 
   // ── Render ────────────────────────────────────────────────────────────────
   if (loading) {
@@ -7109,10 +7171,10 @@ function ProductForm({
           {/* CARD 1 — Basic info */}
           <div style={card}>
             <div style={cardTitle}>المعلومات الأساسية</div>
-            <Bilingual field="name" label="اسم المنتج *" en_warn />
+            <Bilingual value={f.name} onChange={onChangeName} label="اسم المنتج *" enWarn publishing={isPublished} ui={ui} inputStyle={inputStyle} labelStyle={labelStyle} />
             {errors.name && <div style={{fontSize:11.5,color:"#DC2626",marginTop:-8,marginBottom:8,fontFamily:ui.fontBody}}>{errors.name}</div>}
 
-            <Bilingual field="description" label="الوصف التفصيلي" multiline rows={5} en_warn />
+            <Bilingual value={f.description} onChange={onChangeDescription} label="الوصف التفصيلي" multiline rows={5} enWarn publishing={isPublished} ui={ui} inputStyle={inputStyle} labelStyle={labelStyle} />
             <div style={{fontSize:11,color:ui.textSub,fontFamily:ui.fontBody,marginTop:-8,marginBottom:10}}>
               💡 استخدم سطر فارغ بين الفقرات. القوائم: ابدأ السطر بـ <code>- </code>
             </div>
@@ -7198,8 +7260,8 @@ function ProductForm({
               </div>
             </div>
 
-            <Bilingual field="ingredients" label="المكونات" multiline rows={3}/>
-            <Bilingual field="usage"       label="طريقة الاستخدام" multiline rows={3}/>
+            <Bilingual value={f.ingredients} onChange={onChangeIngredients} label="المكونات"          multiline rows={3} ui={ui} inputStyle={inputStyle} labelStyle={labelStyle}/>
+            <Bilingual value={f.usage}       onChange={onChangeUsage}       label="طريقة الاستخدام" multiline rows={3} ui={ui} inputStyle={inputStyle} labelStyle={labelStyle}/>
           </div>
 
           {/* CARD 2 — Images */}
@@ -7262,7 +7324,7 @@ function ProductForm({
           {/* CARD 3 — Variants */}
           <div style={card}>
             <SwitchToggle value={f.has_variants} onChange={v=>update({ has_variants: v, variants: v && f.variants.length===0 ? [{ size:"", price:"", price_before:"", stock:"0", sku:"" }] : f.variants })}
-              label="الأحجام (Variants)" hint="عند التفعيل، سيتم تجاهل السعر والمخزون في الشريط الجانبي" />
+              label="الأحجام (Variants)" hint="عند التفعيل، سيتم تجاهل السعر والمخزون في الشريط الجانبي" ui={ui} />
             {f.has_variants && (
               <div style={{marginTop:12,overflowX:"auto"}}>
                 <table style={{width:"100%",borderCollapse:"collapse",direction:"rtl",fontFamily:ui.fontBody,minWidth:560}}>
@@ -7277,9 +7339,9 @@ function ProductForm({
                     {f.variants.map((v, i) => (
                       <tr key={i} style={{borderTop:"0.5px solid #EEE"}}>
                         <td style={{padding:"6px 8px"}}><input style={{...inputStyle,padding:"6px 9px"}} value={v.size} onChange={e=>updateVariant(i, { size:e.target.value })} placeholder="50ml"/></td>
-                        <td style={{padding:"6px 8px"}}><input {...numProps("dec")} style={{...inputStyle,padding:"6px 9px"}} value={v.price}        onChange={e=>updateVariant(i, { price: cleanNum("dec")(e.target.value) })}/></td>
-                        <td style={{padding:"6px 8px"}}><input {...numProps("dec")} style={{...inputStyle,padding:"6px 9px"}} value={v.price_before} onChange={e=>updateVariant(i, { price_before: cleanNum("dec")(e.target.value) })}/></td>
-                        <td style={{padding:"6px 8px"}}><input {...numProps("int")} style={{...inputStyle,padding:"6px 9px"}} value={v.stock}        onChange={e=>updateVariant(i, { stock: cleanNum("int")(e.target.value) })}/></td>
+                        <td style={{padding:"6px 8px"}}><input {...numProps("dec")} style={{...inputStyle,padding:"6px 9px"}} value={v.price}        onChange={e=>updateVariant(i, { price: cleanNumDec(e.target.value) })}/></td>
+                        <td style={{padding:"6px 8px"}}><input {...numProps("dec")} style={{...inputStyle,padding:"6px 9px"}} value={v.price_before} onChange={e=>updateVariant(i, { price_before: cleanNumDec(e.target.value) })}/></td>
+                        <td style={{padding:"6px 8px"}}><input {...numProps("int")} style={{...inputStyle,padding:"6px 9px"}} value={v.stock}        onChange={e=>updateVariant(i, { stock: cleanNumInt(e.target.value) })}/></td>
                         <td style={{padding:"6px 8px"}}><input style={{...inputStyle,padding:"6px 9px",fontFamily:"monospace"}} value={v.sku} onChange={e=>updateVariant(i, { sku:e.target.value })} placeholder="auto"/></td>
                         <td style={{padding:"6px 4px",textAlign:"center"}}>
                           <button type="button" onClick={()=>removeVariant(i)}
@@ -7301,8 +7363,8 @@ function ProductForm({
           {/* CARD 4 — SEO */}
           <div style={card}>
             <div style={cardTitle}>SEO — تحسين محركات البحث</div>
-            <Bilingual field="seo_title"       label="عنوان الصفحة (Page Title)" maxLen={60}/>
-            <Bilingual field="seo_description" label="وصف Meta"                   multiline rows={2} maxLen={160}/>
+            <Bilingual value={f.seo_title}       onChange={onChangeSeoTitle} label="عنوان الصفحة (Page Title)" maxLen={60}                          ui={ui} inputStyle={inputStyle} labelStyle={labelStyle}/>
+            <Bilingual value={f.seo_description} onChange={onChangeSeoDesc}  label="وصف Meta"                   multiline rows={2} maxLen={160} ui={ui} inputStyle={inputStyle} labelStyle={labelStyle}/>
             {/* Live Google preview */}
             <div style={{marginTop:10,padding:14,border:ui.border,borderRadius:6,background:"#fff"}}>
               <div style={{fontSize:11,color:"#6B7280",fontFamily:ui.fontBody,marginBottom:6}}>معاينة في Google</div>
@@ -7329,7 +7391,7 @@ function ProductForm({
               <div style={{marginBottom:12}}>
                 <label style={labelStyle}>السعر الحالي (ج) *</label>
                 <input {...numProps("dec")} style={errors.price ? errorInput : inputStyle} value={f.price}
-                  onChange={e=>update({ price: cleanNum("dec")(e.target.value) })}
+                  onChange={e=>update({ price: cleanNumDec(e.target.value) })}
                   disabled={f.has_variants || onlyStock}/>
                 {f.has_variants && <div style={helperText}>السعر مأخوذ من الأحجام</div>}
                 {errors.price && <div style={{fontSize:11.5,color:"#DC2626",marginTop:4,fontFamily:ui.fontBody}}>{errors.price}</div>}
@@ -7337,7 +7399,7 @@ function ProductForm({
               <div style={{marginBottom:12}}>
                 <label style={labelStyle}>السعر قبل الخصم</label>
                 <input {...numProps("dec")} style={inputStyle} value={f.price_before}
-                  onChange={e=>update({ price_before: cleanNum("dec")(e.target.value) })}
+                  onChange={e=>update({ price_before: cleanNumDec(e.target.value) })}
                   disabled={f.has_variants || onlyStock}/>
                 <div style={helperText}>اتركه فارغاً إن لم يكن هناك خصم</div>
               </div>
@@ -7345,7 +7407,7 @@ function ProductForm({
                 <div style={{marginBottom:12}}>
                   <label style={labelStyle}>التكلفة (للحسابات الداخلية)</label>
                   <input {...numProps("dec")} style={inputStyle} value={f.cost}
-                    onChange={e=>update({ cost: cleanNum("dec")(e.target.value) })}/>
+                    onChange={e=>update({ cost: cleanNumDec(e.target.value) })}/>
                   {margin !== null ? (
                     <div style={{fontSize:11.5,marginTop:4,fontFamily:ui.fontBody,color: margin >= 30 ? "#16A34A" : margin >= 10 ? "#D97706" : "#DC2626"}}>
                       هامش الربح: {margin}%
@@ -7366,13 +7428,13 @@ function ProductForm({
               <div>
                 <label style={labelStyle}>الكمية المتاحة</label>
                 <input {...numProps("int")} style={inputStyle} value={f.stock}
-                  onChange={e=>update({ stock: cleanNum("int")(e.target.value) })}
+                  onChange={e=>update({ stock: cleanNumInt(e.target.value) })}
                   disabled={f.has_variants}/>
               </div>
               <div style={onlyStock ? disabledStyle : {}}>
                 <label style={labelStyle}>حد التنبيه</label>
                 <input {...numProps("int")} style={inputStyle} value={f.alert_threshold}
-                  onChange={e=>update({ alert_threshold: cleanNum("int")(e.target.value) })}
+                  onChange={e=>update({ alert_threshold: cleanNumInt(e.target.value) })}
                   disabled={onlyStock}/>
               </div>
             </div>
@@ -7386,9 +7448,9 @@ function ProductForm({
                   action buttons (نشر المنتج / حفظ التعديلات / إلغاء النشر).
                   Having a duplicate pill here led to confusion + a broken
                   click handler that didn't actually persist. */}
-              <SwitchToggle value={f.in_stock}       onChange={v=>update({ in_stock: v })}        label="متاح في المخزون" disabled={onlyStock}/>
-              <SwitchToggle value={f.featured}       onChange={v=>update({ featured: v })}        label="منتج مميز"        hint="يظهر في الصفحة الرئيسية" disabled={onlyStock}/>
-              <SwitchToggle value={f.is_best_seller} onChange={v=>update({ is_best_seller: v })}  label="الأكثر مبيعاً"    hint="إضافة لأكثر المبيعات يدوياً" disabled={onlyStock}/>
+              <SwitchToggle value={f.in_stock}       onChange={v=>update({ in_stock: v })}        label="متاح في المخزون" disabled={onlyStock} ui={ui}/>
+              <SwitchToggle value={f.featured}       onChange={v=>update({ featured: v })}        label="منتج مميز"        hint="يظهر في الصفحة الرئيسية" disabled={onlyStock} ui={ui}/>
+              <SwitchToggle value={f.is_best_seller} onChange={v=>update({ is_best_seller: v })}  label="الأكثر مبيعاً"    hint="إضافة لأكثر المبيعات يدوياً" disabled={onlyStock} ui={ui}/>
               <div style={{padding:"10px 0",borderBottom:"0.5px solid #EEE"}}>
                 <label style={{fontSize:13,color:ui.text,fontFamily:ui.fontBody,display:"block",marginBottom:5}}>وقت النشر (اختياري)</label>
                 <input type="datetime-local" value={f.publish_at ? f.publish_at.slice(0,16) : ""}
