@@ -27,8 +27,9 @@ export default [
     },
     settings: { react: { version: '18.2' } },
     rules: {
-      // ── The rule that would have caught the outage ──────────────────
-      'no-undef': 'error',
+      // ── Rules that catch missing imports / undefined refs ───────────
+      'no-undef': 'error',                  // catches bare identifiers
+      'react/jsx-no-undef': 'error',        // catches <Component/> where Component isn't in scope (the bug that crashed the customer details page on 2026-05-23)
       // ── React hooks rules per user's request ────────────────────────
       'react-hooks/rules-of-hooks': 'error',
       'react-hooks/exhaustive-deps': 'warn',

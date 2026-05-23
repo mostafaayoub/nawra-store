@@ -7146,14 +7146,16 @@ function CustomerDetailsPage({ email, ui, mob, C, isSuper, canManageOrders, onBa
       <div style={{display:"grid",gap:12,gridTemplateColumns: mob ? "1fr" : "2fr 1fr"}}>
         {/* LEFT COLUMN */}
         <div>
-          {/* Spending summary */}
+          {/* Spending summary — use MetricCardBase directly (module scope).
+              We can't use AdminDash's `Metric` binding here because this
+              component lives at module scope and has no closure access. */}
           <section style={card}>
             <div style={cardTitle}>ملخص الإنفاق</div>
             <div style={{display:"grid",gridTemplateColumns: mob?"1fr 1fr":"repeat(4,1fr)",gap:10}}>
-              <Metric label="إجمالي الإنفاق"   value={(u.totalSpent||0).toLocaleString()} suffix="ج" />
-              <Metric label="عدد الطلبات"      value={u.totalOrders||0} />
-              <Metric label="متوسط قيمة الطلب" value={aov.toLocaleString()} suffix="ج" />
-              <Metric label="عدد المرتجعات"   value={returnsCount} hint={u.totalOrders ? `${Math.round((returnsCount/u.totalOrders)*100)}%` : "—"} />
+              <MetricCardBase ui={ui} mob={mob} label="إجمالي الإنفاق"   value={(u.totalSpent||0).toLocaleString()} suffix="ج" />
+              <MetricCardBase ui={ui} mob={mob} label="عدد الطلبات"      value={u.totalOrders||0} />
+              <MetricCardBase ui={ui} mob={mob} label="متوسط قيمة الطلب" value={aov.toLocaleString()} suffix="ج" />
+              <MetricCardBase ui={ui} mob={mob} label="عدد المرتجعات"   value={returnsCount} hint={u.totalOrders ? `${Math.round((returnsCount/u.totalOrders)*100)}%` : "—"} />
             </div>
           </section>
 
