@@ -1293,7 +1293,12 @@ function AdminDash({ go }) {
   // until they log out & back in (which will fetch the proper role).
   const isSuper = activeRole === "super_admin" || activeRole === "admin";
   // Per ROLES spec: super admin and "مشرف طلبات" can update order status / cancel
-  const canManageOrders = isSuper || activeRole === "orders_admin";
+  const canManageOrders   = isSuper || activeRole === "orders_admin";
+  // Products: super_admin and "مشرف مخزون" can edit. Inventory-only admins
+  // can only edit stock fields — UI disables the rest.
+  const canManageProducts = isSuper || activeRole === "inventory_admin";
+  const canEditAllProductFields = isSuper; // inventory_admin is stock-only
+  const canSeeCost = isSuper;              // cost field is super-only
 
   // ── Approvals (product delete / stock reduce / etc.) + Notifications ───────
   const [approvals, setApprovals] = useState([]);
@@ -2068,6 +2073,25 @@ function AdminDash({ go }) {
     ? (orderList.find(o => String(o.id) === String(detailOrderId)) ||
        orderList.find(o => String(o.order_number) === String(detailOrderId)))
     : null;
+
+  // Products subroutes: #admin/products/new or #admin/products/:id/edit
+  const productFormRoute = (() => {
+    if (typeof window === "undefined") return null;
+    const h = window.location.hash || "";
+    if (h === "#admin/products/new") return { mode: "new" };
+    const m = h.match(/^#admin\/products\/([^/]+)\/edit$/);
+    if (m) return { mode: "edit", id: decodeURIComponent(m[1]) };
+    return null;
+  })();
+  // Whenever the user lands on a product subroute, make sure the products tab
+  // is active so the sidebar highlights correctly and back-button works.
+  useEffect(() => {
+    if (productFormRoute && tab !== "products") setTab("products");
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [productFormRoute && productFormRoute.mode, productFormRoute && productFormRoute.id]);
+  const goProductNew  = ()   => { window.location.hash = "#admin/products/new"; };
+  const goProductEdit = (id) => { window.location.hash = `#admin/products/${encodeURIComponent(id)}/edit`; };
+  const goProductsList = ()  => { if (window.location.hash !== "#admin") window.location.hash = "#admin"; setTab("products"); };
   // Whenever the user lands on an order-detail URL, ensure the active tab is
   // "orders" (so leaving the detail returns to the right list, and the topbar
   // title is correct).
@@ -2083,6 +2107,18 @@ function AdminDash({ go }) {
     window.addEventListener("hashchange", h);
     return () => window.removeEventListener("hashchange", h);
   }, []);
+
+  // ── Products list filters / selection / pagination ─────────────────────────
+  const [prodSearch,    setProdSearch]    = useState("");
+  const [prodCatFil,    setProdCatFil]    = useState("all");
+  const [prodBrandFil,  setProdBrandFil]  = useState("all");
+  const [prodStockFil,  setProdStockFil]  = useState("all"); // all | available | low | out
+  const [prodStatusFil, setProdStatusFil] = useState("all"); // all | published | draft
+  const [prodSort,      setProdSort]      = useState("new"); // new | old | priceDesc | priceAsc | stockAsc
+  const [prodSelected,  setProdSelected]  = useState({});
+  const [prodPage,      setProdPage]      = useState(1);
+  const PROD_PER_PAGE = 20;
+  useEffect(() => { setProdPage(1); }, [prodSearch, prodCatFil, prodBrandFil, prodStockFil, prodStatusFil, prodSort]);
 
   // ── Orders page filters / selection / pagination / auto-refresh ────────────
   const [ordSearch,       setOrdSearch]       = useState("");
@@ -2367,10 +2403,12 @@ function AdminDash({ go }) {
 
   // ── Sidebar nav button ─────────────────────────────────────────────────────
   const NavBtn = ({ item }) => {
-    const active = tab === item.k && !detailOrderId;
+    const active = tab === item.k && !detailOrderId && !productFormRoute;
     return (
       <button onClick={()=>{
-        // Leave any order-detail subroute when switching tabs.
+        // "إضافة منتج" is now a shortcut into the products subroute.
+        if (item.k === "add-product") { goProductNew(); return; }
+        // Leave any subroute (order detail, product form) when switching tabs.
         if (window.location.hash !== "#admin") window.location.hash = "#admin";
         setTab(item.k);
       }}
@@ -3121,104 +3159,431 @@ function AdminDash({ go }) {
 
           {/* PRODUCTS */}
           {tab === "products" && (
-            <div>
-              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:12}}>
-                <span style={{fontSize:13,color:ui.textSub,fontFamily:ui.fontBody}}>الإجمالي: {prods.length} منتج</span>
-                <button onClick={()=>{setShowAdd(!showAdd);setEditId(null);setNewP({name:"",brand:"",desc:"",price:"",icon:"✨",badge:"",bg:COLORS[0]});}}
-                  style={{display:"flex",alignItems:"center",gap:5,background:ui.text,color:"#fff",
-                    border:"none",padding:"7px 14px",cursor:"pointer",fontFamily:ui.fontBody,fontSize:12,borderRadius:6}}>
-                  <AdmIcon name="plus" size={13}/> {showAdd?"إلغاء":"إضافة منتج"}
-                </button>
-              </div>
+            productFormRoute ? (
+              <ProductForm
+                mode={productFormRoute.mode}
+                productId={productFormRoute.id}
+                ui={ui} mob={mob} C={C}
+                categories={PRODUCT_CATEGORIES}
+                allTags={(() => { const s=new Set(); dbProducts.forEach(p => (p.tags||[]).forEach(t => s.add(t))); return Array.from(s); })()}
+                allBrands={(() => { const s=new Set(); dbProducts.forEach(p => { if (p.brand) s.add(p.brand); }); return Array.from(s); })()}
+                canEditAll={canEditAllProductFields}
+                canSeeCost={canSeeCost}
+                isSuper={isSuper}
+                onBack={goProductsList}
+                onSaved={()=>{ refreshProducts(); }}
+                onDeleted={()=>{ refreshProducts(); goProductsList(); }}
+                submitApproval={submitApproval}
+              />
+            ) : (() => {
+              // ── KPI cards ────────────────────────────────────────────────
+              const totalCount = dbProducts.length;
+              const publishedCount = dbProducts.filter(p => p.status === "published" && !p.archived).length;
+              const lowStockCount  = dbProducts.filter(p => (p.stock||0) <= (p.alert_threshold||0) && !p.archived).length;
+              const invValue = dbProducts.reduce((s,p)=>s + ((Number(p.cost)||0) * (Number(p.stock)||0)), 0);
 
-              {showAdd && (
-                <div style={{background:ui.cardBg,border:ui.border,borderRadius:ui.radius,padding:mob?"14px":"18px",marginBottom:12}}>
-                  <h4 style={{fontFamily:ui.fontHead,fontSize:15,fontWeight:500,color:ui.text,marginBottom:14}}>{editId?"تعديل المنتج":"إضافة منتج جديد"}</h4>
-                  <div style={{display:"grid",gridTemplateColumns:mob?"1fr":"1fr 1fr",gap:mob?0:16}}>
-                    <div>{pInp("name","اسم المنتج","مثال: سيروم النياسيناميد")}{pInp("brand","البراند","مثال: THE ORDINARY")}{pInp("price","السعر (جنيه)","280","number")}{pInp("stock","الكمية في المخزون","10","number")}</div>
-                    <div>{pInp("desc","الوصف","وصف مختصر للمنتج")}{pInp("badge","Badge (اختياري)","مثال: جديد")}
-                      <div style={{marginBottom:11}}>
-                        <label style={{display:"block",fontSize:10,letterSpacing:2,color:ui.textSub,marginBottom:5,fontFamily:ui.fontBody}}>الأيقونة</label>
-                        <div style={{display:"flex",flexWrap:"wrap",gap:6}}>
-                          {ICONS.map(ic=><button key={ic} onClick={()=>setNewP({...newP,icon:ic})} style={{fontSize:18,background:newP.icon===ic?"#F3F4F6":"none",border:newP.icon===ic?`1px solid ${ui.text}`:"1px solid #E5E5E5",width:34,height:34,cursor:"pointer",borderRadius:4}}>{ic}</button>)}
-                        </div>
-                      </div>
-                      <div>
-                        <label style={{display:"block",fontSize:10,letterSpacing:2,color:ui.textSub,marginBottom:5,fontFamily:ui.fontBody}}>لون الخلفية</label>
-                        <div style={{display:"flex",gap:6,flexWrap:"wrap"}}>
-                          {COLORS.map(c=><div key={c} onClick={()=>setNewP({...newP,bg:c})} style={{width:26,height:26,background:c,cursor:"pointer",border:newP.bg===c?`2px solid ${ui.text}`:"2px solid transparent",borderRadius:3}}/>)}
-                        </div>
-                      </div>
-                    </div>
+              // ── Brand list (for filter) ─────────────────────────────────
+              const brandSet = new Set();
+              dbProducts.forEach(p => { if (p.brand) brandSet.add(p.brand); });
+              const brands = Array.from(brandSet).sort();
+
+              // ── Filter pipeline ─────────────────────────────────────────
+              const q = (prodSearch || "").trim().toLowerCase();
+              const filtered = dbProducts.filter(p => {
+                if (p.archived) return false;
+                if (prodCatFil    !== "all" && p.category !== prodCatFil) return false;
+                if (prodBrandFil  !== "all" && p.brand    !== prodBrandFil) return false;
+                if (prodStatusFil !== "all" && p.status   !== prodStatusFil) return false;
+                if (prodStockFil  !== "all") {
+                  const stk = Number(p.stock)||0;
+                  const thr = Number(p.alert_threshold)||0;
+                  if (prodStockFil === "available" && stk <= thr) return false;
+                  if (prodStockFil === "low"       && (stk === 0 || stk > thr)) return false;
+                  if (prodStockFil === "out"       && stk > 0) return false;
+                }
+                if (q) {
+                  const hay = `${p.name||""} ${p.sku||""} ${p.brand||""} ${p.slug||""}`.toLowerCase();
+                  if (!hay.includes(q)) return false;
+                }
+                return true;
+              });
+              // Sort
+              const sorted = filtered.slice();
+              if (prodSort === "old")        sorted.sort((a,b)=>String(a.created_at).localeCompare(String(b.created_at)));
+              else if (prodSort === "new")   sorted.sort((a,b)=>String(b.created_at).localeCompare(String(a.created_at)));
+              else if (prodSort === "priceDesc") sorted.sort((a,b)=>(b.price||0)-(a.price||0));
+              else if (prodSort === "priceAsc")  sorted.sort((a,b)=>(a.price||0)-(b.price||0));
+              else if (prodSort === "stockAsc")  sorted.sort((a,b)=>(a.stock||0)-(b.stock||0));
+
+              // ── Pagination ───────────────────────────────────────────────
+              const totalPages = Math.max(1, Math.ceil(sorted.length / PROD_PER_PAGE));
+              const page = Math.min(prodPage, totalPages);
+              const pageRows = sorted.slice((page-1)*PROD_PER_PAGE, page*PROD_PER_PAGE);
+              const selectedIds = Object.keys(prodSelected).filter(k => prodSelected[k]);
+              const allOnPageSelected = pageRows.length > 0 && pageRows.every(p => prodSelected[p.id]);
+              const togglePage = () => {
+                const next = { ...prodSelected };
+                if (allOnPageSelected) pageRows.forEach(p => { delete next[p.id]; });
+                else                   pageRows.forEach(p => { next[p.id] = true; });
+                setProdSelected(next);
+              };
+
+              const exportProductsCsv = () => {
+                const head = ["#","SKU","الاسم","البراند","الفئة","السعر","المخزون","الحالة"];
+                const rows = sorted.map(p => [
+                  p.id, p.sku||"", p.name||"", p.brand||"", p.category||"",
+                  p.price||0, p.stock||0, p.status||""
+                ].map(v => `"${String(v).replace(/"/g,'""')}"`).join(","));
+                const csv = "﻿" + [head.join(","), ...rows].join("\n");
+                const url = URL.createObjectURL(new Blob([csv], { type:"text/csv;charset=utf-8" }));
+                const a = document.createElement("a"); a.href = url;
+                a.download = `nawra-products-${new Date().toISOString().slice(0,10)}.csv`;
+                a.click(); URL.revokeObjectURL(url);
+              };
+
+              // Bulk handlers — small wrappers around PATCH/DELETE.
+              const bulkPatch = async (patch) => {
+                const ids = selectedIds.slice();
+                if (!ids.length) return;
+                if (!window.confirm(`تطبيق التغيير على ${ids.length} منتج؟`)) return;
+                for (const id of ids) {
+                  // eslint-disable-next-line no-await-in-loop
+                  try { await fetch(`/api/products/${id}`, {
+                    method:"PATCH", headers:{"Content-Type":"application/json"},
+                    body: JSON.stringify(patch)
+                  }); } catch {}
+                }
+                setProdSelected({}); refreshProducts();
+                setSavedToast(`تم تحديث ${ids.length} منتج`); setTimeout(()=>setSavedToast(""), 2000);
+              };
+              const bulkDelete = async () => {
+                const ids = selectedIds.slice();
+                if (!ids.length) return;
+                if (!isSuper) { alert("الحذف يتطلب Super Admin"); return; }
+                if (!window.confirm(`حذف ${ids.length} منتج نهائياً؟`)) return;
+                for (const id of ids) {
+                  // eslint-disable-next-line no-await-in-loop
+                  try { await fetch(`/api/products/${id}`, { method:"DELETE" }); } catch {}
+                }
+                setProdSelected({}); refreshProducts();
+                setSavedToast(`تم حذف ${ids.length} منتج`); setTimeout(()=>setSavedToast(""), 2000);
+              };
+
+              // Stock-status colour helper for the المخزون column.
+              const stockTone = (p) => {
+                const stk = Number(p.stock)||0;
+                const thr = Number(p.alert_threshold)||0;
+                if (stk === 0) return { c:"#DC2626", txt:"نفذ" };
+                if (stk <= thr) return { c:"#D97706", txt:`${stk} (منخفض)` };
+                return { c:"#16A34A", txt:`${stk}` };
+              };
+
+              return (
+              <div>
+                {/* Top bar */}
+                <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:14,flexWrap:"wrap",gap:8}}>
+                  <div>
+                    <h2 style={{fontSize:18,fontWeight:600,color:ui.text,fontFamily:ui.fontBody,margin:0}}>المنتجات</h2>
+                    <div style={{fontSize:12,color:ui.textSub,fontFamily:ui.fontBody,marginTop:2}}>إدارة الكتالوج</div>
                   </div>
-                  <div style={{marginTop:14,padding:14,background:newP.bg,display:"flex",alignItems:"center",gap:14,borderRadius:6}}>
-                    <span style={{fontSize:32}}>{newP.icon}</span>
-                    <div>
-                      <div style={{fontSize:10,color:"#5C4A2A",letterSpacing:2,fontFamily:ui.fontBody}}>{newP.brand}</div>
-                      <div style={{fontFamily:ui.fontHead,fontSize:14,color:ui.text}}>{newP.name||"اسم المنتج"}</div>
-                      <div style={{fontFamily:ui.fontHead,fontSize:16,color:ui.text,marginTop:4}}>{newP.price||"0"} جنيه</div>
-                    </div>
-                  </div>
-                  <div style={{display:"flex",gap:10,marginTop:14}}>
-                    <button onClick={saveProduct} style={{flex:1,background:ui.text,color:"#fff",border:"none",padding:11,cursor:"pointer",fontFamily:ui.fontBody,fontSize:12.5,borderRadius:6}}>
-                      {editId?"حفظ التعديلات":"إضافة المنتج"}
+                  <div style={{display:"flex",gap:8}}>
+                    <button onClick={exportProductsCsv} disabled={sorted.length===0}
+                      style={{padding:"8px 14px",background:"transparent",border:ui.border,borderRadius:6,
+                        fontFamily:ui.fontBody,fontSize:12.5,color: sorted.length===0?ui.textSub:ui.text,
+                        cursor: sorted.length===0?"not-allowed":"pointer",display:"flex",alignItems:"center",gap:5}}>
+                      تصدير CSV
                     </button>
-                    <button onClick={()=>{setShowAdd(false);setEditId(null);}} style={{padding:"11px 16px",background:"none",border:ui.border,cursor:"pointer",color:ui.textSub,fontFamily:ui.fontBody,fontSize:12,borderRadius:6}}>إلغاء</button>
+                    {canManageProducts && (
+                      <button onClick={goProductNew}
+                        style={{padding:"8px 16px",background:ui.text,color:"#fff",border:"none",borderRadius:6,
+                          fontFamily:ui.fontBody,fontSize:12.5,fontWeight:500,cursor:"pointer",display:"flex",alignItems:"center",gap:5}}>
+                        <AdmIcon name="plus" size={13}/> إضافة منتج
+                      </button>
+                    )}
                   </div>
                 </div>
-              )}
 
-              <div style={{display:"grid",gridTemplateColumns:mob?"1fr":"1fr 1fr",gap:10}}>
-                {prods.map(p=>(
-                  <div key={p.id} style={{background:ui.cardBg,border:ui.border,borderRadius:ui.radius,display:"flex",gap:12,padding:12,alignItems:"center"}}>
-                    <div style={{width:52,height:52,flexShrink:0,borderRadius:6,overflow:"hidden",background:p.bg}}>
-                      {p.img
-                        ? <img src={p.img} alt="" style={{width:"100%",height:"100%",objectFit:"cover"}} />
-                        : <span style={{fontSize:22,display:"flex",alignItems:"center",justifyContent:"center",height:"100%"}}>{p.icon}</span>}
-                    </div>
-                    <div style={{flex:1,minWidth:0}}>
-                      <div style={{fontSize:9,color:C.go,letterSpacing:2,fontFamily:ui.fontBody}}>{p.brand}</div>
-                      <div style={{fontFamily:ui.fontHead,fontSize:13.5,color:ui.text,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{p.nameAr || p.name}</div>
-                      <div style={{fontSize:12.5,color:ui.text,fontFamily:ui.fontBody,marginTop:2}}>{p.price} جنيه</div>
-                      <div style={{fontSize:10.5,fontFamily:ui.fontBody,marginTop:2,color:p.stock===0?"#DC2626":p.stock<=3?"#D97706":"#16A34A"}}>
-                        {p.stock===0?"نفد المخزون":p.stock<=3?`آخر ${p.stock} قطع`:`${p.stock} قطعة`}
-                      </div>
-                    </div>
-                    <div style={{display:"flex",gap:6,flexShrink:0}}>
-                      <button onClick={()=>startEdit(p)} style={{background:"#F3F4F6",border:"none",padding:"5px 10px",cursor:"pointer",fontSize:11.5,fontFamily:ui.fontBody,color:ui.text,borderRadius:4}}>تعديل</button>
-                      {delConfirm===p.id ? (
-                        <div style={{display:"flex",gap:4}}>
-                          <button onClick={async ()=>{
-                            if (isSuper) {
-                              delProd(p.id);
-                              // Mirror delete to API too — best-effort
-                              try { await fetch(`/api/products/${p.id}`, { method:"DELETE" }); } catch {}
-                            } else {
-                              await submitApproval({
-                                type: "product_delete",
-                                target_id: String(p.id),
-                                target_label: p.nameAr || p.name,
-                                reason: prompt("سبب الحذف (اختياري):") || ""
-                              });
-                            }
-                            setDelConfirm(null);
-                          }} style={{background:"#DC2626",color:"white",border:"none",padding:"5px 9px",cursor:"pointer",fontSize:11,fontFamily:ui.fontBody,borderRadius:4}}>
-                            {isSuper ? "تأكيد" : "إرسال للموافقة"}
-                          </button>
-                          <button onClick={()=>setDelConfirm(null)} style={{background:"none",border:ui.border,padding:"5px 8px",cursor:"pointer",fontSize:11,color:ui.textSub,fontFamily:ui.fontBody,borderRadius:4}}>لا</button>
-                        </div>
-                      ) : (
-                        <button onClick={()=>setDelConfirm(p.id)}
-                          title={isSuper ? "حذف نهائي" : "طلب الحذف من Super Admin"}
-                          style={{background:"none",border:"1px solid rgba(220,38,38,.3)",color:"#DC2626",padding:"5px 9px",cursor:"pointer",fontSize:11.5,fontFamily:ui.fontBody,borderRadius:4}}>
-                          {isSuper ? "حذف" : "طلب حذف"}
-                        </button>
-                      )}
+                {/* KPI cards */}
+                <div style={{display:"grid",gridTemplateColumns:mob?"1fr 1fr":"repeat(4,1fr)",gap:10,marginBottom:14}}>
+                  <Metric label="إجمالي المنتجات" value={totalCount} />
+                  <Metric label="منشور"            value={publishedCount} />
+                  <div style={{background:ui.cardBg,border:`0.5px solid ${lowStockCount>0?"#FCD34D":"#E5E5E5"}`,borderRadius:ui.radius,padding:"14px 16px"}}>
+                    <div style={{fontSize:11.5,color:ui.textSub,fontFamily:ui.fontBody,marginBottom:6}}>منخفض المخزون</div>
+                    <div style={{fontSize:mob?20:24,color: lowStockCount>0 ? "#D97706" : ui.text,fontFamily:ui.fontHead,fontWeight:500,lineHeight:1.1}}>
+                      {lowStockCount}
                     </div>
                   </div>
-                ))}
+                  <Metric label="قيمة المخزون" value={Math.round(invValue).toLocaleString()} suffix="ج" />
+                </div>
+
+                {/* Filter bar */}
+                <div style={{background:ui.cardBg,border:ui.border,borderRadius:ui.radius,padding:"12px 14px",marginBottom:12,
+                  display:"grid",gap:8,gridTemplateColumns: mob ? "1fr" : "minmax(220px,2fr) repeat(5, minmax(0,1fr))"}}>
+                  <input value={prodSearch} onChange={e=>setProdSearch(e.target.value)}
+                    placeholder="بحث بالاسم أو SKU..."
+                    style={{padding:"8px 12px",border:ui.border,borderRadius:6,background:ui.cardBg,
+                      fontFamily:ui.fontBody,fontSize:13,color:ui.text,outline:"none",direction:"rtl"}}/>
+                  <select value={prodCatFil} onChange={e=>setProdCatFil(e.target.value)}
+                    style={{padding:"8px 10px",border:ui.border,borderRadius:6,background:ui.cardBg,fontFamily:ui.fontBody,fontSize:12.5,color:ui.text,outline:"none"}}>
+                    <option value="all">كل الفئات</option>
+                    {PRODUCT_CATEGORIES.map(c => <option key={c} value={c}>{c}</option>)}
+                  </select>
+                  <select value={prodBrandFil} onChange={e=>setProdBrandFil(e.target.value)}
+                    style={{padding:"8px 10px",border:ui.border,borderRadius:6,background:ui.cardBg,fontFamily:ui.fontBody,fontSize:12.5,color:ui.text,outline:"none"}}>
+                    <option value="all">كل البراندات</option>
+                    {brands.map(b => <option key={b} value={b}>{b}</option>)}
+                  </select>
+                  <select value={prodStockFil} onChange={e=>setProdStockFil(e.target.value)}
+                    style={{padding:"8px 10px",border:ui.border,borderRadius:6,background:ui.cardBg,fontFamily:ui.fontBody,fontSize:12.5,color:ui.text,outline:"none"}}>
+                    <option value="all">كل المخزون</option>
+                    <option value="available">متوفر</option>
+                    <option value="low">منخفض</option>
+                    <option value="out">نفذ</option>
+                  </select>
+                  <select value={prodStatusFil} onChange={e=>setProdStatusFil(e.target.value)}
+                    style={{padding:"8px 10px",border:ui.border,borderRadius:6,background:ui.cardBg,fontFamily:ui.fontBody,fontSize:12.5,color:ui.text,outline:"none"}}>
+                    <option value="all">كل الحالات</option>
+                    <option value="published">منشور</option>
+                    <option value="draft">مسودة</option>
+                  </select>
+                  <select value={prodSort} onChange={e=>setProdSort(e.target.value)}
+                    style={{padding:"8px 10px",border:ui.border,borderRadius:6,background:ui.cardBg,fontFamily:ui.fontBody,fontSize:12.5,color:ui.text,outline:"none"}}>
+                    <option value="new">الأحدث</option>
+                    <option value="old">الأقدم</option>
+                    <option value="priceDesc">الأعلى سعراً</option>
+                    <option value="priceAsc">الأقل سعراً</option>
+                    <option value="stockAsc">الأقل مخزوناً</option>
+                  </select>
+                </div>
+
+                {/* Result count */}
+                <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:8,flexWrap:"wrap",gap:8}}>
+                  <span style={{fontSize:12.5,color:ui.textSub,fontFamily:ui.fontBody}}>
+                    {sorted.length === dbProducts.length
+                      ? `${dbProducts.length} منتج`
+                      : `${sorted.length} من ${dbProducts.length} منتج`}
+                  </span>
+                </div>
+
+                {/* Bulk actions bar — sticky black */}
+                {selectedIds.length > 0 && (
+                  <div style={{position:"sticky",top:0,zIndex:40,
+                    background:"#111111",borderRadius:ui.radius,padding:"10px 14px",marginBottom:10,
+                    display:"flex",flexWrap:"wrap",alignItems:"center",gap:10,color:"#fff"}}>
+                    <span style={{fontSize:12.5,fontFamily:ui.fontBody,fontWeight:600}}>
+                      تم تحديد {selectedIds.length} منتج
+                    </span>
+                    <div style={{flex:1}}/>
+                    <select onChange={e=>{ if(e.target.value){ bulkPatch({ category:e.target.value }); e.target.value=""; } }} defaultValue=""
+                      style={{padding:"6px 10px",border:"1px solid #444",borderRadius:6,background:"#222",color:"#fff",
+                        fontFamily:ui.fontBody,fontSize:12,outline:"none"}}>
+                      <option value="">تغيير الفئة...</option>
+                      {PRODUCT_CATEGORIES.map(c => <option key={c} value={c}>{c}</option>)}
+                    </select>
+                    <button onClick={()=>bulkPatch({ status:"published" })}
+                      style={{padding:"6px 11px",border:"1px solid #444",background:"#222",color:"#fff",borderRadius:6,
+                        fontFamily:ui.fontBody,fontSize:12,cursor:"pointer"}}>
+                      نشر
+                    </button>
+                    <button onClick={()=>bulkPatch({ status:"draft" })}
+                      style={{padding:"6px 11px",border:"1px solid #444",background:"#222",color:"#fff",borderRadius:6,
+                        fontFamily:ui.fontBody,fontSize:12,cursor:"pointer"}}>
+                      تحويل لمسودة
+                    </button>
+                    {isSuper && (
+                      <button onClick={bulkDelete}
+                        style={{padding:"6px 11px",border:"1px solid #7F1D1D",background:"#7F1D1D",color:"#fff",borderRadius:6,
+                          fontFamily:ui.fontBody,fontSize:12,cursor:"pointer"}}>
+                        حذف
+                      </button>
+                    )}
+                    <button onClick={()=>setProdSelected({})}
+                      style={{padding:"6px 10px",border:"none",background:"transparent",color:"#9CA3AF",
+                        fontFamily:ui.fontBody,fontSize:12,cursor:"pointer"}}>
+                      إلغاء التحديد ✕
+                    </button>
+                  </div>
+                )}
+
+                {/* Table / empty state */}
+                {dbProducts.length === 0 ? (
+                  <div style={{background:ui.cardBg,border:ui.border,borderRadius:ui.radius,padding:"40px 22px",textAlign:"center"}}>
+                    <div style={{fontSize:42,marginBottom:10}}>🧴</div>
+                    <div style={{fontSize:15,color:ui.text,fontFamily:ui.fontBody,fontWeight:600,marginBottom:6}}>لا توجد منتجات بعد</div>
+                    <div style={{fontSize:13,color:ui.textSub,fontFamily:ui.fontBody,marginBottom:16}}>ابدأ بإضافة منتجك الأول للظهور في المتجر</div>
+                    {canManageProducts && (
+                      <button onClick={goProductNew}
+                        style={{padding:"10px 22px",background:ui.text,color:"#fff",border:"none",borderRadius:6,
+                          fontFamily:ui.fontBody,fontSize:13,fontWeight:500,cursor:"pointer"}}>
+                        + إضافة أول منتج
+                      </button>
+                    )}
+                  </div>
+                ) : sorted.length === 0 ? (
+                  <div style={{background:ui.cardBg,border:ui.border,borderRadius:ui.radius,padding:"34px 18px",textAlign:"center"}}>
+                    <div style={{fontSize:32,marginBottom:8}}>🔎</div>
+                    <div style={{fontSize:14,color:ui.text,fontFamily:ui.fontBody,fontWeight:500,marginBottom:6}}>لا توجد منتجات تطابق الفلاتر</div>
+                    <button onClick={()=>{ setProdSearch(""); setProdCatFil("all"); setProdBrandFil("all"); setProdStockFil("all"); setProdStatusFil("all"); }}
+                      style={{marginTop:8,padding:"7px 16px",background:"transparent",border:ui.border,borderRadius:6,
+                        fontFamily:ui.fontBody,fontSize:12.5,color:ui.text,cursor:"pointer"}}>
+                      إعادة ضبط الفلاتر
+                    </button>
+                  </div>
+                ) : (
+                  <div style={{background:ui.cardBg,border:ui.border,borderRadius:ui.radius,overflow:"hidden",overflowX:"auto"}}>
+                    <table style={{width:"100%",borderCollapse:"collapse",direction:"rtl",fontFamily:ui.fontBody,minWidth:900}}>
+                      <thead>
+                        <tr style={{background:ui.sideBg,borderBottom:`0.5px solid #E5E5E5`}}>
+                          <th style={{padding:"10px 12px",width:36}}>
+                            <input type="checkbox" checked={allOnPageSelected} onChange={togglePage}
+                              style={{cursor:"pointer",accentColor:ui.text}}/>
+                          </th>
+                          {["المنتج","SKU","الفئة","السعر","المخزون","منشور","الإجراءات"].map(h=>(
+                            <th key={h} style={{padding:"11px 12px",textAlign:"right",fontSize:11.5,color:ui.textSub,fontWeight:500,whiteSpace:"nowrap"}}>{h}</th>
+                          ))}
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {pageRows.map(p => {
+                          const thumb = (p.images && p.images[0]) || null;
+                          const ton = stockTone(p);
+                          const isPub = p.status === "published";
+                          return (
+                            <tr key={p.id} style={{borderTop:"0.5px solid #EEE"}}>
+                              <td style={{padding:"10px 12px"}}>
+                                <input type="checkbox"
+                                  checked={!!prodSelected[p.id]}
+                                  onChange={e=>setProdSelected(s => ({ ...s, [p.id]: e.target.checked }))}
+                                  style={{cursor:"pointer",accentColor:ui.text}}/>
+                              </td>
+                              <td style={{padding:"11px 12px"}}>
+                                <div style={{display:"flex",alignItems:"center",gap:10}}>
+                                  <div style={{width:36,height:36,borderRadius:6,overflow:"hidden",background:"#F3F4F6",flexShrink:0,
+                                    display:"flex",alignItems:"center",justifyContent:"center",fontSize:14}}>
+                                    {thumb ? <img src={thumb} alt="" style={{width:"100%",height:"100%",objectFit:"cover"}}/> : "🧴"}
+                                  </div>
+                                  <div style={{minWidth:0}}>
+                                    <div style={{fontSize:13,color:ui.text,fontWeight:500,
+                                      overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",maxWidth:260}}>{p.name}</div>
+                                    {p.brand && <div style={{fontSize:10,color:ui.textSub,letterSpacing:"0.12em",textTransform:"uppercase",marginTop:2}}>{p.brand}</div>}
+                                  </div>
+                                </div>
+                              </td>
+                              <td style={{padding:"11px 12px",fontSize:11.5,color:ui.textSub,fontFamily:"monospace",whiteSpace:"nowrap"}}>{p.sku || "—"}</td>
+                              <td style={{padding:"11px 12px",fontSize:12.5,color:ui.text,whiteSpace:"nowrap"}}>{p.category || "—"}</td>
+                              <td style={{padding:"11px 12px",fontSize:13,color:ui.text,fontWeight:500,whiteSpace:"nowrap"}}>
+                                {(p.price||0).toLocaleString()} <span style={{fontSize:11,color:ui.textSub}}>ج</span>
+                                {p.price_before > 0 && p.price_before > p.price && (
+                                  <span style={{fontSize:11,color:ui.textSub,textDecoration:"line-through",marginInlineStart:6}}>
+                                    {p.price_before.toLocaleString()}
+                                  </span>
+                                )}
+                              </td>
+                              <td style={{padding:"11px 12px",fontSize:12.5,fontWeight:500,color:ton.c,whiteSpace:"nowrap"}}>{ton.txt}</td>
+                              <td style={{padding:"11px 12px"}}>
+                                {/* Inline publish toggle */}
+                                <button onClick={async ()=>{
+                                  const next = isPub ? "draft" : "published";
+                                  // Optimistic
+                                  setDbProducts(prev => prev.map(x => x.id === p.id ? { ...x, status: next } : x));
+                                  try {
+                                    await fetch(`/api/products/${p.id}`, {
+                                      method:"PATCH", headers:{"Content-Type":"application/json"},
+                                      body: JSON.stringify({ status: next })
+                                    });
+                                  } catch {} refreshProducts();
+                                }}
+                                  disabled={!canManageProducts}
+                                  title={isPub ? "إيقاف النشر" : "نشر"}
+                                  style={{ width:38, height:22, borderRadius:11, border:"none",
+                                    background: isPub ? "#16A34A" : "#D4D4D4", position:"relative",
+                                    cursor: canManageProducts ? "pointer" : "not-allowed", transition:"background .2s",
+                                    opacity: canManageProducts ? 1 : 0.6 }}>
+                                  <span style={{ position:"absolute", top:2, [isPub?"left":"right"]:2, width:18, height:18,
+                                    background:"#fff", borderRadius:"50%", transition:"all .2s",
+                                    boxShadow:"0 1px 2px rgba(0,0,0,.2)" }}/>
+                                </button>
+                              </td>
+                              <td style={{padding:"11px 12px",whiteSpace:"nowrap"}}>
+                                <div style={{display:"flex",gap:4}}>
+                                  <button onClick={()=>window.open(`/#product-${p.id}`, "_blank")}
+                                    title="معاينة في المتجر"
+                                    style={{background:"transparent",border:ui.border,padding:"5px 8px",cursor:"pointer",borderRadius:5,fontSize:13}}>👁</button>
+                                  <button onClick={()=>goProductEdit(p.id)}
+                                    title="تعديل"
+                                    disabled={!canManageProducts}
+                                    style={{background:"transparent",border:ui.border,padding:"5px 8px",
+                                      cursor: canManageProducts ? "pointer" : "not-allowed", borderRadius:5, fontSize:13,
+                                      opacity: canManageProducts ? 1 : 0.5}}>✏️</button>
+                                  <ProductRowMenu
+                                    product={p}
+                                    ui={ui} isSuper={isSuper}
+                                    onDuplicate={async ()=>{
+                                      try {
+                                        const { id, sku, created_at, updated_at, variants, ...rest } = p;
+                                        const body = { ...rest, name: `${p.name} (نسخة)`, slug: null, sku: null, status:"draft", id: undefined };
+                                        const r = await fetch("/api/products", {
+                                          method:"POST", headers:{"Content-Type":"application/json"},
+                                          body: JSON.stringify(body)
+                                        });
+                                        if (r.ok) { refreshProducts(); setSavedToast("تم تكرار المنتج"); setTimeout(()=>setSavedToast(""), 1800); }
+                                      } catch {}
+                                    }}
+                                    onArchive={async ()=>{
+                                      try {
+                                        await fetch(`/api/products/${p.id}`, {
+                                          method:"PATCH", headers:{"Content-Type":"application/json"},
+                                          body: JSON.stringify({ archived: true })
+                                        });
+                                        refreshProducts();
+                                      } catch {}
+                                    }}
+                                    onDelete={async ()=>{
+                                      if (isSuper) {
+                                        if (!window.confirm("حذف المنتج نهائياً؟")) return;
+                                        try { await fetch(`/api/products/${p.id}`, { method:"DELETE" }); } catch {}
+                                        refreshProducts();
+                                      } else {
+                                        await submitApproval({
+                                          type: "product_delete",
+                                          target_id: String(p.id),
+                                          target_label: p.name,
+                                          reason: window.prompt("سبب الحذف (اختياري):") || "",
+                                        });
+                                      }
+                                    }}
+                                  />
+                                </div>
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+
+                {/* Pagination */}
+                {sorted.length > PROD_PER_PAGE && (
+                  <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginTop:12,
+                    fontFamily:ui.fontBody,fontSize:12.5,color:ui.textSub}}>
+                    <span>عرض {(page-1)*PROD_PER_PAGE + 1}–{Math.min(page*PROD_PER_PAGE, sorted.length)} من {sorted.length} منتج</span>
+                    <div style={{display:"flex",gap:6,alignItems:"center"}}>
+                      <button disabled={page <= 1} onClick={()=>setProdPage(p => Math.max(1, p-1))}
+                        style={{padding:"6px 12px",border:ui.border,borderRadius:6,background:ui.cardBg,
+                          fontFamily:ui.fontBody,fontSize:12,color: page<=1?"#D1D5DB":ui.text,
+                          cursor: page<=1?"not-allowed":"pointer"}}>التالي ←</button>
+                      <span style={{fontSize:12,color:ui.text,padding:"0 8px"}}>صفحة {page} من {totalPages}</span>
+                      <button disabled={page >= totalPages} onClick={()=>setProdPage(p => Math.min(totalPages, p+1))}
+                        style={{padding:"6px 12px",border:ui.border,borderRadius:6,background:ui.cardBg,
+                          fontFamily:ui.fontBody,fontSize:12,color: page>=totalPages?"#D1D5DB":ui.text,
+                          cursor: page>=totalPages?"not-allowed":"pointer"}}>→ السابق</button>
+                    </div>
+                  </div>
+                )}
               </div>
-            </div>
+              );
+            })()
           )}
 
           {/* CUSTOMERS */}
@@ -3318,310 +3683,12 @@ function AdminDash({ go }) {
             );
           })()}
 
-          {/* ─── ADD PRODUCT ─────────────────────────────────────────────── */}
-          {tab === "add-product" && (() => {
-            // Inline styled controls — share visual language with the rest of the admin
-            const inputStyle = {
-              width:"100%", padding:"9px 11px", border:ui.border, borderRadius:6,
-              background:ui.cardBg, fontFamily:ui.fontBody, fontSize:13, color:ui.text,
-              outline:"none", direction:"rtl", boxSizing:"border-box"
-            };
-            const labelStyle = { display:"block", fontSize:12, color:ui.text, fontFamily:ui.fontBody, marginBottom:5, fontWeight:500 };
-            const sectionCard = { background:ui.cardBg, border:ui.border, borderRadius:ui.radius, padding:mob?"14px":"18px", marginBottom:12 };
-            const sectionTitle = { fontSize:13, fontWeight:600, color:ui.text, fontFamily:ui.fontBody, marginBottom:12, paddingBottom:8, borderBottom:`0.5px solid #EEE` };
-            const Field = ({ label, children }) => (
-              <div style={{marginBottom:12}}>
-                <label style={labelStyle}>{label}</label>
-                {children}
-              </div>
-            );
-            const Toggle = ({ value, onChange, label }) => (
-              <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"8px 0",borderBottom:`0.5px solid #EEE`}}>
-                <span style={{fontSize:13,color:ui.text,fontFamily:ui.fontBody}}>{label}</span>
-                <button type="button" onClick={()=>onChange(!value)}
-                  style={{ width:38, height:22, borderRadius:11, border:"none",
-                    background: value ? "#16A34A" : "#D4D4D4", position:"relative",
-                    cursor:"pointer", transition:"background .2s", flexShrink:0 }}>
-                  <span style={{ position:"absolute", top:2, [value?"left":"right"]:2, width:18, height:18,
-                    background:"#fff", borderRadius:"50%", transition:"all .2s",
-                    boxShadow:"0 1px 2px rgba(0,0,0,.2)" }}/>
-                </button>
-              </div>
-            );
-
-            const addTag = () => {
-              const t = pForm.tagInput.trim();
-              if (!t) return;
-              if (pForm.tags.includes(t)) { setPForm({...pForm, tagInput:""}); return; }
-              setPForm({...pForm, tags:[...pForm.tags, t], tagInput:""});
-            };
-
-            return (
-              <div style={{maxWidth:980}}>
-                {pSaveMsg && (
-                  <div style={{
-                    padding:"10px 14px", borderRadius:6, marginBottom:12, fontSize:13, fontFamily:ui.fontBody,
-                    background: pSaveMsg.kind==="ok" ? "#DCFCE7" : "#FEE2E2",
-                    color: pSaveMsg.kind==="ok" ? "#15803D" : "#B91C1C",
-                    border: `0.5px solid ${pSaveMsg.kind==="ok" ? "#86EFAC" : "#FCA5A5"}`
-                  }}>{pSaveMsg.text}</div>
-                )}
-
-                <div style={{display:"grid",gridTemplateColumns:mob?"1fr":"2fr 1fr",gap:12}}>
-                  {/* LEFT COLUMN */}
-                  <div>
-                    {/* Basic info */}
-                    <div style={sectionCard}>
-                      <div style={sectionTitle}>المعلومات الأساسية</div>
-                      <Field label="اسم المنتج">
-                        <input style={inputStyle} value={pForm.name}
-                          onChange={e=>setPForm({...pForm, name:e.target.value})}
-                          placeholder="مثال: سيروم النياسيناميد 10%" />
-                      </Field>
-                      <Field label="الوصف">
-                        <textarea rows={4} style={{...inputStyle, resize:"vertical", fontFamily:ui.fontBody, minHeight:90}}
-                          value={pForm.description}
-                          onChange={e=>setPForm({...pForm, description:e.target.value})}
-                          placeholder="وصف تفصيلي للمنتج وفوائده..." />
-                      </Field>
-                      <div style={{display:"grid",gridTemplateColumns:mob?"1fr":"1fr 1fr",gap:12}}>
-                        <Field label="الفئة">
-                          {/* Custom dropdown: each row is the category name, with a
-                              delete × next to non-default categories. */}
-                          {pForm._addCat ? (
-                            <div style={{display:"flex",gap:6}}>
-                              <input style={{...inputStyle, flex:1}}
-                                autoFocus value={pForm._newCat || ""}
-                                onChange={e=>setPForm({...pForm, _newCat:e.target.value})}
-                                onKeyDown={async e => {
-                                  if (e.key === "Enter") {
-                                    e.preventDefault();
-                                    const added = await addCategory(pForm._newCat);
-                                    if (added) setPForm({...pForm, category:added, _addCat:false, _newCat:"", _openCat:false});
-                                  } else if (e.key === "Escape") {
-                                    setPForm({...pForm, _addCat:false, _newCat:""});
-                                  }
-                                }}
-                                placeholder="اسم الفئة الجديدة..."/>
-                              <button type="button"
-                                onClick={async () => {
-                                  const added = await addCategory(pForm._newCat);
-                                  if (added) setPForm({...pForm, category:added, _addCat:false, _newCat:"", _openCat:false});
-                                }}
-                                style={{padding:"0 12px",background:ui.text,color:"#fff",border:"none",borderRadius:6,fontSize:18,cursor:"pointer"}}>✓</button>
-                              <button type="button"
-                                onClick={() => setPForm({...pForm, _addCat:false, _newCat:""})}
-                                style={{padding:"0 12px",background:"transparent",color:ui.textSub,border:ui.border,borderRadius:6,fontSize:18,cursor:"pointer"}}>×</button>
-                            </div>
-                          ) : (
-                            <div style={{position:"relative"}}>
-                              <button type="button" onClick={()=>setPForm({...pForm, _openCat: !pForm._openCat})}
-                                style={{...inputStyle, cursor:"pointer", textAlign:"right", display:"flex", justifyContent:"space-between", alignItems:"center", width:"100%"}}>
-                                <span>{pForm.category || "اختر فئة..."}</span>
-                                <span style={{color:ui.textSub, fontSize:11, marginInlineStart:8}}>▼</span>
-                              </button>
-                              {pForm._openCat && (
-                                <>
-                                  <div onClick={()=>setPForm({...pForm, _openCat:false})}
-                                    style={{position:"fixed", inset:0, zIndex:30}}/>
-                                  <div style={{position:"absolute", top:"100%", insetInlineStart:0, right:0, marginTop:4,
-                                    background:ui.cardBg, border:ui.border, borderRadius:6, boxShadow:"0 4px 14px rgba(0,0,0,.08)",
-                                    zIndex:31, maxHeight:240, overflow:"auto"}}>
-                                    {categories.length === 0 && FALLBACK_CATEGORIES.map(name => (
-                                      <div key={name} onClick={()=>setPForm({...pForm, category:name, _openCat:false})}
-                                        style={{padding:"8px 12px",cursor:"pointer",fontSize:13,color:ui.text,fontFamily:ui.fontBody,
-                                          background: pForm.category===name ? "#F3F4F6" : "transparent"}}>{name}</div>
-                                    ))}
-                                    {categories.map(cat => {
-                                      const def = isDefaultCategory(cat);
-                                      const sel = pForm.category === cat.name;
-                                      return (
-                                        <div key={cat.id}
-                                          style={{display:"flex",alignItems:"center",justifyContent:"space-between",
-                                            background: sel ? "#F3F4F6" : "transparent"}}>
-                                          <div onClick={()=>setPForm({...pForm, category:cat.name, _openCat:false})}
-                                            style={{flex:1, padding:"8px 12px", cursor:"pointer", fontSize:13, color:ui.text, fontFamily:ui.fontBody}}>
-                                            {cat.name}
-                                            {def && <span style={{fontSize:10, color:ui.textSub, marginInlineStart:6}}>(افتراضي)</span>}
-                                          </div>
-                                          {!def && (
-                                            <button type="button"
-                                              onClick={async (e)=>{
-                                                e.stopPropagation();
-                                                const ok = await deleteCategory(cat.id, cat.name);
-                                                // If the deleted category was selected, reset to first default
-                                                if (ok && sel) setPForm({...pForm, category: FALLBACK_CATEGORIES[0], _openCat:false});
-                                              }}
-                                              title="حذف الفئة"
-                                              style={{background:"none",border:"none",color:"#DC2626",cursor:"pointer",
-                                                padding:"6px 10px",fontSize:14,fontFamily:ui.fontBody,lineHeight:1}}>×</button>
-                                          )}
-                                        </div>
-                                      );
-                                    })}
-                                    <div onClick={()=>setPForm({...pForm, _addCat:true, _openCat:false})}
-                                      style={{padding:"9px 12px",cursor:"pointer",fontSize:12.5,color:ui.text,fontFamily:ui.fontBody,
-                                        borderTop:"0.5px solid #EEE",fontWeight:500}}>
-                                      + إضافة فئة جديدة
-                                    </div>
-                                  </div>
-                                </>
-                              )}
-                            </div>
-                          )}
-                        </Field>
-                        <Field label="الماركة">
-                          <input style={inputStyle} value={pForm.brand}
-                            onChange={e=>setPForm({...pForm, brand:e.target.value})}
-                            placeholder="مثال: THE ORDINARY" />
-                        </Field>
-                      </div>
-                      <Field label="المكونات">
-                        <textarea rows={3} style={{...inputStyle, resize:"vertical", minHeight:70}}
-                          value={pForm.ingredients}
-                          onChange={e=>setPForm({...pForm, ingredients:e.target.value})}
-                          placeholder="مثال: Niacinamide, Zinc PCA, Glycerin..." />
-                      </Field>
-                    </div>
-
-                    {/* Images */}
-                    <div style={sectionCard}>
-                      <div style={sectionTitle}>الصور</div>
-                      <label htmlFor="add-prod-imgs" style={{
-                        display:"flex", flexDirection:"column", alignItems:"center", justifyContent:"center",
-                        padding:"22px 16px", border:"1.5px dashed #D4D4D4", borderRadius:6,
-                        cursor:"pointer", background:"#FAFAFA", marginBottom:12, color:ui.textSub
-                      }}>
-                        <AdmIcon name="plus" size={22}/>
-                        <span style={{fontSize:13,fontFamily:ui.fontBody,marginTop:6}}>اضغط لرفع الصور (يمكن اختيار عدة صور)</span>
-                        <span style={{fontSize:11,fontFamily:ui.fontBody,marginTop:3,color:"#A3A3A3"}}>الحد الأقصى: 3MB لكل صورة</span>
-                      </label>
-                      <input id="add-prod-imgs" type="file" accept="image/*" multiple
-                        style={{display:"none"}}
-                        onChange={e=>{ handleImagesPick(e.target.files); e.target.value=""; }} />
-                      {pForm.images.length > 0 && (
-                        <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(90px,1fr))",gap:8}}>
-                          {pForm.images.map((src,i)=>(
-                            <div key={i} style={{position:"relative",aspectRatio:"1",borderRadius:6,overflow:"hidden",border:ui.border}}>
-                              <img src={src} alt="" style={{width:"100%",height:"100%",objectFit:"cover"}}/>
-                              <button type="button" onClick={()=>removeImg(i)}
-                                style={{ position:"absolute", top:4, insetInlineEnd:4,
-                                  width:22, height:22, borderRadius:"50%",
-                                  background:"rgba(0,0,0,.6)", color:"#fff", border:"none",
-                                  cursor:"pointer", fontSize:12, lineHeight:1, display:"flex",
-                                  alignItems:"center", justifyContent:"center" }}>×</button>
-                            </div>
-                          ))}
-                        </div>
-                      )}
-                    </div>
-
-                    {/* SEO */}
-                    <div style={sectionCard}>
-                      <div style={sectionTitle}>SEO — تحسين محركات البحث</div>
-                      <Field label="عنوان الصفحة (Page Title)">
-                        <input style={inputStyle} value={pForm.seo_title}
-                          onChange={e=>setPForm({...pForm, seo_title:e.target.value})}
-                          placeholder="مثال: سيروم النياسيناميد | نوّرَة" />
-                      </Field>
-                      <Field label="وصف Meta">
-                        <textarea rows={2} style={{...inputStyle, resize:"vertical", minHeight:55}}
-                          value={pForm.seo_description}
-                          onChange={e=>setPForm({...pForm, seo_description:e.target.value})}
-                          placeholder="وصف قصير يظهر في نتائج البحث (150 حرف تقريباً)" />
-                      </Field>
-                    </div>
-                  </div>
-
-                  {/* RIGHT COLUMN */}
-                  <div>
-                    {/* Pricing & stock */}
-                    <div style={sectionCard}>
-                      <div style={sectionTitle}>السعر والمخزون</div>
-                      <Field label="السعر (جنيه)">
-                        <input type="number" style={inputStyle} value={pForm.price}
-                          onChange={e=>setPForm({...pForm, price:e.target.value})} placeholder="280" />
-                      </Field>
-                      <Field label="السعر قبل الخصم (اختياري)">
-                        <input type="number" style={inputStyle} value={pForm.price_before}
-                          onChange={e=>setPForm({...pForm, price_before:e.target.value})} placeholder="350" />
-                      </Field>
-                      <Field label="التكلفة (للحسابات الداخلية)">
-                        <input type="number" style={inputStyle} value={pForm.cost}
-                          onChange={e=>setPForm({...pForm, cost:e.target.value})} placeholder="180" />
-                      </Field>
-                      <Field label="الكمية المتاحة">
-                        <input type="number" style={inputStyle} value={pForm.stock}
-                          onChange={e=>setPForm({...pForm, stock:e.target.value})} placeholder="10" />
-                      </Field>
-                      <Field label="حد التنبيه">
-                        <input type="number" style={inputStyle} value={pForm.alert_threshold}
-                          onChange={e=>setPForm({...pForm, alert_threshold:e.target.value})} placeholder="5" />
-                      </Field>
-                    </div>
-
-                    {/* Visibility toggles */}
-                    <div style={sectionCard}>
-                      <div style={sectionTitle}>الإعدادات</div>
-                      <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"8px 0",borderBottom:`0.5px solid #EEE`}}>
-                        <span style={{fontSize:13,color:ui.text,fontFamily:ui.fontBody}}>حالة النشر</span>
-                        <div style={{display:"flex",gap:4,border:ui.border,borderRadius:6,overflow:"hidden"}}>
-                          {[["published","نشر"],["draft","مسودة"]].map(([k,l])=>(
-                            <button key={k} type="button" onClick={()=>setPForm({...pForm, status:k})}
-                              style={{padding:"6px 12px",border:"none",cursor:"pointer",
-                                background: pForm.status===k ? ui.text : "transparent",
-                                color: pForm.status===k ? "#fff" : ui.textSub,
-                                fontSize:12, fontFamily:ui.fontBody}}>{l}</button>
-                          ))}
-                        </div>
-                      </div>
-                      <Toggle value={pForm.in_stock} onChange={v=>setPForm({...pForm, in_stock:v})} label="متاح في المخزون" />
-                      <Toggle value={pForm.featured} onChange={v=>setPForm({...pForm, featured:v})} label="منتج مميز" />
-                    </div>
-
-                    {/* Tags */}
-                    <div style={sectionCard}>
-                      <div style={sectionTitle}>الوسوم</div>
-                      <div style={{display:"flex",gap:6,marginBottom:10}}>
-                        <input style={{...inputStyle, flex:1}} value={pForm.tagInput}
-                          onChange={e=>setPForm({...pForm, tagInput:e.target.value})}
-                          onKeyDown={e=>{ if (e.key==="Enter"){ e.preventDefault(); addTag(); } }}
-                          placeholder="اكتب وسم واضغط Enter" />
-                        <button type="button" onClick={addTag} style={{padding:"0 14px",background:ui.text,color:"#fff",border:"none",borderRadius:6,fontSize:18,cursor:"pointer"}}>+</button>
-                      </div>
-                      {pForm.tags.length > 0 && (
-                        <div style={{display:"flex",flexWrap:"wrap",gap:6}}>
-                          {pForm.tags.map((t,i)=>(
-                            <span key={i} style={{display:"inline-flex",alignItems:"center",gap:6,padding:"3px 10px",background:"#F3F4F6",color:ui.text,borderRadius:20,fontSize:11.5,fontFamily:ui.fontBody}}>
-                              {t}
-                              <button type="button" onClick={()=>setPForm({...pForm, tags:pForm.tags.filter((_,j)=>j!==i)})}
-                                style={{background:"none",border:"none",cursor:"pointer",color:ui.textSub,fontSize:14,lineHeight:1,padding:0}}>×</button>
-                            </span>
-                          ))}
-                        </div>
-                      )}
-                    </div>
-                  </div>
-                </div>
-
-                {/* Actions */}
-                <div style={{display:"flex",gap:10,marginTop:6,flexWrap:"wrap"}}>
-                  <button type="button" disabled={pSaving} onClick={()=>submitProduct(false)}
-                    style={{flex:1,minWidth:140,background:pSaving?"#9CA3AF":ui.text,color:"#fff",border:"none",padding:"12px 18px",cursor:pSaving?"wait":"pointer",fontFamily:ui.fontBody,fontSize:13,fontWeight:500,borderRadius:6}}>
-                    {pSaving ? "جاري الحفظ..." : "نشر المنتج"}
-                  </button>
-                  <button type="button" disabled={pSaving} onClick={()=>submitProduct(true)}
-                    style={{minWidth:120,background:"transparent",color:ui.text,border:`1px solid ${ui.text}`,padding:"12px 18px",cursor:pSaving?"wait":"pointer",fontFamily:ui.fontBody,fontSize:13,borderRadius:6}}>
-                    حفظ مسودة
-                  </button>
-                  <button type="button" disabled={pSaving} onClick={()=>{ setPForm(blankProdForm()); setPSaveMsg(null); }}
-                    style={{minWidth:90,background:"transparent",color:ui.textSub,border:ui.border,padding:"12px 18px",cursor:pSaving?"wait":"pointer",fontFamily:ui.fontBody,fontSize:13,borderRadius:6}}>
-                    إلغاء
-                  </button>
-                </div>
-              </div>
-            );
-          })()}
+          {/* ─── ADD PRODUCT — legacy tab redirects to the new route ────── */}
+          {tab === "add-product" && (
+            <div>
+              {(() => { goProductNew(); return null; })()}
+            </div>
+          )}
 
           {/* ─── INVENTORY — movement-based ─────────────────────────────── */}
           {tab === "inventory" && (() => {
@@ -6448,6 +6515,935 @@ function injectPrintStyles() {
     }
   `;
   document.head.appendChild(s);
+}
+
+// ─── Product Row Menu (3-dots menu in admin Products list) ───────────────────
+// Tiny popover with تكرار / حذف / أرشفة actions. Closing on outside click
+// is handled by a transparent full-screen overlay div behind the menu.
+function ProductRowMenu({ product, ui, isSuper, onDuplicate, onArchive, onDelete }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <div style={{position:"relative"}}>
+      <button onClick={()=>setOpen(o=>!o)}
+        title="المزيد"
+        style={{background:"transparent",border:ui.border,padding:"5px 8px",cursor:"pointer",borderRadius:5,fontSize:13}}>⋯</button>
+      {open && (
+        <>
+          <div onClick={()=>setOpen(false)} style={{position:"fixed",inset:0,zIndex:30}}/>
+          <div style={{position:"absolute",top:"100%",insetInlineEnd:0,marginTop:4,zIndex:31,
+            background:ui.cardBg,border:ui.border,borderRadius:6,boxShadow:"0 4px 14px rgba(0,0,0,.08)",minWidth:140,overflow:"hidden"}}>
+            <button onClick={()=>{ setOpen(false); onDuplicate && onDuplicate(); }}
+              style={{display:"block",width:"100%",textAlign:"right",padding:"8px 14px",fontSize:12.5,
+                background:"transparent",border:"none",cursor:"pointer",color:ui.text,fontFamily:ui.fontBody}}>تكرار</button>
+            <button onClick={()=>{ setOpen(false); onArchive && onArchive(); }}
+              style={{display:"block",width:"100%",textAlign:"right",padding:"8px 14px",fontSize:12.5,
+                background:"transparent",border:"none",cursor:"pointer",color:ui.text,fontFamily:ui.fontBody,
+                borderTop:"0.5px solid #EEE"}}>أرشفة</button>
+            <button onClick={()=>{ setOpen(false); onDelete && onDelete(); }}
+              style={{display:"block",width:"100%",textAlign:"right",padding:"8px 14px",fontSize:12.5,
+                background:"transparent",border:"none",cursor:"pointer",color:"#DC2626",fontFamily:ui.fontBody,
+                borderTop:"0.5px solid #EEE"}}>
+              {isSuper ? "حذف" : "طلب حذف"}
+            </button>
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+// ─── ProductForm — shared by /admin/products/new and /admin/products/:id/edit ─
+// Big multi-card form. Most internal state lives here so AdminDash doesn't get
+// re-rendered on every keystroke. Validation runs on demand (publish blocks on
+// errors; draft never blocks). The right-side preview re-renders live.
+function ProductForm({
+  mode, productId, ui, mob, C,
+  categories, allTags, allBrands,
+  canEditAll, canSeeCost, isSuper,
+  onBack, onSaved, onDeleted, submitApproval,
+}) {
+  const ADD = mode === "new";
+  const blank = () => ({
+    name:        { ar: "", en: "" },
+    description: { ar: "", en: "" },
+    ingredients: { ar: "", en: "" },
+    usage:       { ar: "", en: "" },
+    seo_title:        { ar: "", en: "" },
+    seo_description:  { ar: "", en: "" },
+    category: categories[0] || "",
+    brand:    "",
+    size:     "",
+    slug:     "",
+    images:   [],
+    sku:      "",
+    price:        "",
+    price_before: "",
+    cost:         "",
+    stock:           "0",
+    alert_threshold: "5",
+    status:    "draft",
+    in_stock:  true,
+    featured:  false,
+    is_best_seller: false,
+    publish_at: "",
+    has_variants: false,
+    variants: [],   // [{ size, price, price_before, stock, sku }]
+    tags: [],
+  });
+
+  const [f, setF] = useState(blank);
+  const [errors, setErrors] = useState({});             // field → message
+  const [saving, setSaving] = useState(false);
+  const [feedback, setFeedback] = useState(null);       // { kind, text }
+  const [loading, setLoading] = useState(!ADD);
+  const [original, setOriginal] = useState(null);       // for dirty check
+  const [autoSavedAt, setAutoSavedAt] = useState(null); // Date | null
+  const [slugStatus, setSlugStatus] = useState("idle"); // idle | checking | ok | taken | invalid
+  const [confirmDel, setConfirmDel] = useState(false);
+  const [uploading, setUploading] = useState(false);
+  const [uploadPct, setUploadPct] = useState(0);
+  const [tagDraft, setTagDraft] = useState("");
+  const [dragIdx, setDragIdx] = useState(null);
+  const [showCatNew, setShowCatNew] = useState(false);
+
+  const update = (patch) => setF(prev => ({ ...prev, ...patch }));
+  const setBilingual = (key, side, value) =>
+    setF(prev => ({ ...prev, [key]: { ...prev[key], [side]: value } }));
+
+  // Auto-suggest slug from AR name (only when user hasn't manually edited).
+  const slugify = (s) => String(s||'')
+    .toLowerCase()
+    .replace(/[‏‎]/g, '')
+    .replace(/[\s_]+/g, '-')
+    .replace(/[^\p{L}\p{N}-]+/gu, '')
+    .replace(/-+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 80);
+  const [slugTouched, setSlugTouched] = useState(false);
+
+  // Auto-suggest SKU from brand + name (only in add mode, only when empty).
+  const suggestSku = () => {
+    if (!ADD) return;
+    if (f.sku) return;
+    const b = (f.brand || "NWR").replace(/[^A-Za-z0-9]+/g,"").slice(0,4).toUpperCase() || "NWR";
+    const n = (f.name.ar || "PROD").replace(/[^A-Za-z0-9]+/g,"").slice(0,4).toUpperCase() || "PROD";
+    update({ sku: `${b}-${n}` });
+  };
+
+  // ── Load existing product when editing ────────────────────────────────────
+  useEffect(() => {
+    if (ADD || !productId) return;
+    let cancelled = false;
+    setLoading(true);
+    (async () => {
+      try {
+        const r = await fetch(`/api/products/${encodeURIComponent(productId)}`);
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        const p = await r.json();
+        if (cancelled) return;
+        const filled = {
+          name:        p.name_i18n        || { ar: p.name||"", en: "" },
+          description: p.description_i18n || { ar: p.description||"", en: "" },
+          ingredients: p.ingredients_i18n || { ar: p.ingredients||"", en: "" },
+          usage:       p.usage_i18n       || { ar: p.usage_text||"",  en: "" },
+          seo_title:        p.seo_title_i18n       || { ar: p.seo_title||"", en: "" },
+          seo_description:  p.seo_description_i18n || { ar: p.seo_description||"", en: "" },
+          category: p.category || categories[0] || "",
+          brand:    p.brand || "",
+          size:     p.size || "",
+          slug:     p.slug || "",
+          images:   Array.isArray(p.images) ? p.images : [],
+          sku:      p.sku || "",
+          price:        p.price != null ? String(p.price) : "",
+          price_before: p.price_before ? String(p.price_before) : "",
+          cost:         p.cost ? String(p.cost) : "",
+          stock:           String(p.stock || 0),
+          alert_threshold: String(p.alert_threshold || 5),
+          status:    p.status || "draft",
+          in_stock:  !!p.in_stock,
+          featured:  !!p.featured,
+          is_best_seller: !!p.is_best_seller,
+          publish_at: p.publish_at || "",
+          has_variants: !!p.has_variants,
+          variants: (p.variants || []).map(v => ({
+            size: v.size||"", price: String(v.price||""), price_before: String(v.price_before||""),
+            stock: String(v.stock||0), sku: v.sku||"",
+          })),
+          tags: Array.isArray(p.tags) ? p.tags : [],
+        };
+        setF(filled);
+        setOriginal(JSON.stringify(filled));
+        setSlugTouched(true); // existing slug — don't auto-overwrite
+      } catch (e) {
+        setFeedback({ kind:"err", text:`فشل تحميل المنتج: ${e.message}` });
+      } finally { if (!cancelled) setLoading(false); }
+    })();
+    return () => { cancelled = true; };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [productId]);
+
+  // ── Validation ────────────────────────────────────────────────────────────
+  const validate = (publishing) => {
+    const e = {};
+    if (!f.name.ar.trim()) e.name = "اسم المنتج (عربي) مطلوب";
+    if (!f.category)       e.category = "اختر فئة";
+    if (publishing) {
+      if (!f.price || Number(f.price) <= 0) e.price = "السعر مطلوب للنشر";
+      if ((f.images || []).length === 0)    e.images = "أضف صورة واحدة على الأقل قبل النشر";
+    }
+    if (f.slug && slugify(f.slug) !== f.slug.toLowerCase()) e.slug = "Slug غير صالح";
+    setErrors(e);
+    return Object.keys(e).length === 0;
+  };
+
+  // ── Slug uniqueness — checked on blur ────────────────────────────────────
+  const checkSlug = async () => {
+    if (!f.slug) { setSlugStatus("idle"); return; }
+    setSlugStatus("checking");
+    try {
+      const params = new URLSearchParams({ slug: f.slug });
+      if (!ADD && productId) params.set("exclude", productId);
+      const r = await fetch(`/api/products/slug-check?${params}`);
+      const j = await r.json();
+      setSlugStatus(j.available ? "ok" : j.error ? "invalid" : "taken");
+      if (j.slug && j.slug !== f.slug && j.available) update({ slug: j.slug });
+    } catch { setSlugStatus("idle"); }
+  };
+
+  // ── Image upload ──────────────────────────────────────────────────────────
+  const uploadOne = async (file) => {
+    if (file.size > 3 * 1024 * 1024) throw new Error(`${file.name}: أكبر من 3MB`);
+    if (!/^image\/(jpeg|png|webp)$/.test(file.type)) throw new Error(`${file.name}: jpg/png/webp فقط`);
+    const fd = new FormData();
+    fd.append("image", file);
+    return await new Promise((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+      xhr.open("POST", "/api/products/upload-image");
+      xhr.upload.onprogress = (e) => {
+        if (e.lengthComputable) setUploadPct(Math.round(e.loaded / e.total * 100));
+      };
+      xhr.onload = () => {
+        try { const j = JSON.parse(xhr.responseText);
+          if (xhr.status >= 200 && xhr.status < 300) resolve(j);
+          else reject(new Error(j.error || `HTTP ${xhr.status}`));
+        } catch (err) { reject(err); }
+      };
+      xhr.onerror = () => reject(new Error("network error"));
+      xhr.send(fd);
+    });
+  };
+
+  const handleFiles = async (fileList) => {
+    const files = Array.from(fileList || []);
+    if (!files.length) return;
+    setUploading(true); setUploadPct(0); setErrors(e => ({ ...e, images: undefined }));
+    const added = [];
+    const fails = [];
+    for (const file of files) {
+      try {
+        // eslint-disable-next-line no-await-in-loop
+        const j = await uploadOne(file);
+        added.push(j.url);
+      } catch (e) { fails.push(e.message); }
+    }
+    if (added.length) update({ images: [...f.images, ...added] });
+    if (fails.length) setFeedback({ kind:"err", text: fails.join(" — ") });
+    setUploading(false); setUploadPct(0);
+  };
+
+  const removeImage = (i) => update({ images: f.images.filter((_, j) => j !== i) });
+  const moveImage   = (from, to) => {
+    if (to < 0 || to >= f.images.length) return;
+    const arr = f.images.slice();
+    const [it] = arr.splice(from, 1);
+    arr.splice(to, 0, it);
+    update({ images: arr });
+  };
+
+  // ── Tags ──────────────────────────────────────────────────────────────────
+  const addTag = (t) => {
+    const v = String(t || "").trim();
+    if (!v) return;
+    if (f.tags.includes(v)) return;
+    update({ tags: [...f.tags, v] });
+    setTagDraft("");
+  };
+  const tagSuggestions = tagDraft
+    ? (allTags || []).filter(t => t.toLowerCase().includes(tagDraft.toLowerCase()) && !f.tags.includes(t)).slice(0, 6)
+    : [];
+
+  // ── Variants ──────────────────────────────────────────────────────────────
+  const addVariant = () => update({ variants: [...f.variants, { size:"", price:"", price_before:"", stock:"0", sku:"" }] });
+  const updateVariant = (i, patch) => update({ variants: f.variants.map((v, j) => j===i ? { ...v, ...patch } : v) });
+  const removeVariant = (i)         => update({ variants: f.variants.filter((_, j) => j !== i) });
+
+  // ── Save ──────────────────────────────────────────────────────────────────
+  const buildBody = (overrideStatus) => ({
+    name_i18n:        f.name,
+    description_i18n: f.description,
+    ingredients_i18n: f.ingredients,
+    usage_i18n:       f.usage,
+    seo_title_i18n:       f.seo_title,
+    seo_description_i18n: f.seo_description,
+    category: f.category,
+    brand:    f.brand,
+    size:     f.size,
+    slug:     f.slug || undefined,
+    images:   f.images,
+    sku:      f.sku || undefined,
+    price:        Number(f.price)||0,
+    price_before: Number(f.price_before)||0,
+    cost:         Number(f.cost)||0,
+    stock:           Number(f.stock)||0,
+    alert_threshold: Number(f.alert_threshold)||5,
+    status:    overrideStatus || f.status,
+    in_stock:  !!f.in_stock,
+    featured:  !!f.featured,
+    is_best_seller: !!f.is_best_seller,
+    publish_at: f.publish_at || null,
+    has_variants: !!f.has_variants,
+    variants: f.has_variants ? f.variants.map(v => ({
+      size: v.size, price: Number(v.price)||0, price_before: Number(v.price_before)||0,
+      stock: Number(v.stock)||0, sku: v.sku,
+    })) : [],
+    tags: f.tags,
+  });
+
+  const persist = async (asDraft) => {
+    const willPublish = !asDraft;
+    if (!validate(willPublish)) {
+      setFeedback({ kind:"err", text:"يوجد أخطاء بالنموذج — راجع الحقول المعلمة" });
+      return;
+    }
+    setSaving(true); setFeedback(null);
+    try {
+      const url = ADD ? "/api/products" : `/api/products/${encodeURIComponent(productId)}`;
+      const method = ADD ? "POST" : "PATCH";
+      const body = buildBody(asDraft ? "draft" : (f.status === "published" ? "published" : (willPublish ? "published" : "draft")));
+      const r = await fetch(url, { method, headers:{"Content-Type":"application/json"}, body: JSON.stringify(body) });
+      if (!r.ok) { const j = await r.json().catch(()=>({})); throw new Error(j.error || `HTTP ${r.status}`); }
+      const saved = await r.json();
+      setFeedback({ kind:"ok", text: asDraft ? "تم حفظ المسودة" : (ADD ? "تم نشر المنتج" : "تم حفظ التعديلات") });
+      setOriginal(JSON.stringify(f));
+      setAutoSavedAt(new Date());
+      onSaved && onSaved(saved);
+      // After a successful "new" save → navigate to edit URL so further edits update in place.
+      if (ADD && (saved.id || (saved && saved.ok))) {
+        const newId = saved.id || (saved && saved.id);
+        if (newId) window.location.hash = `#admin/products/${encodeURIComponent(newId)}/edit`;
+      }
+    } catch (e) {
+      setFeedback({ kind:"err", text:`فشل الحفظ: ${e.message}` });
+    } finally { setSaving(false); }
+  };
+
+  // ── Auto-save (edit mode only) ────────────────────────────────────────────
+  // Saves silently as a draft every 30s if the form is dirty AND currently a
+  // draft. Avoids re-publishing live products without explicit user action.
+  useEffect(() => {
+    if (ADD || !productId) return;
+    const i = setInterval(() => {
+      const dirty = original && JSON.stringify(f) !== original;
+      if (dirty && f.status === "draft" && !saving) {
+        (async () => {
+          try {
+            await fetch(`/api/products/${encodeURIComponent(productId)}`, {
+              method:"PATCH", headers:{"Content-Type":"application/json"},
+              body: JSON.stringify(buildBody("draft")),
+            });
+            setOriginal(JSON.stringify(f));
+            setAutoSavedAt(new Date());
+          } catch {}
+        })();
+      }
+    }, 30000);
+    return () => clearInterval(i);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [f, original, ADD, productId]);
+
+  // Warn on leaving with unsaved changes.
+  useEffect(() => {
+    const h = (e) => {
+      const dirty = original && JSON.stringify(f) !== original;
+      if (dirty) { e.preventDefault(); e.returnValue = ""; }
+    };
+    window.addEventListener("beforeunload", h);
+    return () => window.removeEventListener("beforeunload", h);
+  }, [f, original]);
+
+  // ── Styles ────────────────────────────────────────────────────────────────
+  const inputStyle = {
+    width:"100%", padding:"9px 11px", border:ui.border, borderRadius:6,
+    background:ui.cardBg, fontFamily:ui.fontBody, fontSize:13, color:ui.text,
+    outline:"none", direction:"rtl", boxSizing:"border-box",
+  };
+  const errorInput = { ...inputStyle, border:"1px solid #FCA5A5", background:"#FEF2F2" };
+  const labelStyle = { display:"block", fontSize:12, color:ui.text, fontFamily:ui.fontBody, marginBottom:5, fontWeight:500 };
+  const card = { background:ui.cardBg, border:ui.border, borderRadius:ui.radius, padding: mob?"14px":"18px", marginBottom:12 };
+  const cardTitle = { fontSize:13, fontWeight:600, color:ui.text, fontFamily:ui.fontBody, marginBottom:12, paddingBottom:8, borderBottom:"0.5px solid #EEE" };
+
+  // Small bilingual input with a tab toggle at the top-right corner.
+  const Bilingual = ({ field, label, multiline, rows = 3, maxLen, en_warn }) => {
+    const [side, setSide] = useState("ar");
+    const value = f[field][side] || "";
+    const onChange = (v) => setBilingual(field, side, v);
+    return (
+      <div style={{marginBottom:12}}>
+        <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:5}}>
+          <label style={{...labelStyle, marginBottom:0}}>{label}</label>
+          <div style={{display:"flex",border:ui.border,borderRadius:4,overflow:"hidden"}}>
+            {["ar","en"].map(s => (
+              <button key={s} type="button" onClick={()=>setSide(s)}
+                style={{padding:"2px 10px",border:"none",cursor:"pointer",fontFamily:ui.fontBody,fontSize:11,
+                  background: side===s ? ui.text : "transparent",
+                  color: side===s ? "#fff" : ui.textSub}}>
+                {s.toUpperCase()}
+              </button>
+            ))}
+          </div>
+        </div>
+        {multiline ? (
+          <textarea rows={rows} value={value} onChange={e=>onChange(e.target.value)}
+            style={{...inputStyle, direction: side==="ar"?"rtl":"ltr", resize:"vertical", minHeight: rows*22}}/>
+        ) : (
+          <input value={value} onChange={e=>onChange(e.target.value)} maxLength={maxLen}
+            style={{...inputStyle, direction: side==="ar"?"rtl":"ltr"}}/>
+        )}
+        {maxLen && (
+          <div style={{fontSize:10.5,color: value.length > maxLen*0.9 ? "#D97706" : ui.textSub, fontFamily:ui.fontBody,marginTop:3,textAlign:"left"}}>
+            {value.length} / {maxLen}
+          </div>
+        )}
+        {en_warn && side==="en" && !value && f.status==="published" && (
+          <div style={{fontSize:11,color:"#D97706",marginTop:3,fontFamily:ui.fontBody}}>⚠ النسخة الإنجليزية فارغة — سيتم استخدام العربية</div>
+        )}
+      </div>
+    );
+  };
+
+  // Pill toggle (used for publish status).
+  const PillTabs = ({ value, options, onChange, disabled }) => (
+    <div style={{display:"flex",border:ui.border,borderRadius:6,overflow:"hidden"}}>
+      {options.map(([k,l]) => (
+        <button key={k} type="button" onClick={()=>!disabled && onChange(k)}
+          disabled={disabled}
+          style={{flex:1,padding:"7px 0",border:"none",cursor:disabled?"not-allowed":"pointer",
+            background: value===k ? ui.text : "transparent",
+            color: value===k ? "#fff" : ui.textSub,
+            fontSize:12,fontFamily:ui.fontBody,fontWeight: value===k ? 600 : 400}}>{l}</button>
+      ))}
+    </div>
+  );
+
+  // Switch toggle (used for booleans).
+  const SwitchToggle = ({ value, onChange, label, disabled, hint }) => (
+    <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"8px 0",borderBottom:"0.5px solid #EEE"}}>
+      <div>
+        <div style={{fontSize:13,color:ui.text,fontFamily:ui.fontBody}}>{label}</div>
+        {hint && <div style={{fontSize:11,color:ui.textSub,fontFamily:ui.fontBody,marginTop:2}}>{hint}</div>}
+      </div>
+      <button type="button" onClick={()=>!disabled && onChange(!value)} disabled={disabled}
+        style={{ width:38, height:22, borderRadius:11, border:"none",
+          background: value ? "#16A34A" : "#D4D4D4", position:"relative",
+          cursor: disabled ? "not-allowed" : "pointer", opacity: disabled ? 0.6 : 1, flexShrink:0 }}>
+        <span style={{ position:"absolute", top:2, [value?"left":"right"]:2, width:18, height:18,
+          background:"#fff", borderRadius:"50%", boxShadow:"0 1px 2px rgba(0,0,0,.2)" }}/>
+      </button>
+    </div>
+  );
+
+  // ── Render ────────────────────────────────────────────────────────────────
+  if (loading) {
+    return <div style={{padding:40,textAlign:"center",color:ui.textSub,fontFamily:ui.fontBody,fontSize:13}}>...جارٍ التحميل</div>;
+  }
+
+  const margin = (() => {
+    const p = Number(f.price)||0, c = Number(f.cost)||0;
+    if (!p || !c) return null;
+    return Math.round(((p - c) / p) * 100);
+  })();
+
+  // Live storefront preview ── mimics the public product card.
+  const previewImg = f.images[0] || null;
+  const previewDiscount = (() => {
+    const p = Number(f.price)||0, pb = Number(f.price_before)||0;
+    if (!pb || pb <= p) return null;
+    return Math.round((1 - p/pb) * 100);
+  })();
+
+  const onlyStock = !canEditAll; // inventory_admin can only edit stock
+  const disabledStyle = onlyStock ? { opacity:0.55, pointerEvents:"none" } : {};
+
+  return (
+    <div style={{direction:"rtl"}}>
+      {/* Top bar */}
+      <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:14,flexWrap:"wrap",gap:10}}>
+        <div>
+          <button onClick={onBack}
+            style={{background:"transparent",border:"none",cursor:"pointer",fontSize:12.5,color:ui.textSub,fontFamily:ui.fontBody,padding:"4px 0"}}>
+            ← العودة للمنتجات
+          </button>
+          <h2 style={{fontSize:18,fontWeight:600,color:ui.text,fontFamily:ui.fontBody,margin:"4px 0 2px"}}>
+            {ADD ? "إضافة منتج جديد" : "تعديل المنتج"}
+          </h2>
+          <div style={{fontSize:12,color:ui.textSub,fontFamily:ui.fontBody}}>
+            {ADD ? "أدخل بيانات المنتج للنشر في المتجر" : (f.name.ar || "—")}
+          </div>
+        </div>
+        <div style={{display:"flex",gap:8,alignItems:"center",flexWrap:"wrap"}}>
+          {!ADD && autoSavedAt && (
+            <span style={{fontSize:11,color:ui.textSub,fontFamily:ui.fontBody}}>
+              تم الحفظ تلقائياً • {autoSavedAt.toLocaleTimeString("ar-EG", { hour:"2-digit", minute:"2-digit" })}
+            </span>
+          )}
+          {!ADD && isSuper && (
+            <button onClick={()=>setConfirmDel(true)} type="button"
+              style={{padding:"8px 14px",background:"transparent",border:"1px solid #FCA5A5",borderRadius:6,
+                color:"#B91C1C",fontFamily:ui.fontBody,fontSize:12.5,cursor:"pointer"}}>
+              حذف المنتج
+            </button>
+          )}
+          {!ADD && !isSuper && (
+            <button onClick={async ()=>{
+              const reason = window.prompt("سبب الحذف:") || "";
+              if (!reason) return;
+              await submitApproval({ type:"product_delete", target_id: String(productId), target_label: f.name.ar || "منتج", reason });
+              setFeedback({ kind:"ok", text:"تم إرسال طلب الحذف للمراجعة من Super Admin" });
+            }}
+              style={{padding:"8px 14px",background:"transparent",border:"1px solid #FCD34D",borderRadius:6,
+                color:"#92400E",fontFamily:ui.fontBody,fontSize:12.5,cursor:"pointer"}}>
+              طلب حذف
+            </button>
+          )}
+          <button onClick={onBack} type="button"
+            style={{padding:"8px 14px",background:"transparent",border:ui.border,borderRadius:6,
+              fontFamily:ui.fontBody,fontSize:12.5,color:ui.textSub,cursor:"pointer"}}>إلغاء</button>
+          <button onClick={()=>persist(true)} disabled={saving} type="button"
+            style={{padding:"8px 14px",background:"transparent",border:`1px solid ${ui.text}`,borderRadius:6,
+              fontFamily:ui.fontBody,fontSize:12.5,color:ui.text,cursor:saving?"wait":"pointer"}}>
+            حفظ كمسودة
+          </button>
+          <button onClick={()=>persist(false)} disabled={saving} type="button"
+            style={{padding:"8px 18px",background: saving ? "#9CA3AF" : ui.text,color:"#fff",border:"none",borderRadius:6,
+              fontFamily:ui.fontBody,fontSize:12.5,fontWeight:500,cursor:saving?"wait":"pointer"}}>
+            {saving ? "جارٍ الحفظ..." : "نشر المنتج"}
+          </button>
+        </div>
+      </div>
+
+      {feedback && (
+        <div style={{padding:"10px 14px",borderRadius:6,marginBottom:12,fontSize:13,fontFamily:ui.fontBody,
+          background: feedback.kind==="ok" ? "#DCFCE7" : "#FEE2E2",
+          color: feedback.kind==="ok" ? "#15803D" : "#B91C1C",
+          border: `0.5px solid ${feedback.kind==="ok" ? "#86EFAC" : "#FCA5A5"}`}}>{feedback.text}</div>
+      )}
+
+      {onlyStock && (
+        <div style={{padding:"10px 14px",borderRadius:6,marginBottom:12,fontSize:12.5,fontFamily:ui.fontBody,
+          background:"#FFFBEB",color:"#92400E",border:"0.5px solid #FDE68A"}}>
+          🔒 صلاحيتك تسمح بتعديل المخزون فقط — باقي الحقول معطلة. للتعديل الكامل تواصل مع Super Admin.
+        </div>
+      )}
+
+      {/* Main grid */}
+      <div style={{display:"grid",gap:12,gridTemplateColumns: mob ? "1fr" : "2fr 1fr"}}>
+        {/* LEFT COLUMN */}
+        <div style={onlyStock ? disabledStyle : {}}>
+          {/* CARD 1 — Basic info */}
+          <div style={card}>
+            <div style={cardTitle}>المعلومات الأساسية</div>
+            <Bilingual field="name" label="اسم المنتج *" en_warn />
+            {errors.name && <div style={{fontSize:11.5,color:"#DC2626",marginTop:-8,marginBottom:8,fontFamily:ui.fontBody}}>{errors.name}</div>}
+
+            <Bilingual field="description" label="الوصف التفصيلي" multiline rows={5} en_warn />
+            <div style={{fontSize:11,color:ui.textSub,fontFamily:ui.fontBody,marginTop:-8,marginBottom:10}}>
+              💡 استخدم سطر فارغ بين الفقرات. القوائم: ابدأ السطر بـ <code>- </code>
+            </div>
+
+            <div style={{display:"grid",gridTemplateColumns:mob?"1fr":"1fr 1fr",gap:12}}>
+              <div>
+                <label style={labelStyle}>الفئة *</label>
+                {showCatNew ? (
+                  <div style={{display:"flex",gap:6}}>
+                    <input style={{...inputStyle, flex:1}}
+                      autoFocus value={f._newCatDraft || ""}
+                      onChange={e=>update({ _newCatDraft: e.target.value })}
+                      placeholder="اسم فئة جديدة..."
+                      onKeyDown={async e => {
+                        if (e.key === "Enter") {
+                          e.preventDefault();
+                          const v = (f._newCatDraft || "").trim();
+                          if (!v) return;
+                          try {
+                            const r = await fetch("/api/categories", { method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({ name: v }) });
+                            if (r.ok) { update({ category: v, _newCatDraft:"" }); setShowCatNew(false); }
+                          } catch {}
+                        } else if (e.key === "Escape") { setShowCatNew(false); update({ _newCatDraft:"" }); }
+                      }}/>
+                    <button type="button" onClick={()=>{ setShowCatNew(false); update({ _newCatDraft:"" }); }}
+                      style={{padding:"0 12px",background:"transparent",color:ui.textSub,border:ui.border,borderRadius:6,fontSize:18,cursor:"pointer"}}>×</button>
+                  </div>
+                ) : (
+                  <select value={f.category} onChange={e=>{
+                      if (e.target.value === "__new__") setShowCatNew(true);
+                      else update({ category: e.target.value });
+                    }}
+                    style={errors.category ? errorInput : inputStyle}>
+                    <option value="">اختر فئة...</option>
+                    {categories.map(c => <option key={c} value={c}>{c}</option>)}
+                    <option value="__new__">+ إضافة فئة جديدة</option>
+                  </select>
+                )}
+                {errors.category && <div style={{fontSize:11.5,color:"#DC2626",marginTop:4,fontFamily:ui.fontBody}}>{errors.category}</div>}
+              </div>
+              <div>
+                <label style={labelStyle}>الماركة</label>
+                <input list="prod-brand-list" style={inputStyle} value={f.brand}
+                  onChange={e=>update({ brand: e.target.value })}
+                  onBlur={suggestSku}
+                  placeholder="مثال: THE ORDINARY"/>
+                <datalist id="prod-brand-list">
+                  {(allBrands||[]).map(b => <option key={b} value={b}/>)}
+                </datalist>
+              </div>
+            </div>
+
+            <div style={{display:"grid",gridTemplateColumns:mob?"1fr":"1fr 1fr",gap:12}}>
+              <div>
+                <label style={labelStyle}>الحجم / الوزن</label>
+                <input style={inputStyle} value={f.size}
+                  onChange={e=>update({ size: e.target.value })}
+                  placeholder="مثال: 30ml أو 100g"/>
+              </div>
+              <div>
+                <label style={labelStyle}>URL Slug</label>
+                <input style={errors.slug || slugStatus==="taken" || slugStatus==="invalid" ? errorInput : inputStyle}
+                  value={f.slug}
+                  onChange={e=>{ setSlugTouched(true); update({ slug: e.target.value }); setSlugStatus("idle"); }}
+                  onBlur={checkSlug}
+                  placeholder={ADD ? "يتم توليده تلقائياً من الاسم" : ""}/>
+                <div style={{fontSize:11,fontFamily:ui.fontBody,marginTop:3,
+                  color: slugStatus==="ok" ? "#16A34A" : slugStatus==="taken" ? "#DC2626" : slugStatus==="invalid" ? "#DC2626" : ui.textSub}}>
+                  {slugStatus==="checking" && "جارٍ التحقق..."}
+                  {slugStatus==="ok"       && "✓ متاح"}
+                  {slugStatus==="taken"    && "✗ هذا Slug مستخدم بالفعل"}
+                  {slugStatus==="invalid"  && "✗ Slug غير صالح"}
+                  {slugStatus==="idle" && f.slug && "اضغط خارج الحقل للتحقق"}
+                  {!f.slug && ADD && "سيتم توليده من الاسم العربي عند الحفظ"}
+                </div>
+                {ADD && !slugTouched && f.name.ar && (
+                  <button type="button"
+                    onClick={()=>{ update({ slug: slugify(f.name.ar) }); setSlugTouched(true); }}
+                    style={{background:"none",border:"none",color:"#1D4ED8",cursor:"pointer",fontSize:11,padding:0,marginTop:3,fontFamily:ui.fontBody}}>
+                    توليد من الاسم
+                  </button>
+                )}
+              </div>
+            </div>
+
+            <Bilingual field="ingredients" label="المكونات" multiline rows={3}/>
+            <Bilingual field="usage"       label="طريقة الاستخدام" multiline rows={3}/>
+          </div>
+
+          {/* CARD 2 — Images */}
+          <div style={card}>
+            <div style={cardTitle}>الصور {f.images.length > 0 && <span style={{color:ui.textSub,fontWeight:400,fontSize:11,marginInlineStart:6}}>({f.images.length})</span>}</div>
+            <label htmlFor="prod-form-imgs"
+              onDragOver={e=>{ e.preventDefault(); e.currentTarget.style.background="#F0F9FF"; e.currentTarget.style.borderColor="#3B82F6"; }}
+              onDragLeave={e=>{ e.currentTarget.style.background="#FAFAFA"; e.currentTarget.style.borderColor="#D4D4D4"; }}
+              onDrop={e=>{ e.preventDefault(); e.currentTarget.style.background="#FAFAFA"; e.currentTarget.style.borderColor="#D4D4D4"; handleFiles(e.dataTransfer.files); }}
+              style={{display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",
+                padding:"24px 16px",border:`1.5px dashed ${errors.images ? "#FCA5A5" : "#D4D4D4"}`,borderRadius:6,
+                cursor:"pointer",background: errors.images ? "#FEF2F2" : "#FAFAFA", marginBottom:12,color:ui.textSub,
+                transition:"background .15s, border-color .15s"}}>
+              <AdmIcon name="plus" size={22}/>
+              <span style={{fontSize:13,fontFamily:ui.fontBody,marginTop:6}}>اسحب وأفلت أو اضغط لرفع الصور</span>
+              <span style={{fontSize:11,fontFamily:ui.fontBody,marginTop:3,color:"#A3A3A3"}}>jpg / png / webp · الحد الأقصى 3MB لكل صورة</span>
+              {uploading && (
+                <div style={{width:"100%",maxWidth:240,height:4,background:"#E5E7EB",borderRadius:2,overflow:"hidden",marginTop:10}}>
+                  <div style={{width:`${uploadPct}%`,height:"100%",background:"#3B82F6",transition:"width .2s"}}/>
+                </div>
+              )}
+            </label>
+            <input id="prod-form-imgs" type="file" multiple accept="image/jpeg,image/png,image/webp"
+              style={{display:"none"}} onChange={e=>{ handleFiles(e.target.files); e.target.value=""; }}/>
+            {errors.images && <div style={{fontSize:11.5,color:"#DC2626",marginTop:-8,marginBottom:8,fontFamily:ui.fontBody}}>{errors.images}</div>}
+
+            {f.images.length > 0 && (
+              <div style={{display:"grid",gridTemplateColumns:"repeat(4, 1fr)",gap:8}}>
+                {f.images.map((src, i) => (
+                  <div key={src+i}
+                    draggable
+                    onDragStart={()=>setDragIdx(i)}
+                    onDragOver={e=>e.preventDefault()}
+                    onDrop={()=>{ if (dragIdx!=null && dragIdx!==i) moveImage(dragIdx, i); setDragIdx(null); }}
+                    style={{position:"relative",aspectRatio:"1",borderRadius:6,overflow:"hidden",border: i===0 ? "2px solid #3B82F6" : ui.border,background:"#F3F4F6",cursor:"move"}}>
+                    <img src={src} alt="" style={{width:"100%",height:"100%",objectFit:"cover"}}/>
+                    {i === 0 && (
+                      <span style={{position:"absolute",top:4,insetInlineStart:4,background:"#3B82F6",color:"#fff",fontSize:9,padding:"2px 6px",borderRadius:3,fontFamily:ui.fontBody}}>أساسية</span>
+                    )}
+                    <button type="button" onClick={()=>removeImage(i)}
+                      title="حذف"
+                      style={{position:"absolute",top:4,insetInlineEnd:4,width:22,height:22,borderRadius:"50%",
+                        background:"rgba(0,0,0,.6)",color:"#fff",border:"none",cursor:"pointer",fontSize:12,lineHeight:1,
+                        display:"flex",alignItems:"center",justifyContent:"center"}}>×</button>
+                    {i > 0 && (
+                      <button type="button" onClick={()=>moveImage(i, 0)}
+                        title="جعلها الأساسية"
+                        style={{position:"absolute",bottom:4,insetInlineEnd:4,padding:"2px 7px",borderRadius:4,
+                          background:"rgba(0,0,0,.6)",color:"#fff",border:"none",cursor:"pointer",fontSize:10,fontFamily:ui.fontBody}}>★</button>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
+            {f.images.length > 1 && (
+              <div style={{fontSize:11,color:ui.textSub,marginTop:8,fontFamily:ui.fontBody}}>💡 اسحب الصور لإعادة ترتيبها — الصورة الأولى هي الأساسية</div>
+            )}
+          </div>
+
+          {/* CARD 3 — Variants */}
+          <div style={card}>
+            <SwitchToggle value={f.has_variants} onChange={v=>update({ has_variants: v, variants: v && f.variants.length===0 ? [{ size:"", price:"", price_before:"", stock:"0", sku:"" }] : f.variants })}
+              label="الأحجام (Variants)" hint="عند التفعيل، سيتم تجاهل السعر والمخزون في الشريط الجانبي" />
+            {f.has_variants && (
+              <div style={{marginTop:12,overflowX:"auto"}}>
+                <table style={{width:"100%",borderCollapse:"collapse",direction:"rtl",fontFamily:ui.fontBody,minWidth:560}}>
+                  <thead>
+                    <tr style={{background:ui.sideBg}}>
+                      {["الحجم","السعر","السعر قبل الخصم","الكمية","SKU",""].map(h => (
+                        <th key={h} style={{padding:"7px 10px",textAlign:"right",fontSize:11,color:ui.textSub,fontWeight:500}}>{h}</th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {f.variants.map((v, i) => (
+                      <tr key={i} style={{borderTop:"0.5px solid #EEE"}}>
+                        <td style={{padding:"6px 8px"}}><input style={{...inputStyle,padding:"6px 9px"}} value={v.size} onChange={e=>updateVariant(i, { size:e.target.value })} placeholder="50ml"/></td>
+                        <td style={{padding:"6px 8px"}}><input type="number" style={{...inputStyle,padding:"6px 9px"}} value={v.price} onChange={e=>updateVariant(i, { price:e.target.value })} placeholder="280"/></td>
+                        <td style={{padding:"6px 8px"}}><input type="number" style={{...inputStyle,padding:"6px 9px"}} value={v.price_before} onChange={e=>updateVariant(i, { price_before:e.target.value })} placeholder="350"/></td>
+                        <td style={{padding:"6px 8px"}}><input type="number" style={{...inputStyle,padding:"6px 9px"}} value={v.stock} onChange={e=>updateVariant(i, { stock:e.target.value })} placeholder="10"/></td>
+                        <td style={{padding:"6px 8px"}}><input style={{...inputStyle,padding:"6px 9px",fontFamily:"monospace"}} value={v.sku} onChange={e=>updateVariant(i, { sku:e.target.value })} placeholder="auto"/></td>
+                        <td style={{padding:"6px 4px",textAlign:"center"}}>
+                          <button type="button" onClick={()=>removeVariant(i)}
+                            style={{background:"transparent",border:"none",color:"#DC2626",cursor:"pointer",fontSize:14,padding:4}}>×</button>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+                <button type="button" onClick={addVariant}
+                  style={{marginTop:8,padding:"7px 14px",background:"transparent",border:ui.border,borderRadius:6,
+                    fontFamily:ui.fontBody,fontSize:12,color:ui.text,cursor:"pointer"}}>
+                  + إضافة حجم
+                </button>
+              </div>
+            )}
+          </div>
+
+          {/* CARD 4 — SEO */}
+          <div style={card}>
+            <div style={cardTitle}>SEO — تحسين محركات البحث</div>
+            <Bilingual field="seo_title"       label="عنوان الصفحة (Page Title)" maxLen={60}/>
+            <Bilingual field="seo_description" label="وصف Meta"                   multiline rows={2} maxLen={160}/>
+            {/* Live Google preview */}
+            <div style={{marginTop:10,padding:14,border:ui.border,borderRadius:6,background:"#fff"}}>
+              <div style={{fontSize:11,color:"#6B7280",fontFamily:ui.fontBody,marginBottom:6}}>معاينة في Google</div>
+              <div style={{color:"#1A0DAB",fontSize:17,fontFamily:"Arial, sans-serif",marginBottom:2,
+                overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>
+                {f.seo_title.ar || f.name.ar || "عنوان الصفحة"}
+              </div>
+              <div style={{color:"#0E7C28",fontSize:12,fontFamily:"Arial, sans-serif",direction:"ltr",marginBottom:4}}>
+                https://nawra.ayoupstudio.tech/#product-{f.slug || "..."}
+              </div>
+              <div style={{color:"#4D5156",fontSize:13,lineHeight:1.5,fontFamily:"Arial, sans-serif"}}>
+                {f.seo_description.ar || f.description.ar?.slice(0,160) || "وصف الصفحة سيظهر هنا..."}
+              </div>
+            </div>
+          </div>
+        </div>
+
+        {/* RIGHT COLUMN */}
+        <div>
+          {/* CARD 1 — Pricing & stock */}
+          <div style={card}>
+            <div style={cardTitle}>السعر والمخزون</div>
+            <div style={onlyStock ? disabledStyle : {}}>
+              <div style={{marginBottom:12}}>
+                <label style={labelStyle}>السعر الحالي (ج) *</label>
+                <input type="number" style={errors.price ? errorInput : inputStyle} value={f.price}
+                  onChange={e=>update({ price: e.target.value })} placeholder="280"
+                  disabled={f.has_variants || onlyStock}/>
+                {f.has_variants && <div style={{fontSize:11,color:ui.textSub,marginTop:3,fontFamily:ui.fontBody}}>السعر مأخوذ من الأحجام</div>}
+                {errors.price && <div style={{fontSize:11.5,color:"#DC2626",marginTop:4,fontFamily:ui.fontBody}}>{errors.price}</div>}
+              </div>
+              <div style={{marginBottom:12}}>
+                <label style={labelStyle}>السعر قبل الخصم</label>
+                <input type="number" style={inputStyle} value={f.price_before}
+                  onChange={e=>update({ price_before: e.target.value })} placeholder="350"
+                  disabled={f.has_variants || onlyStock}/>
+              </div>
+              {canSeeCost && (
+                <div style={{marginBottom:12}}>
+                  <label style={labelStyle}>التكلفة (للحسابات الداخلية)</label>
+                  <input type="number" style={inputStyle} value={f.cost}
+                    onChange={e=>update({ cost: e.target.value })} placeholder="180"/>
+                  {margin !== null && (
+                    <div style={{fontSize:11.5,marginTop:4,fontFamily:ui.fontBody,color: margin >= 30 ? "#16A34A" : margin >= 10 ? "#D97706" : "#DC2626"}}>
+                      هامش الربح: {margin}%
+                    </div>
+                  )}
+                </div>
+              )}
+              <div style={{marginBottom:12}}>
+                <label style={labelStyle}>SKU</label>
+                <input style={inputStyle} value={f.sku} onChange={e=>update({ sku: e.target.value })} placeholder="مقترح: BRND-NAME-NNN"
+                  disabled={onlyStock}/>
+              </div>
+            </div>
+            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
+              <div>
+                <label style={labelStyle}>الكمية المتاحة</label>
+                <input type="number" style={inputStyle} value={f.stock}
+                  onChange={e=>update({ stock: e.target.value })} placeholder="10"
+                  disabled={f.has_variants}/>
+              </div>
+              <div style={onlyStock ? disabledStyle : {}}>
+                <label style={labelStyle}>حد التنبيه</label>
+                <input type="number" style={inputStyle} value={f.alert_threshold}
+                  onChange={e=>update({ alert_threshold: e.target.value })} placeholder="5"
+                  disabled={onlyStock}/>
+              </div>
+            </div>
+          </div>
+
+          {/* CARD 2 — Settings */}
+          <div style={card}>
+            <div style={cardTitle}>الإعدادات</div>
+            <div style={onlyStock ? disabledStyle : {}}>
+              <div style={{padding:"8px 0",borderBottom:"0.5px solid #EEE",display:"flex",alignItems:"center",justifyContent:"space-between"}}>
+                <span style={{fontSize:13,color:ui.text,fontFamily:ui.fontBody}}>حالة النشر</span>
+                <div style={{minWidth:140}}>
+                  <PillTabs value={f.status} onChange={v=>update({ status: v })}
+                    options={[["published","نشر"],["draft","مسودة"]]} disabled={onlyStock}/>
+                </div>
+              </div>
+              <SwitchToggle value={f.in_stock}       onChange={v=>update({ in_stock: v })}        label="متاح في المخزون" disabled={onlyStock}/>
+              <SwitchToggle value={f.featured}       onChange={v=>update({ featured: v })}        label="منتج مميز"        hint="يظهر في الصفحة الرئيسية" disabled={onlyStock}/>
+              <SwitchToggle value={f.is_best_seller} onChange={v=>update({ is_best_seller: v })}  label="الأكثر مبيعاً"    hint="إضافة لأكثر المبيعات يدوياً" disabled={onlyStock}/>
+              <div style={{padding:"10px 0",borderBottom:"0.5px solid #EEE"}}>
+                <label style={{fontSize:13,color:ui.text,fontFamily:ui.fontBody,display:"block",marginBottom:5}}>وقت النشر (اختياري)</label>
+                <input type="datetime-local" value={f.publish_at ? f.publish_at.slice(0,16) : ""}
+                  onChange={e=>update({ publish_at: e.target.value })}
+                  style={{...inputStyle,direction:"ltr"}} disabled={onlyStock}/>
+              </div>
+            </div>
+          </div>
+
+          {/* CARD 3 — Tags */}
+          <div style={card}>
+            <div style={cardTitle}>الوسوم</div>
+            <div style={{display:"flex",gap:6,marginBottom:10,position:"relative"}}>
+              <input style={{...inputStyle, flex:1}} value={tagDraft}
+                onChange={e=>setTagDraft(e.target.value)}
+                onKeyDown={e=>{ if (e.key==="Enter"){ e.preventDefault(); addTag(tagDraft); } }}
+                placeholder="بشرة دهنية، مسامات، تفتيح..."
+                disabled={onlyStock}/>
+              <button type="button" onClick={()=>addTag(tagDraft)} disabled={onlyStock || !tagDraft.trim()}
+                style={{padding:"0 14px",background:ui.text,color:"#fff",border:"none",borderRadius:6,fontSize:18,
+                  cursor: onlyStock || !tagDraft.trim() ? "not-allowed" : "pointer", opacity: onlyStock || !tagDraft.trim() ? 0.5 : 1}}>+</button>
+              {tagSuggestions.length > 0 && (
+                <div style={{position:"absolute",top:"100%",insetInlineStart:0,right:0,marginTop:4,zIndex:20,
+                  background:ui.cardBg,border:ui.border,borderRadius:6,boxShadow:"0 4px 14px rgba(0,0,0,.08)",maxHeight:160,overflow:"auto"}}>
+                  {tagSuggestions.map(t => (
+                    <div key={t} onClick={()=>addTag(t)}
+                      style={{padding:"7px 12px",cursor:"pointer",fontSize:12.5,color:ui.text,fontFamily:ui.fontBody}}>{t}</div>
+                  ))}
+                </div>
+              )}
+            </div>
+            {f.tags.length > 0 && (
+              <div style={{display:"flex",flexWrap:"wrap",gap:6}}>
+                {f.tags.map((t, i) => (
+                  <span key={i} style={{display:"inline-flex",alignItems:"center",gap:6,padding:"3px 10px",background:"#F3F4F6",color:ui.text,borderRadius:20,fontSize:11.5,fontFamily:ui.fontBody}}>
+                    {t}
+                    {!onlyStock && (
+                      <button type="button" onClick={()=>update({ tags: f.tags.filter((_, j) => j !== i) })}
+                        style={{background:"none",border:"none",cursor:"pointer",color:ui.textSub,fontSize:14,lineHeight:1,padding:0}}>×</button>
+                    )}
+                  </span>
+                ))}
+              </div>
+            )}
+          </div>
+
+          {/* CARD 4 — Store preview */}
+          <div style={card}>
+            <div style={cardTitle}>معاينة في المتجر</div>
+            <div style={{background:"#FBF7F4",borderRadius:6,padding:12,direction:"rtl"}}>
+              <div style={{background: "#fff", borderRadius:4, overflow:"hidden", border:"1px solid rgba(196,149,106,.13)"}}>
+                <div style={{height:160,background:"#F3F4F6",position:"relative"}}>
+                  {previewImg
+                    ? <img src={previewImg} alt="" style={{width:"100%",height:"100%",objectFit:"cover"}}/>
+                    : <div style={{display:"flex",alignItems:"center",justifyContent:"center",height:"100%",color:"#9CA3AF",fontSize:14,fontFamily:ui.fontBody}}>(لا توجد صورة)</div>}
+                  {previewDiscount && (
+                    <span style={{position:"absolute",top:8,insetInlineStart:8,background:"#DC2626",color:"#fff",padding:"3px 8px",fontSize:11,fontFamily:ui.fontBody,borderRadius:3,fontWeight:600}}>
+                      -{previewDiscount}%
+                    </span>
+                  )}
+                </div>
+                <div style={{padding:"12px 14px"}}>
+                  {f.brand && <div style={{fontSize:10,letterSpacing:"0.16em",color:C.go,textTransform:"uppercase",fontFamily:ui.fontBody,marginBottom:4}}>{f.brand}</div>}
+                  <div style={{fontSize:14,fontWeight:600,color:C.dk,fontFamily:C.fa,marginBottom:6,lineHeight:1.3,
+                    overflow:"hidden",display:"-webkit-box",WebkitLineClamp:2,WebkitBoxOrient:"vertical"}}>
+                    {f.name.ar || "اسم المنتج"}
+                  </div>
+                  <div style={{display:"flex",alignItems:"baseline",gap:8}}>
+                    <span style={{fontSize:16,fontWeight:600,color:C.dk,fontFamily:ui.fontBody}}>{f.price ? Number(f.price).toLocaleString() : "0"} <span style={{fontSize:10,color:C.mu}}>ج</span></span>
+                    {f.price_before && Number(f.price_before) > Number(f.price) && (
+                      <span style={{fontSize:12,color:C.mu,textDecoration:"line-through",fontFamily:ui.fontBody}}>{Number(f.price_before).toLocaleString()}</span>
+                    )}
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* Delete confirmation modal */}
+      {confirmDel && (
+        <div onClick={()=>setConfirmDel(false)}
+          style={{position:"fixed",inset:0,background:"rgba(0,0,0,.55)",zIndex:800,display:"flex",alignItems:"center",justifyContent:"center",padding:16,direction:"rtl"}}>
+          <div onClick={e=>e.stopPropagation()}
+            style={{background:ui.cardBg,maxWidth:420,width:"100%",padding:22,borderRadius:8,boxShadow:"0 12px 48px rgba(0,0,0,.25)"}}>
+            <h3 style={{fontSize:15,fontWeight:600,color:ui.text,fontFamily:ui.fontBody,margin:"0 0 4px"}}>
+              تأكيد حذف المنتج
+            </h3>
+            <div style={{fontSize:13,color:ui.textSub,fontFamily:ui.fontBody,marginBottom:14}}>
+              سيتم حذف <b style={{color:ui.text}}>{f.name.ar || "المنتج"}</b> ومعه جميع الأحجام. لا يمكن التراجع.
+            </div>
+            <div style={{display:"flex",gap:8,justifyContent:"flex-end"}}>
+              <button onClick={()=>setConfirmDel(false)} type="button"
+                style={{padding:"8px 16px",background:"transparent",border:ui.border,borderRadius:6,fontSize:12.5,color:ui.textSub,fontFamily:ui.fontBody,cursor:"pointer"}}>تراجع</button>
+              <button onClick={async ()=>{
+                setConfirmDel(false);
+                try {
+                  await fetch(`/api/products/${encodeURIComponent(productId)}`, { method:"DELETE" });
+                  onDeleted && onDeleted();
+                } catch (e) {
+                  setFeedback({ kind:"err", text:`فشل الحذف: ${e.message}` });
+                }
+              }}
+                style={{padding:"8px 18px",background:"#DC2626",color:"#fff",border:"none",borderRadius:6,fontSize:12.5,fontFamily:ui.fontBody,cursor:"pointer"}}>
+                تأكيد الحذف
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
 }
 
 // ─── Order Detail Page (full-page admin view of one order) ────────────────────

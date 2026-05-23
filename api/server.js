@@ -4,8 +4,13 @@ const express    = require('express');
 const cors       = require('cors');
 const Database   = require('better-sqlite3');
 const path       = require('path');
+const fs         = require('fs');
 const nodemailer = require('nodemailer');
 const crypto     = require('crypto');
+// Optional deps — present after `npm install multer sharp` in api/. We require
+// them lazily so the server still boots if a deploy skipped the install step.
+let multer = null;  try { multer = require('multer'); } catch { console.warn('[nawra-api] ! multer not installed — image upload endpoint disabled until `npm i multer` runs in api/'); }
+let sharp  = null;  try { sharp  = require('sharp');  } catch { console.warn('[nawra-api] ! sharp not installed — image conversion endpoint disabled until `npm i sharp` runs in api/'); }
 
 const app  = express();
 const PORT = 3001;
@@ -307,6 +312,80 @@ ensureColumn('returns',   'inspected_at',      'DATETIME');
 ensureColumn('returns',   'stock_settled',     'INTEGER DEFAULT 0'); // 1 once available/damaged was updated
 ensureColumn('approvals', 'requester_id',  'TEXT');  // email of the requester
 ensureColumn('approvals', 'requester_name','TEXT');
+
+// ── Product migrations (bilingual + slug + size + variants + best-seller) ────
+// Each *_i18n column stores { ar: '...', en: '...' } as JSON. The legacy
+// single-language columns (name, description, ingredients, seo_title,
+// seo_description) are kept in sync with the AR side for back-compat with
+// older queries / the storefront fallback.
+ensureColumn('products', 'name_i18n',            "TEXT DEFAULT '{}'");
+ensureColumn('products', 'description_i18n',     "TEXT DEFAULT '{}'");
+ensureColumn('products', 'ingredients_i18n',     "TEXT DEFAULT '{}'");
+ensureColumn('products', 'usage_text',           'TEXT');                  // raw AR fallback
+ensureColumn('products', 'usage_i18n',           "TEXT DEFAULT '{}'");
+ensureColumn('products', 'seo_title_i18n',       "TEXT DEFAULT '{}'");
+ensureColumn('products', 'seo_description_i18n', "TEXT DEFAULT '{}'");
+ensureColumn('products', 'slug',                 'TEXT');                  // unique below
+ensureColumn('products', 'size',                 'TEXT');                  // e.g. "30ml", "100g"
+ensureColumn('products', 'publish_at',           'DATETIME');              // optional scheduled publish
+ensureColumn('products', 'is_best_seller',       'INTEGER DEFAULT 0');
+ensureColumn('products', 'has_variants',         'INTEGER DEFAULT 0');
+ensureColumn('products', 'archived',             'INTEGER DEFAULT 0');
+
+// Variant rows — one product can have many (size variants etc.). When
+// has_variants = 1 the storefront should display from these instead of the
+// product's top-level price / stock fields.
+db.exec(`
+  CREATE TABLE IF NOT EXISTS product_variants (
+    id           TEXT PRIMARY KEY,
+    product_id   TEXT NOT NULL,
+    size         TEXT,
+    price        REAL DEFAULT 0,
+    price_before REAL DEFAULT 0,
+    stock        INTEGER DEFAULT 0,
+    sku          TEXT,
+    sort_order   INTEGER DEFAULT 0,
+    created_at   DATETIME DEFAULT CURRENT_TIMESTAMP
+  )
+`);
+try { db.exec('CREATE INDEX IF NOT EXISTS idx_variants_product ON product_variants(product_id)'); } catch {}
+
+// Slug uniqueness — best-effort. We add a partial unique index that excludes
+// NULLs so legacy rows without a slug don't all collide on NULL.
+try { db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_products_slug ON products(slug) WHERE slug IS NOT NULL'); } catch {}
+
+// Backfill: assign a slug to any product that hasn't got one yet (derived
+// from name, with a short suffix when collisions exist). Runs once per boot.
+(() => {
+  try {
+    const rows = db.prepare('SELECT id, name, slug FROM products WHERE slug IS NULL OR slug = \'\'').all();
+    if (!rows.length) return;
+    const used = new Set(db.prepare('SELECT slug FROM products WHERE slug IS NOT NULL AND slug <> \'\'').all().map(r => r.slug));
+    const upd = db.prepare('UPDATE products SET slug = ? WHERE id = ?');
+    db.transaction(() => {
+      rows.forEach(r => {
+        let base = slugify(r.name || 'product') || 'product';
+        let s = base, n = 2;
+        while (used.has(s)) { s = `${base}-${n++}`; }
+        used.add(s); upd.run(s, r.id);
+      });
+    })();
+    console.log(`[nawra-api] backfilled slug for ${rows.length} products`);
+  } catch (e) { console.warn('[nawra-api] slug backfill skipped:', e.message); }
+})();
+
+// URL-safe slug — keeps Arabic letters (browsers handle them in URLs), drops
+// punctuation, collapses whitespace to dashes.
+function slugify(s) {
+  return String(s || '')
+    .toLowerCase()
+    .replace(/[‏‎]/g, '')
+    .replace(/[\s_]+/g, '-')
+    .replace(/[^\p{L}\p{N}-]+/gu, '')
+    .replace(/-+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 80);
+}
 
 console.log('[nawra-api] DB ready:', path.join(__dirname, 'orders.db'));
 
@@ -862,33 +941,80 @@ app.patch('/api/addresses/:id/default', (req, res) => {
 // ── PRODUCTS ──────────────────────────────────────────────────────────────────
 // Stored in SQLite. Images are accepted as either remote URLs or base64 data
 // URLs and persisted as a JSON array string. Tags are also a JSON array.
+// Parse a JSON column safely, returning a default on failure.
+function parseJsonCol(raw, def) {
+  if (raw == null) return def;
+  try { const v = JSON.parse(raw); return v == null ? def : v; }
+  catch { return def; }
+}
+
+// Coerce a value into the {ar,en} bilingual shape used by *_i18n columns.
+// Accepts: a string (treated as AR), a {ar,en} object, or null/undefined.
+function toI18n(v, fallbackAr) {
+  if (v && typeof v === 'object' && !Array.isArray(v)) {
+    return { ar: (v.ar ?? fallbackAr ?? ''), en: (v.en ?? '') };
+  }
+  if (typeof v === 'string') return { ar: v, en: '' };
+  return { ar: fallbackAr || '', en: '' };
+}
+
 function rowToProduct(r) {
   if (!r) return null;
-  let images = []; let tags = [];
-  try { images = JSON.parse(r.images || '[]'); } catch {}
-  try { tags   = JSON.parse(r.tags   || '[]'); } catch {}
+  const images = parseJsonCol(r.images, []);
+  const tags   = parseJsonCol(r.tags, []);
+  const variants = db.prepare('SELECT * FROM product_variants WHERE product_id = ? ORDER BY sort_order, created_at').all(r.id);
   return {
-    ...r, images, tags,
-    in_stock: !!r.in_stock,
-    featured: !!r.featured,
+    ...r,
+    images, tags, variants,
+    in_stock:       !!r.in_stock,
+    featured:       !!r.featured,
+    is_best_seller: !!r.is_best_seller,
+    has_variants:   !!r.has_variants,
+    archived:       !!r.archived,
+    name_i18n:            parseJsonCol(r.name_i18n,            { ar: r.name||'', en: '' }),
+    description_i18n:     parseJsonCol(r.description_i18n,     { ar: r.description||'', en: '' }),
+    ingredients_i18n:     parseJsonCol(r.ingredients_i18n,     { ar: r.ingredients||'', en: '' }),
+    usage_i18n:           parseJsonCol(r.usage_i18n,           { ar: r.usage_text||'', en: '' }),
+    seo_title_i18n:       parseJsonCol(r.seo_title_i18n,       { ar: r.seo_title||'', en: '' }),
+    seo_description_i18n: parseJsonCol(r.seo_description_i18n, { ar: r.seo_description||'', en: '' }),
   };
 }
 
-// Generate a sensible SKU when client doesn't supply one
-function generateSku(name) {
-  const base = String(name||'PROD').replace(/[^A-Za-z0-9]+/g,'').slice(0,4).toUpperCase() || 'PROD';
-  return `${base}-${Date.now().toString(36).toUpperCase()}`;
+// Generate a sensible SKU when client doesn't supply one. Format:
+// "{BRAND4}-{NAME4}-{NNN}" where NNN is a 3-digit sequence per brand.
+function generateSku(brand, name) {
+  const b = String(brand||'').replace(/[^A-Za-z0-9]+/g,'').slice(0,4).toUpperCase() || 'NWR';
+  const n = String(name||'PROD').replace(/[^A-Za-z0-9]+/g,'').slice(0,4).toUpperCase() || 'PROD';
+  const row = db.prepare("SELECT COUNT(*) AS c FROM products WHERE sku LIKE ?").get(`${b}-%`);
+  const seq = String(((row && row.c) || 0) + 1).padStart(3, '0');
+  return `${b}-${n}-${seq}`;
+}
+
+// Resolve a unique slug derived from name. If `excludeId` is provided we
+// don't count the product itself as a collision (used when editing).
+function resolveSlug(desired, fallbackName, excludeId) {
+  let base = slugify(desired || fallbackName) || 'product';
+  let s = base, n = 2;
+  const stmt = db.prepare('SELECT 1 FROM products WHERE slug = ? AND id <> ?');
+  while (stmt.get(s, excludeId || '')) { s = `${base}-${n++}`; }
+  return s;
 }
 
 app.get('/api/products', (req, res) => {
   try {
-    const { status, category, q } = req.query;
+    const { status, category, q, brand, archived } = req.query;
     let sql = 'SELECT * FROM products WHERE 1=1';
     const params = [];
     if (status)   { sql += ' AND status = ?';   params.push(status); }
     if (category) { sql += ' AND category = ?'; params.push(category); }
-    if (q)        { sql += ' AND (name LIKE ? OR brand LIKE ? OR sku LIKE ?)';
-                    const like = `%${q}%`; params.push(like, like, like); }
+    if (brand)    { sql += ' AND brand = ?';    params.push(brand); }
+    // Exclude archived rows unless explicitly asked for.
+    if (archived === '1') { sql += ' AND archived = 1'; }
+    else if (archived !== 'all') { sql += ' AND (archived IS NULL OR archived = 0)'; }
+    if (q) {
+      sql += ' AND (name LIKE ? OR brand LIKE ? OR sku LIKE ? OR slug LIKE ?)';
+      const like = `%${q}%`; params.push(like, like, like, like);
+    }
     sql += ' ORDER BY created_at DESC';
     const rows = db.prepare(sql).all(...params);
     res.json(rows.map(rowToProduct));
@@ -897,38 +1023,106 @@ app.get('/api/products', (req, res) => {
 
 app.get('/api/products/:id', (req, res) => {
   try {
-    const row = db.prepare('SELECT * FROM products WHERE id = ?').get(req.params.id);
+    const row = db.prepare('SELECT * FROM products WHERE id = ? OR slug = ?').get(req.params.id, req.params.id);
     if (!row) return res.status(404).json({ error: 'not found' });
     res.json(rowToProduct(row));
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+// Live slug-uniqueness check used by the admin form's onBlur validation.
+app.get('/api/products/slug-check', (req, res) => {
+  try {
+    const slug = slugify(req.query.slug || '');
+    if (!slug) return res.json({ available: false, slug: '', error: 'invalid slug' });
+    const excludeId = String(req.query.exclude || '');
+    const hit = db.prepare('SELECT id FROM products WHERE slug = ? AND id <> ?').get(slug, excludeId);
+    res.json({ available: !hit, slug });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// Replace all variant rows for a product (insert-after-delete keeps the API
+// simple — the admin form always re-sends the entire variant list).
+function replaceVariants(productId, variants) {
+  db.prepare('DELETE FROM product_variants WHERE product_id = ?').run(String(productId));
+  if (!Array.isArray(variants) || !variants.length) return;
+  const ins = db.prepare(`
+    INSERT INTO product_variants (id, product_id, size, price, price_before, stock, sku, sort_order)
+    VALUES (?,?,?,?,?,?,?,?)
+  `);
+  variants.forEach((v, i) => {
+    const id = v.id || `pv_${Date.now().toString(36)}_${Math.random().toString(36).slice(2,5)}_${i}`;
+    ins.run(
+      id, String(productId),
+      v.size || null,
+      Number(v.price) || 0,
+      Number(v.price_before) || 0,
+      Number.isFinite(+v.stock) ? +v.stock : 0,
+      v.sku || null,
+      Number.isFinite(+v.sort_order) ? +v.sort_order : i
+    );
+  });
+}
+
 app.post('/api/products', (req, res) => {
   try {
     const p = req.body || {};
-    if (!p.name) return res.status(400).json({ error: 'name required' });
-    const id  = p.id  || `p_${Date.now().toString(36)}_${Math.random().toString(36).slice(2,6)}`;
-    const sku = p.sku || generateSku(p.name);
+    // Bilingual primary name is required (Arabic side).
+    const nameI18n = toI18n(p.name_i18n, p.name);
+    if (!nameI18n.ar) return res.status(400).json({ error: 'name (ar) required' });
+    const id   = p.id  || `p_${Date.now().toString(36)}_${Math.random().toString(36).slice(2,6)}`;
+    const sku  = p.sku || generateSku(p.brand, nameI18n.ar);
+    const slug = resolveSlug(p.slug || nameI18n.ar, nameI18n.ar, id);
+
+    const descI18n = toI18n(p.description_i18n, p.description);
+    const ingI18n  = toI18n(p.ingredients_i18n, p.ingredients);
+    const useI18n  = toI18n(p.usage_i18n,       p.usage_text || p.usage);
+    const seoTI18n = toI18n(p.seo_title_i18n,       p.seo_title);
+    const seoDI18n = toI18n(p.seo_description_i18n, p.seo_description);
+
     db.prepare(`
-      INSERT INTO products
-        (id, sku, name, description, category, brand, ingredients, images,
-         price, price_before, cost, stock, alert_threshold,
-         status, in_stock, featured, seo_title, seo_description, tags,
-         created_at, updated_at)
-      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,datetime('now'),datetime('now'))
+      INSERT INTO products (
+        id, sku, name, description, category, brand, ingredients, images,
+        price, price_before, cost, stock, alert_threshold,
+        status, in_stock, featured, seo_title, seo_description, tags,
+        name_i18n, description_i18n, ingredients_i18n,
+        usage_text, usage_i18n,
+        seo_title_i18n, seo_description_i18n,
+        slug, size, publish_at, is_best_seller, has_variants, archived,
+        created_at, updated_at
+      ) VALUES (
+        ?,?,?,?,?,?,?,?,
+        ?,?,?,?,?,
+        ?,?,?,?,?,?,
+        ?,?,?,
+        ?,?,
+        ?,?,
+        ?,?,?,?,?,?,
+        datetime('now'), datetime('now')
+      )
     `).run(
-      id, sku, p.name, p.description||null, p.category||null, p.brand||null,
-      p.ingredients||null, JSON.stringify(Array.isArray(p.images)?p.images:[]),
+      id, sku, nameI18n.ar, descI18n.ar || null, p.category || null, p.brand || null,
+      ingI18n.ar || null, JSON.stringify(Array.isArray(p.images) ? p.images : []),
       Number(p.price)||0, Number(p.price_before)||0, Number(p.cost)||0,
-      Number.isFinite(+p.stock)?+p.stock:0, Number.isFinite(+p.alert_threshold)?+p.alert_threshold:5,
+      Number.isFinite(+p.stock) ? +p.stock : 0, Number.isFinite(+p.alert_threshold) ? +p.alert_threshold : 5,
       p.status === 'published' ? 'published' : 'draft',
       p.in_stock === false ? 0 : 1,
       p.featured ? 1 : 0,
-      p.seo_title||null, p.seo_description||null,
-      JSON.stringify(Array.isArray(p.tags)?p.tags:[])
+      seoTI18n.ar || null, seoDI18n.ar || null,
+      JSON.stringify(Array.isArray(p.tags) ? p.tags : []),
+      JSON.stringify(nameI18n), JSON.stringify(descI18n), JSON.stringify(ingI18n),
+      useI18n.ar || null, JSON.stringify(useI18n),
+      JSON.stringify(seoTI18n), JSON.stringify(seoDI18n),
+      slug, p.size || null, p.publish_at || null,
+      p.is_best_seller ? 1 : 0,
+      p.has_variants ? 1 : 0,
+      p.archived ? 1 : 0
     );
-    console.log('[nawra-api] product created:', id, p.name, '(', p.status, ')');
-    res.json({ ok: true, id, sku });
+
+    if (p.has_variants && Array.isArray(p.variants)) replaceVariants(id, p.variants);
+
+    console.log('[nawra-api] product created:', id, nameI18n.ar, '(', p.status, ', slug=' + slug + ')');
+    const row = db.prepare('SELECT * FROM products WHERE id = ?').get(id);
+    res.json({ ok: true, ...rowToProduct(row) });
   } catch (e) { console.error('POST /api/products error:', e); res.status(500).json({ error: e.message }); }
 });
 
@@ -937,25 +1131,73 @@ app.patch('/api/products/:id', (req, res) => {
     const cur = db.prepare('SELECT * FROM products WHERE id = ?').get(req.params.id);
     if (!cur) return res.status(404).json({ error: 'not found' });
     const p = req.body || {};
-    // Whitelist of mutable fields → SQL column mapping
-    const cols = ['name','description','category','brand','ingredients',
-                  'price','price_before','cost','stock','alert_threshold',
-                  'status','seo_title','seo_description','sku'];
+
     const sets = []; const vals = [];
-    cols.forEach(c => {
-      if (Object.prototype.hasOwnProperty.call(p, c)) {
-        sets.push(`${c} = ?`);
-        vals.push(p[c]);
+
+    // Plain scalar columns — set when present on the body.
+    const scalars = [
+      'category','brand','price','price_before','cost','stock','alert_threshold',
+      'status','sku','size','publish_at',
+    ];
+    scalars.forEach(c => {
+      if (Object.prototype.hasOwnProperty.call(p, c)) { sets.push(`${c} = ?`); vals.push(p[c]); }
+    });
+
+    // Bilingual fields — when provided, update both the *_i18n JSON column and
+    // the legacy AR-only column to keep storefront fallback working.
+    const i18nMap = [
+      ['name',        'name_i18n'],
+      ['description', 'description_i18n'],
+      ['ingredients', 'ingredients_i18n'],
+      ['seo_title',       'seo_title_i18n'],
+      ['seo_description', 'seo_description_i18n'],
+    ];
+    i18nMap.forEach(([legacy, jsonCol]) => {
+      if (Object.prototype.hasOwnProperty.call(p, jsonCol) || Object.prototype.hasOwnProperty.call(p, legacy)) {
+        const v = toI18n(p[jsonCol] ?? p[legacy], parseJsonCol(cur[jsonCol], {ar:cur[legacy]||'',en:''}).ar);
+        sets.push(`${jsonCol} = ?`); vals.push(JSON.stringify(v));
+        sets.push(`${legacy} = ?`);   vals.push(v.ar || null);
       }
     });
+    // usage uses a different legacy column name (usage_text).
+    if (Object.prototype.hasOwnProperty.call(p, 'usage_i18n') || Object.prototype.hasOwnProperty.call(p, 'usage_text') || Object.prototype.hasOwnProperty.call(p, 'usage')) {
+      const v = toI18n(p.usage_i18n ?? p.usage_text ?? p.usage, parseJsonCol(cur.usage_i18n, {ar:cur.usage_text||'',en:''}).ar);
+      sets.push('usage_i18n = ?'); vals.push(JSON.stringify(v));
+      sets.push('usage_text = ?'); vals.push(v.ar || null);
+    }
+
+    // JSON arrays
     if (Object.prototype.hasOwnProperty.call(p, 'images')) { sets.push('images = ?'); vals.push(JSON.stringify(Array.isArray(p.images)?p.images:[])); }
     if (Object.prototype.hasOwnProperty.call(p, 'tags'))   { sets.push('tags = ?');   vals.push(JSON.stringify(Array.isArray(p.tags)?p.tags:[])); }
-    if (Object.prototype.hasOwnProperty.call(p, 'in_stock')) { sets.push('in_stock = ?'); vals.push(p.in_stock ? 1 : 0); }
-    if (Object.prototype.hasOwnProperty.call(p, 'featured')) { sets.push('featured = ?'); vals.push(p.featured ? 1 : 0); }
-    if (!sets.length) return res.json({ ok: true, noop: true });
-    sets.push("updated_at = datetime('now')");
-    vals.push(req.params.id);
-    db.prepare(`UPDATE products SET ${sets.join(', ')} WHERE id = ?`).run(...vals);
+
+    // Booleans
+    if (Object.prototype.hasOwnProperty.call(p, 'in_stock'))       { sets.push('in_stock = ?');       vals.push(p.in_stock ? 1 : 0); }
+    if (Object.prototype.hasOwnProperty.call(p, 'featured'))       { sets.push('featured = ?');       vals.push(p.featured ? 1 : 0); }
+    if (Object.prototype.hasOwnProperty.call(p, 'is_best_seller')) { sets.push('is_best_seller = ?'); vals.push(p.is_best_seller ? 1 : 0); }
+    if (Object.prototype.hasOwnProperty.call(p, 'has_variants'))   { sets.push('has_variants = ?');   vals.push(p.has_variants ? 1 : 0); }
+    if (Object.prototype.hasOwnProperty.call(p, 'archived'))       { sets.push('archived = ?');       vals.push(p.archived ? 1 : 0); }
+
+    // Slug — resolve to unique form (excluding self).
+    if (Object.prototype.hasOwnProperty.call(p, 'slug')) {
+      const newSlug = resolveSlug(p.slug, cur.name, cur.id);
+      sets.push('slug = ?'); vals.push(newSlug);
+    }
+
+    if (!sets.length && !Object.prototype.hasOwnProperty.call(p, 'variants')) {
+      return res.json({ ok: true, noop: true });
+    }
+
+    if (sets.length) {
+      sets.push("updated_at = datetime('now')");
+      vals.push(req.params.id);
+      db.prepare(`UPDATE products SET ${sets.join(', ')} WHERE id = ?`).run(...vals);
+    }
+
+    // Variants — replace the whole set when the caller passes an array.
+    if (Object.prototype.hasOwnProperty.call(p, 'variants')) {
+      replaceVariants(req.params.id, p.variants);
+    }
+
     const row = db.prepare('SELECT * FROM products WHERE id = ?').get(req.params.id);
     res.json(rowToProduct(row));
   } catch (e) { console.error('PATCH /api/products error:', e); res.status(500).json({ error: e.message }); }
@@ -963,11 +1205,67 @@ app.patch('/api/products/:id', (req, res) => {
 
 app.delete('/api/products/:id', (req, res) => {
   try {
+    db.prepare('DELETE FROM product_variants WHERE product_id = ?').run(req.params.id);
     const info = db.prepare('DELETE FROM products WHERE id = ?').run(req.params.id);
     if (!info.changes) return res.status(404).json({ error: 'not found' });
     res.json({ ok: true });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
+
+// ── Product image upload ──────────────────────────────────────────────────────
+// Multipart endpoint that converts the upload to webp (+ generates a 200×200
+// thumbnail) and stores both under /uploads/products/. Returns the public
+// URLs; the admin form then includes them in the product's `images` array.
+const PRODUCT_UPLOAD_DIR = path.join(__dirname, '..', 'uploads', 'products');
+try { fs.mkdirSync(PRODUCT_UPLOAD_DIR, { recursive: true }); } catch {}
+// Serve uploaded files publicly. The frontend embeds the returned URLs
+// directly in <img src=...>.
+app.use('/uploads', express.static(path.join(__dirname, '..', 'uploads'), {
+  maxAge: '7d', fallthrough: true,
+}));
+
+if (multer && sharp) {
+  const upload = multer({
+    storage: multer.memoryStorage(),
+    limits:  { fileSize: 5 * 1024 * 1024 }, // 5 MB raw cap; sharp shrinks heavily
+    fileFilter: (_req, file, cb) => {
+      const ok = /^image\/(jpeg|png|webp)$/.test(file.mimetype);
+      cb(ok ? null : new Error('unsupported file type — jpg, png, webp only'), ok);
+    },
+  });
+  app.post('/api/products/upload-image', upload.single('image'), async (req, res) => {
+    try {
+      if (!req.file) return res.status(400).json({ error: 'no file' });
+      const stamp = Date.now().toString(36) + Math.random().toString(36).slice(2,5);
+      const fullName  = `${stamp}.webp`;
+      const thumbName = `${stamp}-thumb.webp`;
+      // Full-size: cap longest side at 1400px so banners aren't huge but the
+      // detail-page image still looks crisp on retina screens.
+      await sharp(req.file.buffer)
+        .rotate()
+        .resize({ width: 1400, height: 1400, fit: 'inside', withoutEnlargement: true })
+        .webp({ quality: 82 })
+        .toFile(path.join(PRODUCT_UPLOAD_DIR, fullName));
+      // Thumbnail: hard-cropped 200×200 for table rows and storefront cards.
+      await sharp(req.file.buffer)
+        .rotate()
+        .resize({ width: 200, height: 200, fit: 'cover', position: 'centre' })
+        .webp({ quality: 80 })
+        .toFile(path.join(PRODUCT_UPLOAD_DIR, thumbName));
+      const url      = `/uploads/products/${fullName}`;
+      const thumbUrl = `/uploads/products/${thumbName}`;
+      console.log('[nawra-api] product image saved:', url);
+      res.json({ ok: true, url, thumbUrl, original: req.file.originalname });
+    } catch (e) {
+      console.error('POST /api/products/upload-image error:', e);
+      res.status(500).json({ error: e.message });
+    }
+  });
+} else {
+  app.post('/api/products/upload-image', (_req, res) => {
+    res.status(503).json({ error: 'image upload unavailable — install multer+sharp on the server' });
+  });
+}
 
 // ── COUPONS ───────────────────────────────────────────────────────────────────
 // types: 'percent' (discount = %), 'fixed' (discount = EGP), 'free_shipping'
