@@ -1672,6 +1672,7 @@ function AdminDash({ go }) {
     registration_enabled: true,
     guest_checkout: true,
     monthly_target: 0,
+    vip_threshold: 5000,        // EGP — customer becomes VIP at this lifetime spend
   };
   const DEFAULT_ACCOUNT = {
     admin_name: "Super Admin",
@@ -2092,6 +2093,20 @@ function AdminDash({ go }) {
   const goProductNew  = ()   => { window.location.hash = "#admin/products/new"; };
   const goProductEdit = (id) => { window.location.hash = `#admin/products/${encodeURIComponent(id)}/edit`; };
   const goProductsList = ()  => { if (window.location.hash !== "#admin") window.location.hash = "#admin"; setTab("products"); };
+
+  // Customer detail subroute — same pattern as orders/products
+  const customerDetailEmail = (() => {
+    if (typeof window === "undefined") return null;
+    const h = window.location.hash || "";
+    const m = h.match(/^#admin\/customers\/(.+)$/);
+    return m ? decodeURIComponent(m[1]) : null;
+  })();
+  useEffect(() => {
+    if (customerDetailEmail && tab !== "customers") setTab("customers");
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [customerDetailEmail]);
+  const goCustomer       = (email) => { window.location.hash = `#admin/customers/${encodeURIComponent(email)}`; };
+  const goCustomersList  = ()      => { if (window.location.hash !== "#admin") window.location.hash = "#admin"; setTab("customers"); };
   // Whenever the user lands on an order-detail URL, ensure the active tab is
   // "orders" (so leaving the detail returns to the right list, and the topbar
   // title is correct).
@@ -2107,6 +2122,66 @@ function AdminDash({ go }) {
     window.addEventListener("hashchange", h);
     return () => window.removeEventListener("hashchange", h);
   }, []);
+
+  // ── Customers (CRM) list filters / selection / pagination ─────────────────
+  const [custSearch,      setCustSearch]      = useState("");
+  const [custCategory,    setCustCategory]    = useState("all"); // all|new|regular|repeat|vip|inactive
+  const [custRegFrom,     setCustRegFrom]     = useState("");
+  const [custRegTo,       setCustRegTo]       = useState("");
+  const [custOrderFrom,   setCustOrderFrom]   = useState("");
+  const [custOrderTo,     setCustOrderTo]     = useState("");
+  const [custSort,        setCustSort]        = useState("last_activity");
+  const [custPage,        setCustPage]        = useState(1);
+  const [custPerPage]     = useState(25);
+  const [custSelected,    setCustSelected]    = useState({});
+  const [custRows,        setCustRows]        = useState([]);
+  const [custTotal,       setCustTotal]       = useState(0);
+  const [custLoading,     setCustLoading]     = useState(false);
+  const [custAggregates,  setCustAggregates]  = useState(null);
+  const [bulkEmailOpen,   setBulkEmailOpen]   = useState(false);
+  const [bulkEmailDraft,  setBulkEmailDraft]  = useState({ subject:"", body:"" });
+
+  // Compose query string from current filter state.
+  const buildCustQuery = (overrides = {}) => {
+    const p = new URLSearchParams();
+    p.set("page", String(overrides.page || custPage));
+    p.set("perPage", String(overrides.perPage || custPerPage));
+    if (custSearch.trim())  p.set("q", custSearch.trim());
+    if (custCategory !== "all") p.set("category", custCategory);
+    if (custRegFrom)        p.set("reg_from", custRegFrom);
+    if (custRegTo)          p.set("reg_to", custRegTo);
+    if (custOrderFrom)      p.set("order_from", custOrderFrom);
+    if (custOrderTo)        p.set("order_to", custOrderTo);
+    if (custSort)           p.set("sort", custSort);
+    if (overrides.bulk)     p.set("bulk", "1");
+    return p.toString();
+  };
+  const refreshCustomers = async () => {
+    setCustLoading(true);
+    try {
+      const [list, agg] = await Promise.all([
+        fetch(`/api/users?${buildCustQuery()}`).then(r => r.ok ? r.json() : null),
+        fetch(`/api/users/aggregates`).then(r => r.ok ? r.json() : null),
+      ]);
+      if (list)  { setCustRows(list.rows || []); setCustTotal(list.total || 0); }
+      if (agg)   { setCustAggregates(agg); }
+    } catch {}
+    setCustLoading(false);
+  };
+  // Reload on filter change (debounced via direct fire — UI inputs are slow enough)
+  useEffect(() => {
+    if (tab !== "customers" || customerDetailEmail) return;
+    refreshCustomers();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tab, customerDetailEmail, custPage, custCategory, custRegFrom, custRegTo, custOrderFrom, custOrderTo, custSort]);
+  // Search input debounced to 350ms
+  useEffect(() => {
+    if (tab !== "customers" || customerDetailEmail) return;
+    const t = setTimeout(() => { setCustPage(1); refreshCustomers(); }, 350);
+    return () => clearTimeout(t);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [custSearch]);
+  useEffect(() => { setCustPage(1); }, [custCategory, custRegFrom, custRegTo, custOrderFrom, custOrderTo, custSort]);
 
   // ── Products list filters / selection / pagination ─────────────────────────
   const [prodSearch,    setProdSearch]    = useState("");
@@ -2403,7 +2478,7 @@ function AdminDash({ go }) {
 
   // ── Sidebar nav button ─────────────────────────────────────────────────────
   const NavBtn = ({ item }) => {
-    const active = tab === item.k && !detailOrderId && !productFormRoute;
+    const active = tab === item.k && !detailOrderId && !productFormRoute && !customerDetailEmail;
     return (
       <button onClick={()=>{
         // "إضافة منتج" is now a shortcut into the products subroute.
@@ -3565,90 +3640,236 @@ function AdminDash({ go }) {
           )}
 
           {/* CUSTOMERS */}
-          {tab === "customers" && (() => {
-            // Analytics
-            const totalCust  = allUsers.length;
-            const newCust    = allUsers.filter(u => {
-              if (!u.firstOrder) return false;
-              const d = new Date(u.firstOrder);
-              return !isNaN(d) && d.getFullYear()===now.getFullYear() && d.getMonth()===now.getMonth();
-            }).length;
-            const vipCust    = allUsers.filter(u => (u.totalOrders||0) >= 3).length;
-            const avgSpend   = totalCust ? Math.round(allUsers.reduce((s,u)=>s+(u.totalSpent||0),0)/totalCust) : 0;
-            const maxOrders  = Math.max(1, ...allUsers.map(u=>u.totalOrders||0));
-            const tierOf = (u) => {
-              if ((u.totalOrders||0) >= 3) return { bg:"#FEF3C7", fg:"#92400E", l:"VIP" };
-              if (!u.firstOrder) return { bg:"#F3F4F6", fg:"#737373", l:"عادي" };
-              const fd = new Date(u.firstOrder);
-              const isNewMonth = !isNaN(fd) && fd.getFullYear()===now.getFullYear() && fd.getMonth()===now.getMonth();
-              if (isNewMonth) return { bg:"#DBEAFE", fg:"#1D4ED8", l:"جديد" };
-              return { bg:"#F3F4F6", fg:"#737373", l:"عادي" };
-            };
-            return (
+          {tab === "customers" && (
+            customerDetailEmail ? (
+              <CustomerDetailsPage
+                email={customerDetailEmail}
+                ui={ui} mob={mob} C={C}
+                isSuper={isSuper}
+                canManageOrders={canManageOrders}
+                onBack={goCustomersList}
+                refreshList={refreshCustomers}
+              />
+            ) : (() => {
+              const topSpend = Math.max(1, ...custRows.map(u => Number(u.totalSpent) || 0));
+              const selectedIds = Object.keys(custSelected).filter(k => custSelected[k]);
+              const allOnPageSelected = custRows.length > 0 && custRows.every(u => custSelected[u.email]);
+              const togglePage = () => {
+                const next = { ...custSelected };
+                if (allOnPageSelected) custRows.forEach(u => { delete next[u.email]; });
+                else custRows.forEach(u => { next[u.email] = true; });
+                setCustSelected(next);
+              };
+
+              // CSV export — fetches the full filtered set (bulk=1) to export beyond current page
+              const exportCustomersCsv = async () => {
+                const r = await fetch(`/api/users?${buildCustQuery({ bulk: true })}`);
+                const data = r.ok ? await r.json() : null;
+                const rows = (data && data.rows) || custRows;
+                if (!rows.length) { alert("لا توجد عملاء للتصدير."); return; }
+                const head = ["البريد","الاسم","الهاتف","الفئة","عدد الطلبات","إجمالي الإنفاق","آخر طلب","تاريخ التسجيل","آخر دخول","حظر"];
+                const esc = (v) => { const s = v==null?"":String(v); return /[",\n]/.test(s) ? `"${s.replace(/"/g,'""')}"` : s; };
+                const lines = [head.join(",")];
+                rows.forEach(u => lines.push([
+                  u.email, u.name||"", u.phone||"",
+                  CUST_CAT_LABEL[u.category] || u.category || "—",
+                  u.totalOrders||0, u.totalSpent||0,
+                  u.lastOrder||"", u.registered_at||"", u.last_login_date||"",
+                  u.blocked ? "نعم" : "لا"
+                ].map(esc).join(",")));
+                const url = URL.createObjectURL(new Blob(["﻿" + lines.join("\n")], { type:"text/csv;charset=utf-8" }));
+                const a = document.createElement("a"); a.href = url;
+                a.download = `nawra-customers-${new Date().toISOString().slice(0,10)}.csv`;
+                a.click(); URL.revokeObjectURL(url);
+              };
+
+              const sendBulkEmail = async () => {
+                if (!selectedIds.length || !bulkEmailDraft.subject.trim() || !bulkEmailDraft.body.trim()) {
+                  alert("اختر العملاء واكتب الموضوع والنص."); return;
+                }
+                if (!window.confirm(`إرسال الإيميل إلى ${selectedIds.length} عميل؟`)) return;
+                try {
+                  const r = await fetch("/api/users/bulk-email", {
+                    method:"POST", headers:{"Content-Type":"application/json"},
+                    body: JSON.stringify({
+                      recipients: selectedIds,
+                      subject: bulkEmailDraft.subject,
+                      body: bulkEmailDraft.body,
+                      actor_id: (authUser && authUser.email) || null,
+                      actor_name: (authUser && authUser.name) || "Admin",
+                    })
+                  });
+                  const data = await r.json();
+                  if (r.ok) {
+                    setSavedToast(`تم الإرسال: ${data.sent}/${selectedIds.length}`);
+                    setTimeout(()=>setSavedToast(""), 2500);
+                    setBulkEmailOpen(false);
+                    setBulkEmailDraft({ subject:"", body:"" });
+                    setCustSelected({});
+                  } else {
+                    alert(`فشل الإرسال: ${data.error || r.status}`);
+                  }
+                } catch (e) { alert(`خطأ في الشبكة: ${e.message}`); }
+              };
+
+              const totalPages = Math.max(1, Math.ceil(custTotal / custPerPage));
+              const page = Math.min(custPage, totalPages);
+
+              return (
               <div>
-                <div style={{display:"grid",gridTemplateColumns:mob?"1fr 1fr":"repeat(4,1fr)",gap:10,marginBottom:14}}>
-                  <Metric label="إجمالي العملاء" value={totalCust} />
-                  <Metric label="عملاء جدد"      value={newCust} hint={newCust ? "هذا الشهر" : "—"} />
-                  <Metric label="عملاء VIP"      value={vipCust} hint={vipCust ? "3+ طلبات" : "—"} />
-                  <Metric label="متوسط الإنفاق"   value={avgSpend.toLocaleString()} suffix="ج" />
+                {/* Top bar */}
+                <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:14,flexWrap:"wrap",gap:8}}>
+                  <div>
+                    <h2 style={{fontSize:18,fontWeight:600,color:ui.text,fontFamily:ui.fontBody,margin:0}}>العملاء</h2>
+                    <div style={{fontSize:12,color:ui.textSub,fontFamily:ui.fontBody,marginTop:2}}>إدارة قاعدة بيانات العملاء</div>
+                  </div>
+                  <div style={{display:"flex",gap:8}}>
+                    <button onClick={exportCustomersCsv} disabled={custTotal===0}
+                      style={{padding:"8px 14px",background:"transparent",border:ui.border,borderRadius:6,
+                        fontFamily:ui.fontBody,fontSize:12.5,color: custTotal===0?ui.textSub:ui.text,
+                        cursor: custTotal===0?"not-allowed":"pointer"}}>تصدير CSV</button>
+                  </div>
                 </div>
-                <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:10}}>
-                  <span style={{fontSize:13,color:ui.textSub,fontFamily:ui.fontBody}}>الإجمالي: {totalCust} عميل</span>
-                  <button onClick={loadUsers}
-                    style={{display:"flex",alignItems:"center",gap:5,background:ui.cardBg,color:ui.text,
-                      border:ui.border,padding:"6px 12px",cursor:"pointer",fontFamily:ui.fontBody,fontSize:12,borderRadius:6}}>
-                    <AdmIcon name="refresh" size={13}/> تحديث
-                  </button>
+
+                {/* 5 KPI cards */}
+                <div style={{display:"grid",gridTemplateColumns: mob?"1fr 1fr":"repeat(5,1fr)",gap:10,marginBottom:14}}>
+                  <Metric label="إجمالي العملاء" value={custAggregates?.total_customers ?? "—"} />
+                  <Metric label="جدد هذا الشهر"
+                    value={custAggregates?.new_this_month ?? "—"}
+                    changePct={custAggregates?.new_change_pct}
+                    hint="عن الشهر السابق" />
+                  <Metric label="عملاء VIP"      value={custAggregates?.vip_count ?? "—"} />
+                  <Metric label="معدل العملاء المكررين" value={custAggregates ? `${custAggregates.repeat_rate_pct}%` : "—"} />
+                  <Metric label="متوسط قيمة العميل (CLV)" value={custAggregates ? custAggregates.avg_clv.toLocaleString() : "—"} suffix="ج" />
                 </div>
-                {totalCust===0 ? (
-                  <Placeholder icon="users" title="مفيش عملاء لحد دلوقتي" body="هتبان قائمة العملاء هنا بعد أول طلب." />
+
+                {/* Filter bar */}
+                <div style={{background:ui.cardBg,border:ui.border,borderRadius:ui.radius,padding:"12px 14px",marginBottom:12,
+                  display:"grid",gap:8,gridTemplateColumns: mob ? "1fr" : "minmax(220px,2fr) repeat(5, minmax(0,1fr))"}}>
+                  <input value={custSearch} onChange={e=>setCustSearch(e.target.value)}
+                    placeholder="بحث بالاسم أو الإيميل أو الهاتف..."
+                    style={{padding:"8px 12px",border:ui.border,borderRadius:6,background:ui.cardBg,fontFamily:ui.fontBody,fontSize:13,color:ui.text,outline:"none",direction:"rtl"}}/>
+                  <select value={custCategory} onChange={e=>setCustCategory(e.target.value)}
+                    style={{padding:"8px 10px",border:ui.border,borderRadius:6,background:ui.cardBg,fontFamily:ui.fontBody,fontSize:12.5,color:ui.text,outline:"none"}}>
+                    <option value="all">كل الفئات</option>
+                    {Object.entries(CUST_CAT_LABEL).map(([k,l]) => <option key={k} value={k}>{l}</option>)}
+                  </select>
+                  <input type="date" value={custRegFrom} onChange={e=>setCustRegFrom(e.target.value)} title="من تاريخ التسجيل"
+                    style={{padding:"7px 9px",border:ui.border,borderRadius:6,background:ui.cardBg,fontFamily:ui.fontBody,fontSize:12,color:ui.text,outline:"none"}}/>
+                  <input type="date" value={custRegTo}   onChange={e=>setCustRegTo(e.target.value)}   title="إلى تاريخ التسجيل"
+                    style={{padding:"7px 9px",border:ui.border,borderRadius:6,background:ui.cardBg,fontFamily:ui.fontBody,fontSize:12,color:ui.text,outline:"none"}}/>
+                  <input type="date" value={custOrderFrom} onChange={e=>setCustOrderFrom(e.target.value)} title="من تاريخ آخر طلب"
+                    style={{padding:"7px 9px",border:ui.border,borderRadius:6,background:ui.cardBg,fontFamily:ui.fontBody,fontSize:12,color:ui.text,outline:"none"}}/>
+                  <select value={custSort} onChange={e=>setCustSort(e.target.value)}
+                    style={{padding:"8px 10px",border:ui.border,borderRadius:6,background:ui.cardBg,fontFamily:ui.fontBody,fontSize:12.5,color:ui.text,outline:"none"}}>
+                    <option value="last_activity">آخر نشاط</option>
+                    <option value="newest">الأحدث تسجيلاً</option>
+                    <option value="top_spender">الأعلى إنفاقاً</option>
+                    <option value="top_orders">الأكثر طلباً</option>
+                  </select>
+                </div>
+
+                {/* Result count + loading indicator */}
+                <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:8,flexWrap:"wrap",gap:8}}>
+                  <span style={{fontSize:12.5,color:ui.textSub,fontFamily:ui.fontBody}}>
+                    {custLoading ? "جارٍ التحميل..." : `${custTotal} عميل`}
+                  </span>
+                </div>
+
+                {/* Bulk actions bar */}
+                {selectedIds.length > 0 && (
+                  <div style={{position:"sticky",top:0,zIndex:40,background:"#111",borderRadius:ui.radius,padding:"10px 14px",marginBottom:10,
+                    display:"flex",flexWrap:"wrap",alignItems:"center",gap:10,color:"#fff"}}>
+                    <span style={{fontSize:12.5,fontFamily:ui.fontBody,fontWeight:600}}>تم تحديد {selectedIds.length} عميل</span>
+                    <div style={{flex:1}}/>
+                    <button onClick={()=>setBulkEmailOpen(true)}
+                      style={{padding:"6px 11px",border:"1px solid #444",background:"#222",color:"#fff",borderRadius:6,fontFamily:ui.fontBody,fontSize:12,cursor:"pointer"}}>📧 إرسال إيميل جماعي</button>
+                    <button onClick={exportCustomersCsv}
+                      style={{padding:"6px 11px",border:"1px solid #444",background:"#222",color:"#fff",borderRadius:6,fontFamily:ui.fontBody,fontSize:12,cursor:"pointer"}}>تصدير المحدد</button>
+                    <button onClick={()=>setCustSelected({})}
+                      style={{padding:"6px 10px",border:"none",background:"transparent",color:"#9CA3AF",fontFamily:ui.fontBody,fontSize:12,cursor:"pointer"}}>إلغاء التحديد ✕</button>
+                  </div>
+                )}
+
+                {/* Table / empty state */}
+                {custTotal === 0 && !custLoading ? (
+                  <Placeholder icon="users" title="لا توجد عملاء" body={custSearch || custCategory!=="all" || custRegFrom || custRegTo ? "جرب تعديل الفلاتر" : "هتبان قائمة العملاء هنا بعد أول طلب."} />
                 ) : (
-                  <div style={{background:ui.cardBg,border:ui.border,borderRadius:ui.radius,overflow:"hidden",overflowX:"auto"}}>
-                    <table style={{width:"100%",borderCollapse:"collapse",direction:"rtl",fontFamily:ui.fontBody,minWidth:760}}>
+                  <div style={{background:ui.cardBg,border:ui.border,borderRadius:ui.radius,overflow:"hidden",overflowX:"auto",opacity: custLoading ? 0.6 : 1, transition:"opacity .15s"}}>
+                    <table style={{width:"100%",borderCollapse:"collapse",direction:"rtl",fontFamily:ui.fontBody,minWidth:1100}}>
                       <thead>
                         <tr style={{background:ui.sideBg,borderBottom:`0.5px solid #E5E5E5`}}>
-                          {["العميل","الهاتف","الطلبات","إجمالي الإنفاق","آخر طلب","الفئة",""].map(h=>(
-                            <th key={h} style={{padding:"11px 14px",textAlign:"right",fontSize:11.5,color:ui.textSub,fontWeight:500,whiteSpace:"nowrap"}}>{h}</th>
+                          <th style={{padding:"10px 12px",width:36}}>
+                            <input type="checkbox" checked={allOnPageSelected} onChange={togglePage} style={{cursor:"pointer",accentColor:ui.text}}/>
+                          </th>
+                          {["العميل","الهاتف","الطلبات","إجمالي الإنفاق","متوسط الطلب","آخر طلب","آخر نشاط","الفئة",""].map(h=>(
+                            <th key={h} style={{padding:"11px 12px",textAlign:"right",fontSize:11.5,color:ui.textSub,fontWeight:500,whiteSpace:"nowrap"}}>{h}</th>
                           ))}
                         </tr>
                       </thead>
                       <tbody>
-                        {allUsers.map(u => {
-                          const tier = tierOf(u);
-                          const barPct = Math.round(((u.totalOrders||0)/maxOrders)*100);
+                        {custRows.map(u => {
+                          const tier = CUST_CAT_STYLE[u.category] || CUST_CAT_STYLE.regular;
+                          const avg = u.totalOrders ? Math.round((Number(u.totalSpent)||0) / Number(u.totalOrders)) : 0;
+                          const barPct = Math.round(((Number(u.totalSpent)||0) / topSpend) * 100);
+                          const initial = ((u.name||u.email||"?")[0]||"?").toUpperCase();
+                          const phoneDigits = String(u.phone||"").replace(/\D/g,"");
+                          const waHref = phoneDigits ? `https://wa.me/${phoneDigits.startsWith("20") ? phoneDigits : `20${phoneDigits.replace(/^0+/,"")}`}` : null;
                           return (
-                            <tr key={u.email} style={{borderTop:"0.5px solid #EEE"}}>
-                              {/* Customer */}
-                              <td style={{padding:"11px 14px"}}>
+                            <tr key={u.email} onClick={()=>goCustomer(u.email)}
+                              style={{borderTop:"0.5px solid #EEE",cursor:"pointer",transition:"background .15s"}}
+                              onMouseEnter={e=>e.currentTarget.style.background="#FAFAFA"}
+                              onMouseLeave={e=>e.currentTarget.style.background="transparent"}>
+                              <td style={{padding:"10px 12px"}} onClick={e=>e.stopPropagation()}>
+                                <input type="checkbox" checked={!!custSelected[u.email]}
+                                  onChange={e=>setCustSelected(s => ({...s, [u.email]: e.target.checked}))}
+                                  style={{cursor:"pointer",accentColor:ui.text}}/>
+                              </td>
+                              <td style={{padding:"11px 12px"}}>
                                 <div style={{display:"flex",alignItems:"center",gap:10}}>
-                                  <div style={{width:36,height:36,borderRadius:"50%",background:ui.sideBg,display:"flex",alignItems:"center",justifyContent:"center",fontSize:13,color:ui.text,fontWeight:600,flexShrink:0}}>{(u.name||u.email||"?")[0].toUpperCase()}</div>
+                                  <div style={{width:36,height:36,borderRadius:"50%",background:tier.bg,color:tier.fg,display:"flex",alignItems:"center",justifyContent:"center",fontSize:13,fontWeight:600,flexShrink:0}}>{initial}</div>
                                   <div style={{minWidth:0}}>
-                                    <div style={{fontSize:13,color:ui.text,fontWeight:500,fontFamily:ui.fontBody}}>{u.name || "—"}</div>
-                                    <div style={{fontSize:11,color:ui.textSub,fontFamily:ui.fontBody,marginTop:2}}>{u.email}</div>
+                                    <div style={{fontSize:13,color:ui.text,fontWeight:500,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",maxWidth:200}}>{u.name || "—"}</div>
+                                    <div style={{fontSize:11,color:ui.textSub,marginTop:2,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",maxWidth:200}}>{u.email}</div>
                                   </div>
                                 </div>
                               </td>
-                              <td style={{padding:"11px 14px",fontSize:12,color:ui.textSub,fontFamily:"monospace",whiteSpace:"nowrap"}}>{u.phone||"—"}</td>
-                              <td style={{padding:"11px 14px",minWidth:120}}>
+                              <td style={{padding:"11px 12px",fontSize:12,color:ui.textSub,fontFamily:"monospace",whiteSpace:"nowrap"}} onClick={e=>e.stopPropagation()}>
+                                {u.phone ? (
+                                  <div style={{display:"flex",alignItems:"center",gap:6,direction:"ltr"}}>
+                                    <span>{u.phone}</span>
+                                    {waHref && <a href={waHref} target="_blank" rel="noreferrer" title="فتح واتساب" style={{textDecoration:"none",fontSize:14}}>💬</a>}
+                                  </div>
+                                ) : "—"}
+                              </td>
+                              <td style={{padding:"11px 12px",fontSize:13,color:ui.text,fontWeight:500,whiteSpace:"nowrap"}}>{u.totalOrders||0}</td>
+                              <td style={{padding:"11px 12px",minWidth:160}}>
                                 <div style={{display:"flex",alignItems:"center",gap:8}}>
-                                  <span style={{fontSize:13,color:ui.text,fontWeight:500,fontFamily:ui.fontBody,minWidth:22,textAlign:"center"}}>{u.totalOrders||0}</span>
-                                  <div style={{flex:1,height:4,background:"#F3F4F6",borderRadius:2,overflow:"hidden"}}>
-                                    <div style={{width:`${barPct}%`,height:"100%",background: (u.totalOrders||0)>=3 ? "#D97706" : "#3B82F6"}}/>
+                                  <span style={{fontSize:13,color:ui.text,fontWeight:500,whiteSpace:"nowrap"}}>{(u.totalSpent||0).toLocaleString()} <span style={{fontSize:10.5,color:ui.textSub}}>ج</span></span>
+                                  <div style={{flex:1,height:4,background:"#F3F4F6",borderRadius:2,overflow:"hidden",minWidth:40}}>
+                                    <div style={{width:`${barPct}%`,height:"100%",background:tier.fg}}/>
                                   </div>
                                 </div>
                               </td>
-                              <td style={{padding:"11px 14px",whiteSpace:"nowrap"}}>
-                                <span style={{fontSize:13,color:ui.text,fontWeight:500,fontFamily:ui.fontBody}}>{(u.totalSpent||0).toLocaleString()} <span style={{fontSize:10.5,color:ui.textSub}}>ج</span></span>
+                              <td style={{padding:"11px 12px",fontSize:12.5,color:ui.text,whiteSpace:"nowrap"}}>{avg.toLocaleString()} <span style={{fontSize:10.5,color:ui.textSub}}>ج</span></td>
+                              <td style={{padding:"11px 12px",fontSize:11.5,color:ui.textSub,whiteSpace:"nowrap"}} title={u.lastOrder || ""}>
+                                {u.lastOrder ? relTime(new Date(u.lastOrder).getTime()) : "—"}
                               </td>
-                              <td style={{padding:"11px 14px",fontSize:11.5,color:ui.textSub,whiteSpace:"nowrap"}}>
-                                {u.lastOrder ? new Date(u.lastOrder).toLocaleDateString("ar-EG",{day:"2-digit",month:"2-digit",year:"numeric"}) : "—"}
+                              <td style={{padding:"11px 12px",fontSize:11.5,color:ui.textSub,whiteSpace:"nowrap"}}>
+                                {u.last_login_date ? relTime(new Date(u.last_login_date).getTime()) : "—"}
                               </td>
-                              <td style={{padding:"11px 14px"}}>
-                                <span style={{fontSize:10.5,padding:"3px 10px",borderRadius:20,background:tier.bg,color:tier.fg,fontFamily:ui.fontBody,whiteSpace:"nowrap"}}>{tier.l}</span>
+                              <td style={{padding:"11px 12px"}}>
+                                <span style={{fontSize:10.5,padding:"3px 10px",borderRadius:20,background:tier.bg,color:tier.fg,whiteSpace:"nowrap",fontWeight:500}}>
+                                  {CUST_CAT_LABEL[u.category] || u.category || "—"}
+                                </span>
+                                {u.blocked && <span style={{fontSize:10,marginInlineStart:6,padding:"2px 7px",borderRadius:10,background:"#FEE2E2",color:"#B91C1C"}}>محظور</span>}
                               </td>
-                              <td style={{padding:"11px 14px",textAlign:"left"}}>
-                                <button onClick={()=>alert(`العميل: ${u.name||"—"}\nالبريد: ${u.email}\nالهاتف: ${u.phone||"—"}\nالطلبات: ${u.totalOrders||0}\nالإنفاق: ${(u.totalSpent||0).toLocaleString()} ج`)}
-                                  style={{background:"transparent",border:ui.border,padding:"5px 10px",cursor:"pointer",fontFamily:ui.fontBody,fontSize:11.5,color:ui.text,borderRadius:4}}>عرض</button>
+                              <td style={{padding:"11px 12px",whiteSpace:"nowrap"}} onClick={e=>e.stopPropagation()}>
+                                <div style={{display:"flex",gap:4}}>
+                                  <button onClick={()=>goCustomer(u.email)} title="عرض" style={{background:"transparent",border:ui.border,padding:"5px 8px",cursor:"pointer",borderRadius:5,fontSize:13}}>👁</button>
+                                  <a href={`mailto:${u.email}`} title="إرسال إيميل" style={{background:"transparent",border:ui.border,padding:"4px 8px",cursor:"pointer",borderRadius:5,fontSize:13,textDecoration:"none",color:ui.text,display:"inline-flex",alignItems:"center"}}>📧</a>
+                                  {waHref && <a href={waHref} target="_blank" rel="noreferrer" title="واتساب" style={{background:"transparent",border:ui.border,padding:"4px 8px",cursor:"pointer",borderRadius:5,fontSize:13,textDecoration:"none",color:ui.text,display:"inline-flex",alignItems:"center"}}>💬</a>}
+                                </div>
                               </td>
                             </tr>
                           );
@@ -3657,9 +3878,46 @@ function AdminDash({ go }) {
                     </table>
                   </div>
                 )}
+
+                {/* Pagination */}
+                {custTotal > custPerPage && (
+                  <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginTop:12,
+                    fontFamily:ui.fontBody,fontSize:12.5,color:ui.textSub}}>
+                    <span>عرض {(page-1)*custPerPage + 1}–{Math.min(page*custPerPage, custTotal)} من {custTotal} عميل</span>
+                    <div style={{display:"flex",gap:6,alignItems:"center"}}>
+                      <button disabled={page <= 1} onClick={()=>setCustPage(p => Math.max(1, p-1))}
+                        style={{padding:"6px 12px",border:ui.border,borderRadius:6,background:ui.cardBg,fontFamily:ui.fontBody,fontSize:12,color: page<=1?"#D1D5DB":ui.text,cursor: page<=1?"not-allowed":"pointer"}}>التالي ←</button>
+                      <span style={{fontSize:12,color:ui.text,padding:"0 8px"}}>صفحة {page} من {totalPages}</span>
+                      <button disabled={page >= totalPages} onClick={()=>setCustPage(p => Math.min(totalPages, p+1))}
+                        style={{padding:"6px 12px",border:ui.border,borderRadius:6,background:ui.cardBg,fontFamily:ui.fontBody,fontSize:12,color: page>=totalPages?"#D1D5DB":ui.text,cursor: page>=totalPages?"not-allowed":"pointer"}}>→ السابق</button>
+                    </div>
+                  </div>
+                )}
+
+                {/* Bulk email modal */}
+                {bulkEmailOpen && (
+                  <div onClick={()=>setBulkEmailOpen(false)} style={{position:"fixed",inset:0,background:"rgba(0,0,0,.55)",zIndex:800,display:"flex",alignItems:"center",justifyContent:"center",padding:16,direction:"rtl"}}>
+                    <div onClick={e=>e.stopPropagation()} style={{background:ui.cardBg,maxWidth:520,width:"100%",padding:22,borderRadius:8,boxShadow:"0 12px 48px rgba(0,0,0,.25)"}}>
+                      <h3 style={{fontSize:15,fontWeight:600,color:ui.text,margin:"0 0 4px"}}>إرسال إيميل جماعي</h3>
+                      <div style={{fontSize:12.5,color:ui.textSub,marginBottom:12}}>إلى {selectedIds.length} عميل · المتغيرات: {`{{customer_name}}, {{order_count}}, {{total_spent}}`}</div>
+                      <label style={{display:"block",fontSize:12,color:ui.text,marginBottom:5,fontWeight:500}}>الموضوع</label>
+                      <input value={bulkEmailDraft.subject} onChange={e=>setBulkEmailDraft({...bulkEmailDraft, subject:e.target.value})}
+                        style={{width:"100%",padding:"9px 11px",border:ui.border,borderRadius:6,fontSize:13,marginBottom:10,boxSizing:"border-box",direction:"rtl"}}/>
+                      <label style={{display:"block",fontSize:12,color:ui.text,marginBottom:5,fontWeight:500}}>النص</label>
+                      <textarea rows={8} value={bulkEmailDraft.body} onChange={e=>setBulkEmailDraft({...bulkEmailDraft, body:e.target.value})}
+                        placeholder={`أهلاً {{customer_name}},\n\nبشكر إنك جزء من نوّرَة. لديك ${`{{order_count}}`} طلب سابق...`}
+                        style={{width:"100%",padding:"9px 11px",border:ui.border,borderRadius:6,fontSize:13,resize:"vertical",minHeight:160,boxSizing:"border-box",direction:"rtl",fontFamily:ui.fontBody}}/>
+                      <div style={{display:"flex",gap:8,justifyContent:"flex-end",marginTop:14}}>
+                        <button onClick={()=>setBulkEmailOpen(false)} style={{padding:"8px 16px",background:"transparent",border:ui.border,borderRadius:6,fontSize:12.5,color:ui.textSub,cursor:"pointer"}}>إلغاء</button>
+                        <button onClick={sendBulkEmail} style={{padding:"8px 18px",background:ui.text,color:"#fff",border:"none",borderRadius:6,fontSize:12.5,fontWeight:500,cursor:"pointer"}}>إرسال</button>
+                      </div>
+                    </div>
+                  </div>
+                )}
               </div>
-            );
-          })()}
+              );
+            })()
+          )}
 
           {/* ─── ADD PRODUCT — legacy tab redirects to the new route ────── */}
           {tab === "add-product" && (
@@ -5185,6 +5443,35 @@ function AdminDash({ go }) {
                     </div>
 
                     <div style={sectionCard}>
+                      <div style={sectionTitle}>حد عميل VIP بالجنيه</div>
+                      <div style={{fontSize:11.5,color:ui.textSub,fontFamily:ui.fontBody,marginBottom:12,padding:"8px 12px",background:"#FAFAFA",borderRadius:6}}>
+                        ⭐ العملاء الذين تجاوز إنفاقهم هذا الحد يحصلون تلقائياً على فئة VIP. يُطبق ليلياً وفور كل طلب جديد.
+                      </div>
+                      <label style={{display:"block",fontSize:12,color:ui.text,fontFamily:ui.fontBody,marginBottom:5}}>الحد (جنيه)</label>
+                      <div style={{display:"grid",gridTemplateColumns:mob?"1fr":"1fr auto",gap:10,alignItems:"end"}}>
+                        <input type="text" inputMode="numeric" pattern="[0-9]*"
+                          key={`vipt-${storeCfg.vip_threshold}`}
+                          defaultValue={String(storeCfg.vip_threshold ?? 5000)}
+                          onBlur={e=>{
+                            const v = Math.max(0, parseInt(e.target.value.replace(/[^0-9]/g,""), 10) || 0);
+                            setStoreCfg({...storeCfg, vip_threshold: v});
+                          }}
+                          placeholder="مثال: 5000"
+                          style={{padding:"10px 14px",border:ui.border,borderRadius:6,background:ui.cardBg,fontFamily:ui.fontBody,fontSize:14,color:ui.text,outline:"none",width:"100%",direction:"ltr",textAlign:"left",boxSizing:"border-box"}}/>
+                        <button onClick={async ()=>{
+                          await saveSetting("store", storeCfg);
+                          // After saving threshold, trigger a server-side recategorize so the
+                          // new rule applies immediately (rather than waiting for 02:00 cron).
+                          try { await fetch("/api/users/recategorize", { method:"POST" }); } catch {}
+                        }}
+                          style={{background:ui.text,color:"#fff",border:"none",padding:"10px 22px",cursor:"pointer",fontSize:13,borderRadius:6,fontFamily:ui.fontBody,fontWeight:500}}>حفظ</button>
+                      </div>
+                      <div style={{fontSize:11,color:ui.textSub,fontFamily:ui.fontBody,marginTop:8}}>
+                        التعديل يعيد تصنيف كل العملاء فوراً.
+                      </div>
+                    </div>
+
+                    <div style={sectionCard}>
                       <div style={sectionTitle}>سياسات المتجر</div>
                       <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"10px 0",borderBottom:`0.5px solid #EEE`}}>
                         <div>
@@ -6645,6 +6932,475 @@ const SwitchToggle = React.memo(function SwitchToggle({ value, onChange, label, 
     </div>
   );
 });
+
+// ─── Customer category labels + colour palette (shared between list + detail)
+const CUST_CAT_LABEL = {
+  new:      "جديد",
+  regular:  "عميل عادي",
+  repeat:   "عميل مكرر",
+  vip:      "VIP",
+  inactive: "غير نشط",
+};
+const CUST_CAT_STYLE = {
+  new:      { bg: "#DBEAFE", fg: "#1D4ED8" }, // blue
+  regular:  { bg: "#F3F4F6", fg: "#525252" }, // gray
+  repeat:   { bg: "#CCFBF1", fg: "#0F766E" }, // teal
+  vip:      { bg: "#FEF3C7", fg: "#92400E" }, // amber/gold
+  inactive: { bg: "#FEE2E2", fg: "#B91C1C" }, // red
+};
+
+// ─── CustomerDetailsPage — module-scope to keep input focus on every keystroke
+function CustomerDetailsPage({ email, ui, mob, C, isSuper, canManageOrders, onBack, refreshList }) {
+  const toast = useToast();
+  const [data, setData] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
+  const [addresses, setAddresses] = useState([]);
+  const [noteDraft, setNoteDraft] = useState("");
+  const [emailOpen, setEmailOpen] = useState(false);
+  const [emailDraft, setEmailDraft] = useState({ subject:"", body:"" });
+  const [couponOpen, setCouponOpen] = useState(false);
+  const [couponDraft, setCouponDraft] = useState({ type:"percent", discount:"10", min_order:"0", max_uses:"1", end_date:"" });
+  const [showAllOrders, setShowAllOrders] = useState(false);
+  const [confirmDel, setConfirmDel] = useState(false);
+
+  const load = useCallback(async () => {
+    setLoading(true); setError(null);
+    try {
+      const [det, addr] = await Promise.all([
+        fetch(`/api/users/${encodeURIComponent(email)}`).then(r => r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))),
+        fetch(`/api/addresses/${encodeURIComponent(email)}`).then(r => r.ok ? r.json() : []),
+      ]);
+      setData(det); setAddresses(Array.isArray(addr) ? addr : []);
+    } catch (e) { setError(e.message); }
+    setLoading(false);
+  }, [email]);
+  useEffect(() => { load(); }, [load]);
+
+  const patchCustomer = async (patch) => {
+    try {
+      const r = await fetch(`/api/users/${encodeURIComponent(email)}`, {
+        method:"PATCH", headers:{"Content-Type":"application/json"},
+        body: JSON.stringify({ ...patch, actor_id: null, actor_name: "Admin" }),
+      });
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      await load(); refreshList && refreshList();
+    } catch (e) { alert(`فشل التحديث: ${e.message}`); }
+  };
+
+  const addNote = async () => {
+    const n = noteDraft.trim();
+    if (!n) return;
+    try {
+      await fetch(`/api/users/${encodeURIComponent(email)}/notes`, {
+        method:"POST", headers:{"Content-Type":"application/json"},
+        body: JSON.stringify({ note: n, author_name: "Admin" }),
+      });
+      setNoteDraft(""); load();
+      toast && toast.show("تمت إضافة الملاحظة");
+    } catch (e) { alert(`فشل الحفظ: ${e.message}`); }
+  };
+
+  const sendEmail = async () => {
+    if (!emailDraft.subject.trim() || !emailDraft.body.trim()) { alert("املأ الموضوع والنص."); return; }
+    try {
+      const r = await fetch(`/api/users/${encodeURIComponent(email)}/email`, {
+        method:"POST", headers:{"Content-Type":"application/json"},
+        body: JSON.stringify({ ...emailDraft, actor_name: "Admin" })
+      });
+      if (!r.ok) { const j = await r.json().catch(()=>({})); throw new Error(j.error || `HTTP ${r.status}`); }
+      toast && toast.show("تم إرسال الإيميل");
+      setEmailOpen(false); setEmailDraft({ subject:"", body:"" }); load();
+    } catch (e) { alert(`فشل الإرسال: ${e.message}`); }
+  };
+
+  const createCoupon = async () => {
+    try {
+      const r = await fetch(`/api/users/${encodeURIComponent(email)}/coupon`, {
+        method:"POST", headers:{"Content-Type":"application/json"},
+        body: JSON.stringify({
+          type: couponDraft.type,
+          discount: Number(couponDraft.discount) || 10,
+          min_order: Number(couponDraft.min_order) || 0,
+          max_uses: Number(couponDraft.max_uses) || 1,
+          end_date: couponDraft.end_date || null,
+          actor_name: "Admin",
+        })
+      });
+      const j = await r.json();
+      if (!r.ok) throw new Error(j.error || `HTTP ${r.status}`);
+      toast && toast.show(`تم إنشاء الكوبون ${j.code}`);
+      setCouponOpen(false); load();
+    } catch (e) { alert(`فشل الإنشاء: ${e.message}`); }
+  };
+
+  const handleDelete = async () => {
+    setConfirmDel(false);
+    try {
+      const r = await fetch(`/api/users/${encodeURIComponent(email)}`, { method:"DELETE" });
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      toast && toast.show("تم حذف العميل");
+      refreshList && refreshList();
+      onBack && onBack();
+    } catch (e) { alert(`فشل الحذف: ${e.message}`); }
+  };
+
+  if (loading) return <div style={{padding:40,textAlign:"center",color:ui.textSub,fontFamily:ui.fontBody,fontSize:13}}>...جارٍ التحميل</div>;
+  if (error || !data) return (
+    <div style={{background:ui.cardBg,border:ui.border,borderRadius:ui.radius,padding:"40px 22px",textAlign:"center"}}>
+      <div style={{fontSize:32,marginBottom:10}}>🔍</div>
+      <div style={{fontSize:14,color:ui.text,fontWeight:500,marginBottom:6}}>العميل غير موجود</div>
+      <div style={{fontSize:12,color:ui.textSub,marginBottom:14}}>{email}</div>
+      <button onClick={onBack} style={{padding:"8px 18px",border:ui.border,borderRadius:6,background:ui.cardBg,fontSize:12.5,color:ui.text,cursor:"pointer"}}>← رجوع للعملاء</button>
+    </div>
+  );
+
+  const { customer: u, orders, notes, activity, favorite_products } = data;
+  const initial = ((u.name || u.email || "?")[0] || "?").toUpperCase();
+  const tier = CUST_CAT_STYLE[u.category] || CUST_CAT_STYLE.regular;
+  const ordersToShow = showAllOrders ? orders : orders.slice(0, 10);
+  const returnsCount = orders.filter(o => o.status === "ملغي").length;
+  const aov = u.totalOrders ? Math.round(u.totalSpent / u.totalOrders) : 0;
+  const phoneDigits = String(u.phone||"").replace(/\D/g,"");
+  const waHref = phoneDigits ? `https://wa.me/${phoneDigits.startsWith("20") ? phoneDigits : `20${phoneDigits.replace(/^0+/,"")}`}` : null;
+  const fmtDate = (iso) => iso ? new Date(iso).toLocaleString("ar-EG", { dateStyle:"short", timeStyle:"short" }) : "—";
+
+  // Activity icon + label
+  const evtIcon = (t) => ({
+    registered:"👤", order_placed:"🛒", order_cancelled:"❌", return:"↩", email_sent:"📧",
+    coupon_created:"🎫", note_added:"📝", login:"🔑", blocked:"🚫", unblocked:"✓",
+    vip_set:"⭐", vip_cleared:"⭐",
+  })[t] || "•";
+  const evtLabel = (t) => ({
+    registered:"التسجيل في الموقع",
+    order_placed:"تم وضع طلب",
+    order_cancelled:"تم إلغاء طلب",
+    return:"تم إنشاء مرتجع",
+    email_sent:"تم إرسال إيميل",
+    coupon_created:"تم إنشاء كوبون",
+    note_added:"تمت إضافة ملاحظة",
+    login:"تسجيل دخول",
+    blocked:"تم حظر الحساب",
+    unblocked:"تم رفع الحظر",
+    vip_set:"تم تعليم كـ VIP يدوياً",
+    vip_cleared:"تم رفع تعليم VIP",
+  })[t] || t;
+
+  const card = { background:ui.cardBg, border:ui.border, borderRadius:ui.radius, padding: mob?"14px":"18px", marginBottom:12 };
+  const cardTitle = { fontSize:13, fontWeight:600, color:ui.text, fontFamily:ui.fontBody, marginBottom:12, paddingBottom:8, borderBottom:"0.5px solid #EEE" };
+
+  return (
+    <div style={{direction:"rtl"}}>
+      {/* Top bar */}
+      <div style={{display:"flex",alignItems:"flex-start",justifyContent:"space-between",marginBottom:14,flexWrap:"wrap",gap:10}}>
+        <div>
+          <button onClick={onBack} style={{background:"transparent",border:"none",cursor:"pointer",fontSize:12.5,color:ui.textSub,padding:"4px 0"}}>← العودة للعملاء</button>
+          <div style={{display:"flex",alignItems:"center",gap:10,marginTop:4}}>
+            <h2 style={{fontSize:20,fontWeight:600,color:ui.text,margin:0}}>{u.name || "—"}</h2>
+            <span style={{fontSize:11,padding:"3px 10px",borderRadius:20,background:tier.bg,color:tier.fg,fontWeight:600}}>{CUST_CAT_LABEL[u.category] || "—"}</span>
+            {u.blocked && <span style={{fontSize:11,padding:"3px 10px",borderRadius:20,background:"#FEE2E2",color:"#B91C1C"}}>محظور</span>}
+          </div>
+          <div style={{fontSize:12,color:ui.textSub,marginTop:2}}>{u.email}</div>
+        </div>
+        <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
+          {waHref && <a href={waHref} target="_blank" rel="noreferrer" style={{padding:"8px 12px",background:"#F0FDF4",border:"1px solid #BBF7D0",borderRadius:6,color:"#15803D",fontSize:12.5,textDecoration:"none"}}>💬 واتساب</a>}
+          <button onClick={()=>setEmailOpen(true)} style={{padding:"8px 12px",background:"transparent",border:ui.border,borderRadius:6,fontSize:12.5,color:ui.text,cursor:"pointer"}}>📧 إيميل</button>
+          <button onClick={()=>setCouponOpen(true)} style={{padding:"8px 12px",background:"transparent",border:ui.border,borderRadius:6,fontSize:12.5,color:ui.text,cursor:"pointer"}}>🎫 كوبون</button>
+          {!u.blocked
+            ? <button onClick={()=>patchCustomer({ blocked: true })} style={{padding:"8px 12px",background:"transparent",border:"1px solid #FCA5A5",borderRadius:6,fontSize:12.5,color:"#B91C1C",cursor:"pointer"}}>🚫 حظر</button>
+            : <button onClick={()=>patchCustomer({ blocked: false })} style={{padding:"8px 12px",background:"transparent",border:"1px solid #BBF7D0",borderRadius:6,fontSize:12.5,color:"#15803D",cursor:"pointer"}}>✓ رفع الحظر</button>}
+          {isSuper && (
+            <button onClick={()=>patchCustomer({ manual_vip_override: !u.manual_vip_override })}
+              style={{padding:"8px 12px",background: u.manual_vip_override ? "#FEF3C7" : "transparent",border: u.manual_vip_override ? "1px solid #FCD34D" : ui.border,borderRadius:6,fontSize:12.5,color: u.manual_vip_override ? "#92400E" : ui.text,cursor:"pointer"}}>
+              ⭐ {u.manual_vip_override ? "VIP يدوي ✓" : "تعليم VIP"}
+            </button>
+          )}
+          {isSuper && (
+            <button onClick={()=>setConfirmDel(true)} style={{padding:"8px 12px",background:"transparent",border:"1px solid #FCA5A5",borderRadius:6,fontSize:12.5,color:"#B91C1C",cursor:"pointer"}}>🗑 حذف</button>
+          )}
+        </div>
+      </div>
+
+      <div style={{display:"grid",gap:12,gridTemplateColumns: mob ? "1fr" : "2fr 1fr"}}>
+        {/* LEFT COLUMN */}
+        <div>
+          {/* Spending summary */}
+          <section style={card}>
+            <div style={cardTitle}>ملخص الإنفاق</div>
+            <div style={{display:"grid",gridTemplateColumns: mob?"1fr 1fr":"repeat(4,1fr)",gap:10}}>
+              <Metric label="إجمالي الإنفاق"   value={(u.totalSpent||0).toLocaleString()} suffix="ج" />
+              <Metric label="عدد الطلبات"      value={u.totalOrders||0} />
+              <Metric label="متوسط قيمة الطلب" value={aov.toLocaleString()} suffix="ج" />
+              <Metric label="عدد المرتجعات"   value={returnsCount} hint={u.totalOrders ? `${Math.round((returnsCount/u.totalOrders)*100)}%` : "—"} />
+            </div>
+          </section>
+
+          {/* Orders */}
+          <section style={card}>
+            <div style={{...cardTitle,display:"flex",justifyContent:"space-between"}}>
+              <span>سجل الطلبات ({orders.length})</span>
+              {orders.length > 10 && (
+                <button onClick={()=>setShowAllOrders(!showAllOrders)} style={{background:"transparent",border:"none",color:"#1D4ED8",fontSize:12,cursor:"pointer"}}>
+                  {showAllOrders ? "عرض أقل" : `عرض كل الطلبات (${orders.length})`}
+                </button>
+              )}
+            </div>
+            {orders.length === 0 ? (
+              <div style={{padding:"22px 8px",textAlign:"center",color:ui.textSub,fontSize:13}}>لم يقم بأي طلب بعد</div>
+            ) : (
+              <div style={{overflowX:"auto"}}>
+                <table style={{width:"100%",borderCollapse:"collapse",direction:"rtl",fontFamily:ui.fontBody,fontSize:12.5,minWidth:600}}>
+                  <thead>
+                    <tr style={{background:ui.sideBg}}>
+                      {["#","التاريخ","المنتجات","الإجمالي","الدفع","الحالة",""].map(h => (
+                        <th key={h} style={{padding:"8px 10px",textAlign:"right",fontSize:11,color:ui.textSub,fontWeight:500}}>{h}</th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {ordersToShow.map(o => (
+                      <tr key={o.id} style={{borderTop:"0.5px solid #EEE"}}>
+                        <td style={{padding:"8px 10px",fontFamily:"monospace",fontSize:12}}>#{o.order_number || o.id}</td>
+                        <td style={{padding:"8px 10px",color:ui.textSub}}>{o.date || "—"}</td>
+                        <td style={{padding:"8px 10px"}}>{(o.items||[]).length}</td>
+                        <td style={{padding:"8px 10px",fontWeight:500}}>{(o.total||0).toLocaleString()} ج</td>
+                        <td style={{padding:"8px 10px",color:ui.textSub}}>{o.payment_method === "cash" ? "كاش" : o.payment_method === "visa" ? "فيزا" : o.payment_method === "wallet" ? "محفظة" : "—"}</td>
+                        <td style={{padding:"8px 10px"}}><span style={{fontSize:10.5,padding:"2px 8px",borderRadius:10,background:"#F3F4F6"}}>{o.status}</span></td>
+                        <td style={{padding:"8px 10px"}}>
+                          <a href={`#admin/orders/${encodeURIComponent(o.id)}`} style={{color:"#1D4ED8",textDecoration:"none",fontSize:12}}>عرض</a>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </section>
+
+          {/* Favorite products */}
+          <section style={card}>
+            <div style={cardTitle}>المنتجات المفضلة</div>
+            {favorite_products.length === 0 ? (
+              <div style={{padding:"14px 0",color:ui.textSub,fontSize:12.5,textAlign:"center"}}>لا توجد بيانات كافية</div>
+            ) : (
+              <div style={{display:"flex",flexDirection:"column",gap:8}}>
+                {favorite_products.map((p,i) => (
+                  <div key={i} style={{display:"flex",alignItems:"center",gap:10,padding:"6px 0",borderTop: i ? "0.5px solid #EEE" : "none"}}>
+                    <div style={{width:36,height:36,borderRadius:6,overflow:"hidden",background:"#F3F4F6",flexShrink:0,display:"flex",alignItems:"center",justifyContent:"center",fontSize:16}}>
+                      {p.img ? <img src={p.img} alt="" style={{width:"100%",height:"100%",objectFit:"cover"}}/> : "🧴"}
+                    </div>
+                    <div style={{flex:1,minWidth:0}}>
+                      <div style={{fontSize:13,color:ui.text,fontWeight:500,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{p.name}</div>
+                      <div style={{fontSize:11,color:ui.textSub,marginTop:2}}>طلب {p.qty} مرة · إجمالي {p.rev.toLocaleString()} ج</div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </section>
+
+          {/* Activity timeline */}
+          <section style={card}>
+            <div style={cardTitle}>سجل النشاط</div>
+            {activity.length === 0 ? (
+              <div style={{padding:"14px 0",color:ui.textSub,fontSize:12.5,textAlign:"center"}}>لا توجد أحداث</div>
+            ) : (
+              <div style={{position:"relative"}}>
+                <div style={{position:"absolute",top:6,bottom:6,insetInlineStart:9,width:2,background:"#E5E7EB"}}/>
+                {activity.map((a,i) => (
+                  <div key={a.id} style={{position:"relative",paddingInlineStart:28,paddingBottom:12}}>
+                    <div style={{position:"absolute",insetInlineStart:0,top:2,width:20,height:20,borderRadius:"50%",background:"#fff",border:"2px solid #E5E7EB",display:"flex",alignItems:"center",justifyContent:"center",fontSize:11}}>{evtIcon(a.event_type)}</div>
+                    <div style={{fontSize:13,color:ui.text,fontWeight:500}}>{evtLabel(a.event_type)}</div>
+                    <div style={{fontSize:11,color:ui.textSub,marginTop:2}}>
+                      {a.actor_name || "النظام"} · {fmtDate(a.created_at)}
+                      {a.event_data && a.event_data.order_number && ` · #${a.event_data.order_number} (${(a.event_data.total||0).toLocaleString()} ج)`}
+                      {a.event_data && a.event_data.subject && ` · ${a.event_data.subject}`}
+                      {a.event_data && a.event_data.code    && ` · ${a.event_data.code}`}
+                      {a.event_data && a.event_data.preview && ` · "${a.event_data.preview}..."`}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </section>
+
+          {/* Internal notes */}
+          <section style={card}>
+            <div style={cardTitle}>ملاحظات داخلية ({notes.length})</div>
+            <div style={{display:"flex",gap:8,marginBottom:12}}>
+              <textarea value={noteDraft} onChange={e=>setNoteDraft(e.target.value)}
+                placeholder="ملاحظة جديدة (تظهر للأدمن فقط)..."
+                rows={2}
+                style={{flex:1,padding:"9px 11px",border:ui.border,borderRadius:6,fontSize:13,direction:"rtl",resize:"vertical",minHeight:44,fontFamily:ui.fontBody,boxSizing:"border-box"}}/>
+              <button onClick={addNote} disabled={!noteDraft.trim()}
+                style={{padding:"0 18px",background: noteDraft.trim() ? ui.text : "#9CA3AF",color:"#fff",border:"none",borderRadius:6,fontSize:13,cursor: noteDraft.trim()?"pointer":"not-allowed",whiteSpace:"nowrap"}}>إضافة</button>
+            </div>
+            {notes.length === 0 ? (
+              <div style={{padding:"10px 0",color:ui.textSub,fontSize:12,textAlign:"center"}}>لا توجد ملاحظات بعد</div>
+            ) : (
+              <div style={{display:"flex",flexDirection:"column",gap:8}}>
+                {notes.map(n => (
+                  <div key={n.id} style={{padding:"10px 12px",background:"#FFFBEB",border:"1px solid #FDE68A",borderRadius:6}}>
+                    <div style={{fontSize:13,color:"#7C2D12",lineHeight:1.7,whiteSpace:"pre-wrap"}}>{n.note}</div>
+                    <div style={{fontSize:11,color:"#92400E",marginTop:5}}>{n.author_name || "—"} · {fmtDate(n.created_at)}</div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </section>
+        </div>
+
+        {/* RIGHT COLUMN */}
+        <div>
+          {/* Customer info */}
+          <section style={card}>
+            <div style={cardTitle}>معلومات العميل</div>
+            <div style={{display:"flex",flexDirection:"column",alignItems:"center",gap:8,paddingBottom:12,borderBottom:"0.5px solid #EEE",marginBottom:12}}>
+              <div style={{width:72,height:72,borderRadius:"50%",background:tier.bg,color:tier.fg,display:"flex",alignItems:"center",justifyContent:"center",fontSize:28,fontWeight:600}}>{initial}</div>
+              <div style={{fontSize:14,color:ui.text,fontWeight:500}}>{u.name || "—"}</div>
+            </div>
+            <DetailRow label="البريد"      value={u.email} copyable />
+            <DetailRow label="الهاتف"      value={u.phone || "—"} copyable={!!u.phone} ltr />
+            <DetailRow label="تاريخ الميلاد" value={u.date_of_birth || "—"} />
+            <DetailRow label="النوع"       value={u.gender || "—"} />
+            <DetailRow label="التسجيل"      value={fmtDate(u.registered_at || u.firstOrder)} />
+            <DetailRow label="آخر دخول"     value={u.last_login_date ? fmtDate(u.last_login_date) : "—"} />
+          </section>
+
+          {/* Addresses */}
+          <section style={card}>
+            <div style={cardTitle}>العناوين المحفوظة ({addresses.length})</div>
+            {addresses.length === 0 ? (
+              <div style={{padding:"10px 0",color:ui.textSub,fontSize:12,textAlign:"center"}}>لا توجد عناوين</div>
+            ) : (
+              <div style={{display:"flex",flexDirection:"column",gap:8}}>
+                {addresses.map(a => (
+                  <div key={a.id} style={{padding:"10px 12px",border: a.isDefault ? `1.5px solid ${C.go}` : ui.border,borderRadius:6,fontSize:12.5,position:"relative"}}>
+                    {a.isDefault && <span style={{position:"absolute",top:6,insetInlineEnd:6,background:C.go,color:"#fff",fontSize:9,padding:"2px 7px",borderRadius:3}}>افتراضي</span>}
+                    <div style={{fontWeight:500,color:ui.text,marginBottom:4}}>{a.fullName || u.name || "—"}</div>
+                    <div style={{color:ui.textSub,lineHeight:1.7}}>
+                      {[a.street, a.building, a.district].filter(Boolean).join("، ")}<br/>
+                      {a.city ? `${a.city}، ` : ""}{a.governorate || ""}
+                      {a.lat && a.lng && (
+                        <a href={`https://www.google.com/maps?q=${a.lat},${a.lng}`} target="_blank" rel="noreferrer"
+                          style={{display:"block",color:"#1D4ED8",textDecoration:"none",marginTop:4,fontSize:11}}>
+                          🗺 {Number(a.lat).toFixed(4)}, {Number(a.lng).toFixed(4)}
+                        </a>
+                      )}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </section>
+
+          {/* Preferences */}
+          <section style={card}>
+            <div style={cardTitle}>التفضيلات</div>
+            <DetailRow label="اللغة المفضلة"     value={u.preferred_lang === "en" ? "English" : "العربية"} />
+            <DetailRow label="إيميلات تسويقية"   value={u.marketing_emails_enabled ? "مفعّل" : "موقوف"} />
+            <DetailRow label="إشعارات واتساب"    value={u.whatsapp_notifications_enabled ? "مفعّل" : "موقوف"} />
+          </section>
+
+          {/* Account status */}
+          <section style={card}>
+            <div style={cardTitle}>حالة الحساب</div>
+            <DetailRow label="الحالة" value={u.blocked ? "محظور" : "نشط"} valueColor={u.blocked ? "#B91C1C" : "#15803D"} />
+            <DetailRow label="التحقق من الإيميل" value="—" />
+            <DetailRow label="التحقق من الهاتف"  value="—" />
+            <DetailRow label="VIP يدوي" value={u.manual_vip_override ? "نعم" : "لا"} />
+          </section>
+        </div>
+      </div>
+
+      {/* Email modal */}
+      {emailOpen && (
+        <div onClick={()=>setEmailOpen(false)} style={{position:"fixed",inset:0,background:"rgba(0,0,0,.55)",zIndex:800,display:"flex",alignItems:"center",justifyContent:"center",padding:16,direction:"rtl"}}>
+          <div onClick={e=>e.stopPropagation()} style={{background:ui.cardBg,maxWidth:480,width:"100%",padding:22,borderRadius:8,boxShadow:"0 12px 48px rgba(0,0,0,.25)"}}>
+            <h3 style={{fontSize:15,fontWeight:600,color:ui.text,margin:"0 0 4px"}}>إرسال إيميل</h3>
+            <div style={{fontSize:12.5,color:ui.textSub,marginBottom:12}}>إلى {u.email}</div>
+            <input value={emailDraft.subject} onChange={e=>setEmailDraft({...emailDraft, subject:e.target.value})}
+              placeholder="الموضوع" style={{width:"100%",padding:"9px 11px",border:ui.border,borderRadius:6,fontSize:13,marginBottom:10,boxSizing:"border-box",direction:"rtl"}}/>
+            <textarea rows={8} value={emailDraft.body} onChange={e=>setEmailDraft({...emailDraft, body:e.target.value})}
+              placeholder={`أهلاً ${u.name || u.email},\n\n...`} style={{width:"100%",padding:"9px 11px",border:ui.border,borderRadius:6,fontSize:13,resize:"vertical",minHeight:160,boxSizing:"border-box",direction:"rtl",fontFamily:ui.fontBody}}/>
+            <div style={{fontSize:11,color:ui.textSub,marginTop:4}}>متاح: {`{{customer_name}}, {{order_count}}, {{total_spent}}`}</div>
+            <div style={{display:"flex",gap:8,justifyContent:"flex-end",marginTop:14}}>
+              <button onClick={()=>setEmailOpen(false)} style={{padding:"8px 16px",background:"transparent",border:ui.border,borderRadius:6,fontSize:12.5,color:ui.textSub,cursor:"pointer"}}>إلغاء</button>
+              <button onClick={sendEmail} style={{padding:"8px 18px",background:ui.text,color:"#fff",border:"none",borderRadius:6,fontSize:12.5,fontWeight:500,cursor:"pointer"}}>إرسال</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Coupon modal */}
+      {couponOpen && (
+        <div onClick={()=>setCouponOpen(false)} style={{position:"fixed",inset:0,background:"rgba(0,0,0,.55)",zIndex:800,display:"flex",alignItems:"center",justifyContent:"center",padding:16,direction:"rtl"}}>
+          <div onClick={e=>e.stopPropagation()} style={{background:ui.cardBg,maxWidth:420,width:"100%",padding:22,borderRadius:8,boxShadow:"0 12px 48px rgba(0,0,0,.25)"}}>
+            <h3 style={{fontSize:15,fontWeight:600,color:ui.text,margin:"0 0 12px"}}>كوبون خاص بهذا العميل</h3>
+            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,marginBottom:10}}>
+              <div><label style={{fontSize:11.5,color:ui.textSub,display:"block",marginBottom:4}}>النوع</label>
+                <select value={couponDraft.type} onChange={e=>setCouponDraft({...couponDraft, type:e.target.value})} style={{width:"100%",padding:"7px 10px",border:ui.border,borderRadius:6,fontSize:12.5}}>
+                  <option value="percent">نسبة %</option>
+                  <option value="fixed">مبلغ ثابت</option>
+                  <option value="free_shipping">شحن مجاني</option>
+                </select>
+              </div>
+              <div><label style={{fontSize:11.5,color:ui.textSub,display:"block",marginBottom:4}}>القيمة</label>
+                <input value={couponDraft.discount} onChange={e=>setCouponDraft({...couponDraft, discount:e.target.value.replace(/[^0-9.]/g,"")})}
+                  style={{width:"100%",padding:"7px 10px",border:ui.border,borderRadius:6,fontSize:12.5,direction:"rtl",boxSizing:"border-box"}} inputMode="decimal"/></div>
+              <div><label style={{fontSize:11.5,color:ui.textSub,display:"block",marginBottom:4}}>حد أدنى للطلب</label>
+                <input value={couponDraft.min_order} onChange={e=>setCouponDraft({...couponDraft, min_order:e.target.value.replace(/[^0-9.]/g,"")})}
+                  style={{width:"100%",padding:"7px 10px",border:ui.border,borderRadius:6,fontSize:12.5,direction:"rtl",boxSizing:"border-box"}} inputMode="decimal"/></div>
+              <div><label style={{fontSize:11.5,color:ui.textSub,display:"block",marginBottom:4}}>عدد مرات الاستخدام</label>
+                <input value={couponDraft.max_uses} onChange={e=>setCouponDraft({...couponDraft, max_uses:e.target.value.replace(/[^0-9]/g,"")})}
+                  style={{width:"100%",padding:"7px 10px",border:ui.border,borderRadius:6,fontSize:12.5,direction:"rtl",boxSizing:"border-box"}} inputMode="numeric"/></div>
+            </div>
+            <div><label style={{fontSize:11.5,color:ui.textSub,display:"block",marginBottom:4}}>تاريخ انتهاء (اختياري)</label>
+              <input type="date" value={couponDraft.end_date} onChange={e=>setCouponDraft({...couponDraft, end_date:e.target.value})}
+                style={{width:"100%",padding:"7px 10px",border:ui.border,borderRadius:6,fontSize:12.5,direction:"ltr",boxSizing:"border-box"}}/></div>
+            <div style={{display:"flex",gap:8,justifyContent:"flex-end",marginTop:14}}>
+              <button onClick={()=>setCouponOpen(false)} style={{padding:"8px 16px",background:"transparent",border:ui.border,borderRadius:6,fontSize:12.5,color:ui.textSub,cursor:"pointer"}}>إلغاء</button>
+              <button onClick={createCoupon} style={{padding:"8px 18px",background:ui.text,color:"#fff",border:"none",borderRadius:6,fontSize:12.5,fontWeight:500,cursor:"pointer"}}>إنشاء الكوبون</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Delete confirmation */}
+      {confirmDel && (
+        <div onClick={()=>setConfirmDel(false)} style={{position:"fixed",inset:0,background:"rgba(0,0,0,.55)",zIndex:800,display:"flex",alignItems:"center",justifyContent:"center",padding:16,direction:"rtl"}}>
+          <div onClick={e=>e.stopPropagation()} style={{background:ui.cardBg,maxWidth:420,width:"100%",padding:22,borderRadius:8,boxShadow:"0 12px 48px rgba(0,0,0,.25)"}}>
+            <h3 style={{fontSize:15,fontWeight:600,color:ui.text,margin:"0 0 4px"}}>حذف العميل نهائياً</h3>
+            <div style={{fontSize:13,color:ui.textSub,marginBottom:14}}>سيتم حذف <b style={{color:ui.text}}>{u.name || u.email}</b>، عناوينه، ملاحظاته، وسجل نشاطه. لا يمكن التراجع.</div>
+            <div style={{display:"flex",gap:8,justifyContent:"flex-end"}}>
+              <button onClick={()=>setConfirmDel(false)} style={{padding:"8px 16px",background:"transparent",border:ui.border,borderRadius:6,fontSize:12.5,color:ui.textSub,cursor:"pointer"}}>تراجع</button>
+              <button onClick={handleDelete} style={{padding:"8px 18px",background:"#DC2626",color:"#fff",border:"none",borderRadius:6,fontSize:12.5,cursor:"pointer"}}>تأكيد الحذف</button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// Tiny label/value row for the customer details sidebar.
+function DetailRow({ label, value, copyable, ltr, valueColor }) {
+  const [copied, setCopied] = useState(false);
+  return (
+    <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"7px 0",borderBottom:"0.5px solid #F3F4F6"}}>
+      <span style={{fontSize:11.5,color:"#6B7280",fontFamily:"inherit"}}>{label}</span>
+      <div style={{display:"flex",alignItems:"center",gap:6}}>
+        <span style={{fontSize:12.5,color: valueColor || "#1A1A1A",direction: ltr?"ltr":"rtl",wordBreak:"break-all",textAlign:"left"}}>{value}</span>
+        {copyable && value && value !== "—" && (
+          <button onClick={async ()=>{ try { await navigator.clipboard.writeText(String(value)); setCopied(true); setTimeout(()=>setCopied(false),1200); } catch {} }}
+            title="نسخ" style={{background:"transparent",border:"none",cursor:"pointer",padding:0,fontSize:12,color:"#6B7280"}}>
+            {copied ? "✓" : "📋"}
+          </button>
+        )}
+      </div>
+    </div>
+  );
+}
 
 // ─── Product Row Menu (3-dots menu in admin Products list) ───────────────────
 // Tiny popover with تكرار / حذف / أرشفة actions. Closing on outside click

@@ -11,6 +11,7 @@ const crypto     = require('crypto');
 // them lazily so the server still boots if a deploy skipped the install step.
 let multer = null;  try { multer = require('multer'); } catch { console.warn('[nawra-api] ! multer not installed — image upload endpoint disabled until `npm i multer` runs in api/'); }
 let sharp  = null;  try { sharp  = require('sharp');  } catch { console.warn('[nawra-api] ! sharp not installed — image conversion endpoint disabled until `npm i sharp` runs in api/'); }
+let cron   = null;  try { cron   = require('node-cron'); } catch { console.warn('[nawra-api] ! node-cron not installed — nightly customer-recategorize disabled until `npm i node-cron` runs in api/'); }
 
 const app  = express();
 const PORT = 3001;
@@ -349,6 +350,48 @@ db.exec(`
   )
 `);
 try { db.exec('CREATE INDEX IF NOT EXISTS idx_variants_product ON product_variants(product_id)'); } catch {}
+
+// ── Customer (users) CRM additions ─────────────────────────────────────────
+// Cached/derived fields live on the row so the customers list query stays a
+// single, fast SELECT — no per-row joins. They're refreshed:
+//   1. live, whenever an order is placed/cancelled (cheap incremental update)
+//   2. nightly via the node-cron job below (full recompute for date drift —
+//      especially the "inactive after 90 days" rule)
+ensureColumn('users', 'category',              "TEXT DEFAULT 'new'");
+ensureColumn('users', 'manual_vip_override',   'INTEGER DEFAULT 0');
+ensureColumn('users', 'blocked',               'INTEGER DEFAULT 0');
+ensureColumn('users', 'registered_at',         'DATETIME');
+ensureColumn('users', 'last_login_date',       'DATETIME');
+ensureColumn('users', 'preferred_lang',        "TEXT DEFAULT 'ar'");
+ensureColumn('users', 'marketing_emails_enabled',     'INTEGER DEFAULT 1');
+ensureColumn('users', 'whatsapp_notifications_enabled','INTEGER DEFAULT 1');
+ensureColumn('users', 'date_of_birth',         'TEXT');
+ensureColumn('users', 'gender',                'TEXT');
+
+db.exec(`
+  CREATE TABLE IF NOT EXISTS customer_notes (
+    id            TEXT PRIMARY KEY,
+    customer_email TEXT NOT NULL,
+    author_id     TEXT,
+    author_name   TEXT,
+    note          TEXT,
+    created_at    DATETIME DEFAULT CURRENT_TIMESTAMP
+  )
+`);
+try { db.exec('CREATE INDEX IF NOT EXISTS idx_notes_customer ON customer_notes(customer_email)'); } catch {}
+
+db.exec(`
+  CREATE TABLE IF NOT EXISTS customer_activity_log (
+    id            TEXT PRIMARY KEY,
+    customer_email TEXT NOT NULL,
+    event_type    TEXT NOT NULL,            -- registered | order_placed | order_cancelled | return | email_sent | coupon_created | note_added | login | blocked | unblocked | vip_set | vip_cleared
+    event_data    TEXT DEFAULT '{}',        -- JSON blob
+    actor_id      TEXT,
+    actor_name    TEXT,
+    created_at    DATETIME DEFAULT CURRENT_TIMESTAMP
+  )
+`);
+try { db.exec('CREATE INDEX IF NOT EXISTS idx_activity_customer ON customer_activity_log(customer_email, created_at)'); } catch {}
 
 // Slug uniqueness — best-effort. We add a partial unique index that excludes
 // NULLs so legacy rows without a slug don't all collide on NULL.
@@ -726,7 +769,13 @@ app.post('/api/orders', (req, res) => {
       JSON.stringify(history)
     );
 
-    if (userEmail) upsertUser.run(userEmail, name||null, phone||null, Number(total)||0);
+    if (userEmail) {
+      upsertUser.run(userEmail, name||null, phone||null, Number(total)||0);
+      // Ensure registered_at is set for legacy rows where it's NULL.
+      db.prepare("UPDATE users SET registered_at = COALESCE(registered_at, firstOrder) WHERE email = ?").run(userEmail);
+      recategorizeOne(userEmail);
+      logCustomerActivity(userEmail, 'order_placed', { order_id: String(id), order_number: orderNumber, total: Number(total)||0 });
+    }
 
     // Reserve stock so the inventory page reflects what's locked to this order.
     const order = db.prepare('SELECT * FROM orders WHERE id = ?').get(String(id));
@@ -834,6 +883,13 @@ app.patch('/api/orders/:id', (req, res) => {
     if (!info.changes) return res.status(404).json({ error: 'not found' });
 
     const fresh = db.prepare('SELECT * FROM orders WHERE id = ?').get(cur.id);
+    // Log cancellation to the customer's activity timeline.
+    if (status === 'ملغي' && cur.userEmail) {
+      logCustomerActivity(cur.userEmail, 'order_cancelled',
+        { order_id: cur.id, order_number: cur.order_number, reason: cancellation_reason || null },
+        actor_id, actor_name);
+      recategorizeOne(cur.userEmail);
+    }
     res.json({ ok: true, order: hydrateOrder(fresh) });
   } catch (e) { console.error('PATCH /api/orders error:', e); res.status(500).json({ error: e.message }); }
 });
@@ -862,15 +918,392 @@ app.post('/api/orders/:id/email-invoice', async (req, res) => {
   }
 });
 
-// ── USERS ─────────────────────────────────────────────────────────────────────
-app.get('/api/users', (_req, res) => {
+// ── USERS / CUSTOMERS CRM ────────────────────────────────────────────────────
+// Categorization rules (priority order):
+//   vip       — manual_vip_override OR total spent >= threshold
+//   inactive  — last order > 90 days ago
+//   repeat    — 4+ orders
+//   regular   — 1-3 orders
+//   new       — registered < 30d ago AND zero orders (also default)
+function getVipThreshold() {
   try {
+    const row = db.prepare('SELECT value FROM settings WHERE key = ?').get('store');
+    if (!row) return 5000;
+    const v = JSON.parse(row.value || '{}');
+    const n = Number(v.vip_threshold);
+    return Number.isFinite(n) && n > 0 ? n : 5000;
+  } catch { return 5000; }
+}
+
+function categorize(u, vipThreshold) {
+  if (!u) return 'new';
+  const vipT = vipThreshold || getVipThreshold();
+  if (u.manual_vip_override || (Number(u.totalSpent) || 0) >= vipT) return 'vip';
+  if (u.lastOrder) {
+    const days = (Date.now() - new Date(u.lastOrder).getTime()) / 86400000;
+    if (Number.isFinite(days) && days > 90) return 'inactive';
+  }
+  const oc = Number(u.totalOrders) || 0;
+  if (oc >= 4) return 'repeat';
+  if (oc >= 1) return 'regular';
+  // No orders → either brand-new (within 30d of registration) or just empty
+  if (u.registered_at) {
+    const days = (Date.now() - new Date(u.registered_at).getTime()) / 86400000;
+    if (Number.isFinite(days) && days <= 30) return 'new';
+  }
+  return 'new';
+}
+
+const recategorizeOneStmt = db.prepare('UPDATE users SET category = ? WHERE email = ?');
+function recategorizeOne(email) {
+  const u = db.prepare('SELECT * FROM users WHERE email = ?').get(email);
+  if (!u) return null;
+  const cat = categorize(u);
+  recategorizeOneStmt.run(cat, email);
+  return cat;
+}
+function recategorizeAll() {
+  const vipT = getVipThreshold();
+  const rows = db.prepare('SELECT email, totalSpent, totalOrders, lastOrder, registered_at, manual_vip_override FROM users').all();
+  let changed = 0;
+  const upd = db.prepare('UPDATE users SET category = ? WHERE email = ? AND (category IS NULL OR category != ?)');
+  db.transaction(() => {
+    rows.forEach(r => {
+      const c = categorize(r, vipT);
+      const info = upd.run(c, r.email, c);
+      if (info.changes) changed += 1;
+    });
+  })();
+  return { total: rows.length, changed };
+}
+
+function logCustomerActivity(email, event_type, event_data = {}, actor_id = null, actor_name = null) {
+  if (!email) return;
+  try {
+    const id = `ca_${Date.now().toString(36)}_${Math.random().toString(36).slice(2,5)}`;
+    db.prepare(`
+      INSERT INTO customer_activity_log (id, customer_email, event_type, event_data, actor_id, actor_name)
+      VALUES (?,?,?,?,?,?)
+    `).run(id, email, event_type, JSON.stringify(event_data || {}), actor_id, actor_name);
+  } catch (e) { console.warn('[nawra-api] activity log skipped:', e.message); }
+}
+
+// Hydrate user row → JSON-friendly shape.
+function rowToCustomer(r) {
+  if (!r) return null;
+  return {
+    ...r,
+    manual_vip_override: !!r.manual_vip_override,
+    blocked: !!r.blocked,
+    marketing_emails_enabled:     !!r.marketing_emails_enabled,
+    whatsapp_notifications_enabled: !!r.whatsapp_notifications_enabled,
+    totalSpent: Number(r.totalSpent) || 0,
+    totalOrders: Number(r.totalOrders) || 0,
+  };
+}
+
+// GET /api/users — paginated list with filters + sort.
+// Query params:
+//   page, perPage (default 25)
+//   q (name OR email OR phone substring)
+//   category (all|new|regular|repeat|vip|inactive)
+//   reg_from, reg_to       (registration date — ISO YYYY-MM-DD)
+//   order_from, order_to   (last order date)
+//   sort (newest|top_spender|top_orders|last_activity, default last_activity)
+//   ids=csv  (for bulk operations: return ALL matching rows ignoring pagination)
+app.get('/api/users', (req, res) => {
+  try {
+    const where = ['1=1']; const params = [];
+    if (req.query.q) {
+      where.push('(LOWER(COALESCE(name,\'\')) LIKE ? OR LOWER(email) LIKE ? OR LOWER(COALESCE(phone,\'\')) LIKE ?)');
+      const like = `%${String(req.query.q).toLowerCase()}%`;
+      params.push(like, like, like);
+    }
+    if (req.query.category && req.query.category !== 'all') {
+      where.push('category = ?'); params.push(req.query.category);
+    }
+    if (req.query.reg_from)   { where.push('registered_at >= ?'); params.push(`${req.query.reg_from} 00:00:00`); }
+    if (req.query.reg_to)     { where.push('registered_at <= ?'); params.push(`${req.query.reg_to} 23:59:59`); }
+    if (req.query.order_from) { where.push('lastOrder >= ?');     params.push(`${req.query.order_from} 00:00:00`); }
+    if (req.query.order_to)   { where.push('lastOrder <= ?');     params.push(`${req.query.order_to} 23:59:59`); }
+
+    let orderBy = 'COALESCE(lastOrder, registered_at) DESC';
+    switch (req.query.sort) {
+      case 'newest':       orderBy = 'COALESCE(registered_at, firstOrder) DESC'; break;
+      case 'top_spender':  orderBy = 'totalSpent DESC'; break;
+      case 'top_orders':   orderBy = 'totalOrders DESC'; break;
+      case 'last_activity':
+      default: orderBy = 'COALESCE(last_login_date, lastOrder, registered_at) DESC';
+    }
+
+    const baseSql = `FROM users WHERE ${where.join(' AND ')}`;
+    const total = db.prepare(`SELECT COUNT(*) AS n ${baseSql}`).get(...params).n;
+
+    const page    = Math.max(1, Number(req.query.page)    || 1);
+    const perPage = Math.min(200, Math.max(1, Number(req.query.perPage) || 25));
+    const offset  = (page - 1) * perPage;
+
+    // Bulk mode — caller wants the full filtered set (used by CSV export +
+    // "select all matching" bulk actions). Capped to a safety ceiling.
+    const isBulk = req.query.bulk === '1';
+    const limit = isBulk ? Math.min(5000, total) : perPage;
+    const off   = isBulk ? 0 : offset;
+
     const rows = db.prepare(`
-      SELECT email, name, phone, firstOrder, lastOrder, totalOrders, totalSpent
-      FROM users ORDER BY lastOrder DESC
-    `).all();
+      SELECT email, name, phone, firstOrder, lastOrder,
+             totalOrders, totalSpent, category, manual_vip_override,
+             blocked, registered_at, last_login_date,
+             marketing_emails_enabled, whatsapp_notifications_enabled,
+             date_of_birth, gender, preferred_lang
+      ${baseSql} ORDER BY ${orderBy} LIMIT ? OFFSET ?
+    `).all(...params, limit, off).map(rowToCustomer);
+
+    res.json({ total, page, perPage, rows });
+  } catch (e) { console.error('GET /api/users error:', e); res.status(500).json({ error: e.message }); }
+});
+
+// GET /api/users/aggregates — KPI summary for the customers list header
+app.get('/api/users/aggregates', (_req, res) => {
+  try {
+    const total = db.prepare('SELECT COUNT(*) AS n FROM users').get().n;
+    const now = new Date();
+    const startOfThisMonth = new Date(now.getFullYear(), now.getMonth(), 1).toISOString().slice(0,10) + ' 00:00:00';
+    const startOfLastMonth = new Date(now.getFullYear(), now.getMonth() - 1, 1).toISOString().slice(0,10) + ' 00:00:00';
+    const newThisMonth = db.prepare('SELECT COUNT(*) AS n FROM users WHERE COALESCE(registered_at, firstOrder) >= ?').get(startOfThisMonth).n;
+    const newLastMonth = db.prepare('SELECT COUNT(*) AS n FROM users WHERE COALESCE(registered_at, firstOrder) >= ? AND COALESCE(registered_at, firstOrder) < ?').get(startOfLastMonth, startOfThisMonth).n;
+    const vip = db.prepare("SELECT COUNT(*) AS n FROM users WHERE category = 'vip'").get().n;
+    const repeatCust = db.prepare('SELECT COUNT(*) AS n FROM users WHERE totalOrders >= 2').get().n;
+    const repeatRate = total ? Math.round((repeatCust / total) * 100) : 0;
+    const totalSpentAll = db.prepare('SELECT COALESCE(SUM(totalSpent), 0) AS s FROM users').get().s;
+    const clv = total ? Math.round(totalSpentAll / total) : 0;
+    const newChangePct = newLastMonth ? Math.round(((newThisMonth - newLastMonth) / newLastMonth) * 100) : (newThisMonth ? 100 : 0);
+    res.json({
+      total_customers: total,
+      new_this_month: newThisMonth,
+      new_change_pct: newChangePct,
+      vip_count: vip,
+      repeat_rate_pct: repeatRate,
+      avg_clv: clv,
+    });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// GET /api/users/:email — full record (computed fields, address list excluded —
+// the addresses endpoint is its own thing)
+app.get('/api/users/:email', (req, res) => {
+  try {
+    const email = decodeURIComponent(req.params.email);
+    const u = db.prepare('SELECT * FROM users WHERE email = ?').get(email);
+    if (!u) return res.status(404).json({ error: 'not found' });
+    const orders = db.prepare(`SELECT * FROM orders WHERE userEmail = ? ORDER BY created_at DESC LIMIT 50`).all(email).map(hydrateOrder);
+    const notes  = db.prepare(`SELECT * FROM customer_notes WHERE customer_email = ? ORDER BY created_at DESC`).all(email);
+    const activity = db.prepare(`SELECT * FROM customer_activity_log WHERE customer_email = ? ORDER BY created_at DESC LIMIT 100`).all(email).map(r => ({
+      ...r, event_data: (() => { try { return JSON.parse(r.event_data||'{}'); } catch { return {}; } })(),
+    }));
+    // Favorite products — aggregate from this user's items
+    const favMap = new Map();
+    orders.forEach(o => (o.items || []).forEach(it => {
+      const key = it.name || it.nameAr || '—';
+      const prev = favMap.get(key) || { name: key, qty: 0, rev: 0, img: it.img || null };
+      prev.qty += Number(it.qty) || 0;
+      prev.rev += (Number(it.price) || 0) * (Number(it.qty) || 0);
+      if (!prev.img && it.img) prev.img = it.img;
+      favMap.set(key, prev);
+    }));
+    const favorite_products = Array.from(favMap.values()).sort((a,b) => b.qty - a.qty).slice(0, 5);
+    res.json({
+      customer: rowToCustomer(u),
+      orders,
+      notes,
+      activity,
+      favorite_products,
+    });
+  } catch (e) { console.error('GET /api/users/:email error:', e); res.status(500).json({ error: e.message }); }
+});
+
+// POST /api/users — create a customer manually (no orders yet).
+app.post('/api/users', (req, res) => {
+  try {
+    const { email, name, phone, date_of_birth, gender, preferred_lang } = req.body || {};
+    if (!email) return res.status(400).json({ error: 'email required' });
+    db.prepare(`
+      INSERT INTO users (email, name, phone, registered_at, totalOrders, totalSpent, category,
+                         date_of_birth, gender, preferred_lang)
+      VALUES (?, ?, ?, datetime('now'), 0, 0, 'new', ?, ?, ?)
+      ON CONFLICT(email) DO NOTHING
+    `).run(email, name || null, phone || null, date_of_birth || null, gender || null, preferred_lang || 'ar');
+    recategorizeOne(email);
+    logCustomerActivity(email, 'registered', { manual: true });
+    const u = db.prepare('SELECT * FROM users WHERE email = ?').get(email);
+    res.json(rowToCustomer(u));
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// PATCH /api/users/:email — block, unblock, toggle VIP, update marketing/lang
+app.patch('/api/users/:email', (req, res) => {
+  try {
+    const email = decodeURIComponent(req.params.email);
+    const cur = db.prepare('SELECT * FROM users WHERE email = ?').get(email);
+    if (!cur) return res.status(404).json({ error: 'not found' });
+    const p = req.body || {};
+    const sets = []; const vals = [];
+    const allow = ['name','phone','date_of_birth','gender','preferred_lang'];
+    allow.forEach(c => { if (Object.prototype.hasOwnProperty.call(p, c)) { sets.push(`${c} = ?`); vals.push(p[c]); } });
+    if (Object.prototype.hasOwnProperty.call(p, 'blocked'))              { sets.push('blocked = ?');              vals.push(p.blocked ? 1 : 0); }
+    if (Object.prototype.hasOwnProperty.call(p, 'manual_vip_override')) { sets.push('manual_vip_override = ?'); vals.push(p.manual_vip_override ? 1 : 0); }
+    if (Object.prototype.hasOwnProperty.call(p, 'marketing_emails_enabled'))     { sets.push('marketing_emails_enabled = ?');     vals.push(p.marketing_emails_enabled ? 1 : 0); }
+    if (Object.prototype.hasOwnProperty.call(p, 'whatsapp_notifications_enabled')){ sets.push('whatsapp_notifications_enabled = ?');vals.push(p.whatsapp_notifications_enabled ? 1 : 0); }
+    if (Object.prototype.hasOwnProperty.call(p, 'last_login_date'))      { sets.push('last_login_date = ?'); vals.push(p.last_login_date); }
+    if (!sets.length) return res.json({ ok: true, noop: true });
+    vals.push(email);
+    db.prepare(`UPDATE users SET ${sets.join(', ')} WHERE email = ?`).run(...vals);
+    recategorizeOne(email);
+    // Log block/unblock and VIP toggle for the audit timeline
+    if (Object.prototype.hasOwnProperty.call(p, 'blocked')) {
+      logCustomerActivity(email, p.blocked ? 'blocked' : 'unblocked', {}, p.actor_id, p.actor_name);
+    }
+    if (Object.prototype.hasOwnProperty.call(p, 'manual_vip_override')) {
+      logCustomerActivity(email, p.manual_vip_override ? 'vip_set' : 'vip_cleared', {}, p.actor_id, p.actor_name);
+    }
+    const u = db.prepare('SELECT * FROM users WHERE email = ?').get(email);
+    res.json(rowToCustomer(u));
+  } catch (e) { console.error('PATCH /api/users error:', e); res.status(500).json({ error: e.message }); }
+});
+
+// DELETE /api/users/:email — super-admin only (frontend gates this).
+app.delete('/api/users/:email', (req, res) => {
+  try {
+    const email = decodeURIComponent(req.params.email);
+    db.prepare('DELETE FROM customer_notes WHERE customer_email = ?').run(email);
+    db.prepare('DELETE FROM customer_activity_log WHERE customer_email = ?').run(email);
+    db.prepare('DELETE FROM addresses WHERE userId = ?').run(email);
+    const info = db.prepare('DELETE FROM users WHERE email = ?').run(email);
+    if (!info.changes) return res.status(404).json({ error: 'not found' });
+    res.json({ ok: true });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// Notes for one customer
+app.get('/api/users/:email/notes', (req, res) => {
+  try {
+    const email = decodeURIComponent(req.params.email);
+    const rows = db.prepare('SELECT * FROM customer_notes WHERE customer_email = ? ORDER BY created_at DESC').all(email);
     res.json(rows);
   } catch (e) { res.status(500).json({ error: e.message }); }
+});
+app.post('/api/users/:email/notes', (req, res) => {
+  try {
+    const email = decodeURIComponent(req.params.email);
+    const { note, author_id, author_name } = req.body || {};
+    if (!note || !String(note).trim()) return res.status(400).json({ error: 'note required' });
+    const id = `cn_${Date.now().toString(36)}_${Math.random().toString(36).slice(2,5)}`;
+    db.prepare(`
+      INSERT INTO customer_notes (id, customer_email, author_id, author_name, note)
+      VALUES (?,?,?,?,?)
+    `).run(id, email, author_id || null, author_name || null, String(note).trim());
+    logCustomerActivity(email, 'note_added', { preview: String(note).slice(0, 80) }, author_id, author_name);
+    res.json({ ok: true, id });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+app.delete('/api/users/:email/notes/:noteId', (req, res) => {
+  try {
+    db.prepare('DELETE FROM customer_notes WHERE id = ? AND customer_email = ?')
+      .run(req.params.noteId, decodeURIComponent(req.params.email));
+    res.json({ ok: true });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// Activity log read endpoint (already returned by GET /api/users/:email — this
+// gives a longer history when admins click "show all").
+app.get('/api/users/:email/activity', (req, res) => {
+  try {
+    const email = decodeURIComponent(req.params.email);
+    const rows = db.prepare('SELECT * FROM customer_activity_log WHERE customer_email = ? ORDER BY created_at DESC LIMIT 500').all(email).map(r => ({
+      ...r, event_data: (() => { try { return JSON.parse(r.event_data||'{}'); } catch { return {}; } })(),
+    }));
+    res.json(rows);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// Send a one-off email to a single customer. Template supports the standard
+// variables: {{customer_name}}, {{order_count}}, {{total_spent}}.
+function renderTemplate(body, ctx) {
+  return String(body || '').replace(/\{\{(\w+)\}\}/g, (_, k) => (ctx[k] != null ? String(ctx[k]) : ''));
+}
+app.post('/api/users/:email/email', async (req, res) => {
+  try {
+    const email = decodeURIComponent(req.params.email);
+    const u = db.prepare('SELECT * FROM users WHERE email = ?').get(email);
+    if (!u) return res.status(404).json({ error: 'not found' });
+    if (!mailer) return res.status(503).json({ error: 'email transport not configured' });
+    const { subject, body, actor_id, actor_name } = req.body || {};
+    if (!subject || !body) return res.status(400).json({ error: 'subject + body required' });
+    const ctx = {
+      customer_name: u.name || u.email,
+      order_count: u.totalOrders || 0,
+      total_spent: u.totalSpent || 0,
+    };
+    const sub = renderTemplate(subject, ctx);
+    const html = `<div dir="rtl" style="font-family:Tahoma,Arial,sans-serif;font-size:14px;line-height:1.8;color:#111;">${renderTemplate(body, ctx).replace(/\n/g, '<br/>')}</div>`;
+    const info = await mailer.sendMail({
+      from: `"نوّرَة Skincare" <${gmailUser}>`,
+      to: email, subject: sub, html,
+    });
+    logCustomerActivity(email, 'email_sent', { subject: sub, messageId: info.messageId }, actor_id, actor_name);
+    res.json({ ok: true, messageId: info.messageId });
+  } catch (e) { console.error('POST /api/users/:email/email error:', e); res.status(500).json({ error: e.message }); }
+});
+
+// Bulk email — accepts { recipients: [emails], subject, body }
+app.post('/api/users/bulk-email', async (req, res) => {
+  try {
+    if (!mailer) return res.status(503).json({ error: 'email transport not configured' });
+    const { recipients, subject, body, actor_id, actor_name } = req.body || {};
+    if (!Array.isArray(recipients) || !recipients.length) return res.status(400).json({ error: 'recipients required' });
+    if (!subject || !body) return res.status(400).json({ error: 'subject + body required' });
+    const sent = []; const failed = [];
+    for (const email of recipients) {
+      try {
+        const u = db.prepare('SELECT * FROM users WHERE email = ?').get(email);
+        const ctx = u ? {
+          customer_name: u.name || u.email,
+          order_count: u.totalOrders || 0, total_spent: u.totalSpent || 0,
+        } : { customer_name: email, order_count: 0, total_spent: 0 };
+        const sub = renderTemplate(subject, ctx);
+        const html = `<div dir="rtl" style="font-family:Tahoma,Arial,sans-serif;font-size:14px;line-height:1.8;color:#111;">${renderTemplate(body, ctx).replace(/\n/g, '<br/>')}</div>`;
+        // eslint-disable-next-line no-await-in-loop
+        const info = await mailer.sendMail({ from: `"نوّرَة Skincare" <${gmailUser}>`, to: email, subject: sub, html });
+        sent.push({ email, messageId: info.messageId });
+        logCustomerActivity(email, 'email_sent', { subject: sub, bulk: true, messageId: info.messageId }, actor_id, actor_name);
+      } catch (e) { failed.push({ email, error: e.message }); }
+    }
+    res.json({ ok: true, sent: sent.length, failed: failed.length, fails: failed });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// Personalized coupon for one customer — creates a coupon row + logs activity
+app.post('/api/users/:email/coupon', (req, res) => {
+  try {
+    const email = decodeURIComponent(req.params.email);
+    const u = db.prepare('SELECT * FROM users WHERE email = ?').get(email);
+    if (!u) return res.status(404).json({ error: 'not found' });
+    const { discount, type, min_order, max_uses, end_date, actor_id, actor_name } = req.body || {};
+    const code = `VIP-${String(email.split('@')[0]).toUpperCase().slice(0,6)}-${Math.random().toString(36).slice(2,5).toUpperCase()}`;
+    const id = `cp_${Date.now().toString(36)}_${Math.random().toString(36).slice(2,5)}`;
+    db.prepare(`
+      INSERT INTO coupons (id, code, type, discount, min_order, max_uses, active, end_date)
+      VALUES (?,?,?,?,?,?,1,?)
+    `).run(id, code, ['percent','fixed','free_shipping'].includes(type) ? type : 'percent',
+           Number(discount) || 10, Number(min_order) || 0, Number(max_uses) || 1, end_date || null);
+    logCustomerActivity(email, 'coupon_created', { code, discount: Number(discount) || 10, type: type || 'percent' }, actor_id, actor_name);
+    res.json({ ok: true, code });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// Manual recategorize — handy for admins after bulk imports.
+app.post('/api/users/recategorize', (_req, res) => {
+  try { res.json(recategorizeAll()); }
+  catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 // ── ADDRESSES ─────────────────────────────────────────────────────────────────
@@ -2235,6 +2668,24 @@ app.post('/api/stock-movements/stock-take', (req, res) => {
     res.json({ ok: true, applied: results.length, results });
   } catch (e) { console.error('POST /api/stock-movements/stock-take', e); res.status(500).json({ error: e.message }); }
 });
+
+// ── Customer recategorize: one full sweep on boot + nightly via cron ────────
+try {
+  const stats = recategorizeAll();
+  if (stats.changed) console.log(`[nawra-api] startup recategorize: ${stats.changed}/${stats.total} customers updated`);
+} catch (e) { console.warn('[nawra-api] startup recategorize failed:', e.message); }
+
+if (cron) {
+  // Every day at 02:00 — the "inactive after 90 days" rule needs date-driven
+  // re-eval even when nothing else has changed.
+  cron.schedule('0 2 * * *', () => {
+    try {
+      const stats = recategorizeAll();
+      console.log(`[nawra-api] nightly recategorize: ${stats.changed}/${stats.total} customers updated`);
+    } catch (e) { console.warn('[nawra-api] nightly recategorize failed:', e.message); }
+  }, { timezone: 'Africa/Cairo' });
+  console.log('[nawra-api] ✓ nightly customer-recategorize cron registered (02:00 Africa/Cairo)');
+}
 
 app.listen(PORT, '127.0.0.1', () =>
   console.log(`[nawra-api] listening on http://127.0.0.1:${PORT}`)
