@@ -2271,22 +2271,36 @@ function AdminDash({ go }) {
   const payStyle = (m) => PAY_METHOD_STYLE[m] || PAY_METHOD_STYLE.cash;
   const payLabel = (m) => PAY_METHOD_LABEL[m] || PAY_METHOD_LABEL.cash;
 
-  // Customers — fetched from /api/users (single source of truth: SQLite)
+  // Customers — fetched from /api/users (single source of truth: SQLite).
+  // HOTFIX: /api/users was changed to return a paginated envelope
+  // { total, page, perPage, rows } as part of the CRM redesign. Older
+  // code paths (Metric cards, newCustomersThisMonth) call .filter()/.length
+  // on allUsers expecting an array — we extract `rows` here and fall back
+  // to `[]` so nothing in the admin tree can ever hit "filter is not a
+  // function" again.
   const [allUsers, setAllUsers] = useState([]);
   const loadUsers = async () => {
     try {
-      const res = await fetch("/api/users");
-      if (res.ok) { setAllUsers(await res.json()); return; }
+      const res = await fetch("/api/users?perPage=200");
+      if (res.ok) {
+        const data = await res.json();
+        // Accept both shapes: legacy array OR { rows: [...] }
+        const arr = Array.isArray(data) ? data
+                  : (data && Array.isArray(data.rows)) ? data.rows
+                  : [];
+        setAllUsers(arr);
+        return;
+      }
     } catch {}
     // Fallback: old localStorage user list, so the page still works offline
     try {
       const local = JSON.parse(localStorage.getItem("nawra_users") || "[]");
-      setAllUsers(local.map(u => ({
+      setAllUsers(Array.isArray(local) ? local.map(u => ({
         email: u.email, name: u.name, phone: u.phone || null,
         firstOrder: u.registeredAt || null, lastOrder: u.registeredAt || null,
         totalOrders: 0, totalSpent: 0
-      })));
-    } catch {}
+      })) : []);
+    } catch { setAllUsers([]); }
   };
   useEffect(() => { loadUsers(); }, [orderList.length]); // eslint-disable-line
 
@@ -7055,7 +7069,15 @@ function CustomerDetailsPage({ email, ui, mob, C, isSuper, canManageOrders, onBa
     </div>
   );
 
-  const { customer: u, orders, notes, activity, favorite_products } = data;
+  // HOTFIX: never trust API arrays — wrap every list in a safe coercion so a
+  // malformed/error response can't blank the admin panel with "X.filter is
+  // not a function".
+  const arr = (v) => Array.isArray(v) ? v : [];
+  const { customer: u } = data;
+  const orders             = arr(data.orders);
+  const notes              = arr(data.notes);
+  const activity           = arr(data.activity);
+  const favorite_products  = arr(data.favorite_products);
   const initial = ((u.name || u.email || "?")[0] || "?").toUpperCase();
   const tier = CUST_CAT_STYLE[u.category] || CUST_CAT_STYLE.regular;
   const ordersToShow = showAllOrders ? orders : orders.slice(0, 10);
