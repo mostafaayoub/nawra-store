@@ -1424,39 +1424,154 @@ function AdminDash({ go }) {
     { key:"general",   l:"عام",      color:"#6B7280" },
   ];
   const [expenses, setExpenses] = useState([]);
-  const [expCatTab, setExpCatTab] = useState("salaries");
+  const [expCatTab, setExpCatTab] = useState("all"); // "all" or category key
   const [expMonth, setExpMonth] = useState(() => String(new Date().getMonth()+1));
   const [expYear,  setExpYear]  = useState(() => String(new Date().getFullYear()));
-  const [expDraft, setExpDraft] = useState({ description:"", quantity:"1", unit_price:"", date: new Date().toISOString().slice(0,10), notes:"" });
+  const [expDraft, setExpDraft] = useState({
+    description:"", quantity:"1", unit_price:"",
+    date: new Date().toISOString().slice(0,10),
+    type:"variable", supplier_id:"", payment_method:"cash",
+    receipt_path:"", is_recurring:false, notes:"",
+    category_key:"",
+  });
   const [expEditingId, setExpEditingId] = useState(null);
   const [expEditDraft, setExpEditDraft] = useState(null);
+
+  // ── CRM-grade expense state ──────────────────────────────────────────────
+  const [expCategories, setExpCategories] = useState([]); // DB-backed
+  const [expSuppliers,  setExpSuppliers]  = useState([]);
+  const [expBudgets,    setExpBudgets]    = useState([]);
+  const [expSugg,       setExpSugg]       = useState([]);
+  const [expSuggOpen,   setExpSuggOpen]   = useState(false);
+  const [expTrend,      setExpTrend]      = useState([]);
+  const [expFilters, setExpFilters] = useState({
+    q:"", type:"all", payment_method:"all", supplier_id:"all", min:"", max:"", sort:"date",
+  });
+  const [expUploading,    setExpUploading]    = useState(false);
+  const [expBudgetsOpen,  setExpBudgetsOpen]  = useState(false);
 
   const refreshExpenses = async () => {
     try {
       const r = await fetch(`/api/expenses?month=${expMonth}&year=${expYear}`);
-      if (r.ok) setExpenses(await r.json());
+      if (r.ok) {
+        const d = await r.json();
+        setExpenses(Array.isArray(d) ? d : []);
+      }
     } catch {}
   };
-  useEffect(() => { if (tab === "expenses") refreshExpenses(); }, [tab, expMonth, expYear]); // eslint-disable-line
+  const refreshExpCategories = useCallback(async () => {
+    try {
+      const r = await fetch("/api/expense-categories?all=1");
+      if (r.ok) { const d = await r.json(); setExpCategories(Array.isArray(d) ? d : []); }
+    } catch {}
+  }, []);
+  const refreshExpSuppliers = useCallback(async () => {
+    try {
+      const r = await fetch("/api/suppliers");
+      if (r.ok) { const d = await r.json(); setExpSuppliers(Array.isArray(d) ? d : []); }
+    } catch {}
+  }, []);
+  const refreshExpBudgets = useCallback(async () => {
+    try {
+      const r = await fetch("/api/expense-budgets");
+      if (r.ok) { const d = await r.json(); setExpBudgets(Array.isArray(d) ? d : []); }
+    } catch {}
+  }, []);
+  const refreshExpSugg = useCallback(async () => {
+    try {
+      const r = await fetch("/api/expenses/recurring-suggestions");
+      if (r.ok) {
+        const d = await r.json();
+        setExpSugg((d && Array.isArray(d.suggestions)) ? d.suggestions : []);
+      }
+    } catch {}
+  }, []);
+  const refreshExpTrend = useCallback(async () => {
+    try {
+      const now = new Date();
+      const start = new Date(now.getFullYear(), now.getMonth() - 5, 1);
+      const startISO = start.toISOString().slice(0, 10);
+      const endISO   = new Date(now.getFullYear(), now.getMonth() + 1, 0).toISOString().slice(0, 10);
+      const r = await fetch(`/api/expenses?from=${startISO}&to=${endISO}&status=approved`);
+      if (!r.ok) return;
+      const rows = await r.json();
+      const buckets = [];
+      for (let i = 5; i >= 0; i--) {
+        const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
+        buckets.push({
+          ym: `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}`,
+          label: d.toLocaleDateString("ar-EG", { month: "short" }),
+          byCategory: {},
+        });
+      }
+      (Array.isArray(rows) ? rows : []).forEach(e => {
+        const ym = String(e.date || "").slice(0,7);
+        const b = buckets.find(x => x.ym === ym);
+        if (!b) return;
+        const key = e.category || "general";
+        b.byCategory[key] = (b.byCategory[key] || 0) + (Number(e.amount) || 0);
+      });
+      setExpTrend(buckets);
+    } catch {}
+  }, []);
+  useEffect(() => {
+    if (tab === "expenses") {
+      refreshExpenses();
+      refreshExpCategories();
+      refreshExpSuppliers();
+      refreshExpBudgets();
+      refreshExpSugg();
+      refreshExpTrend();
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tab, expMonth, expYear]);
+
+  // Resolve the category key the draft will use: when on "all" tab, take
+  // the user-picked dropdown value; otherwise inherit from the active tab.
+  const draftCategoryKey = () => expCatTab === "all" ? expDraft.category_key : expCatTab;
 
   const addExpense = async () => {
     if (!expDraft.description.trim()) return;
+    const catKey = draftCategoryKey();
+    if (!catKey) { setSavedToast("اختر فئة للمصروف"); setTimeout(()=>setSavedToast(""), 2200); return; }
     const qty  = Number(expDraft.quantity)   || 0;
     const unit = Number(expDraft.unit_price) || 0;
     try {
       const r = await fetch("/api/expenses", {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          category: expCatTab,
+          category: catKey,
           description: expDraft.description.trim(),
           quantity: qty, unit_price: unit, amount: qty * unit,
           date: expDraft.date,
           notes: expDraft.notes.trim() || null,
+          type: expDraft.type || "variable",
+          supplier_id: expDraft.supplier_id || null,
+          payment_method: expDraft.payment_method || "cash",
+          receipt_path: expDraft.receipt_path || null,
+          is_recurring: !!expDraft.is_recurring,
+          created_by: (authUser && authUser.email) || null,
+          created_by_name: (authUser && authUser.name) || null,
+          actor_role: activeRole,
         })
       });
       if (r.ok) {
-        setExpDraft({ description:"", quantity:"1", unit_price:"", date: new Date().toISOString().slice(0,10), notes:"" });
+        const result = await r.json().catch(()=>({}));
+        if (result && result.status === "pending") {
+          setSavedToast("تم إرسال المصروف للموافقة من Super Admin");
+        } else {
+          setSavedToast("تم حفظ المصروف");
+        }
+        setTimeout(()=>setSavedToast(""), 2400);
+        setExpDraft({
+          description:"", quantity:"1", unit_price:"",
+          date: new Date().toISOString().slice(0,10),
+          type:"variable", supplier_id:"", payment_method:"cash",
+          receipt_path:"", is_recurring:false, notes:"",
+          category_key: expCatTab === "all" ? "" : expCatTab,
+        });
         refreshExpenses();
+        refreshExpTrend();
       }
     } catch {}
   };
@@ -1473,11 +1588,71 @@ function AdminDash({ go }) {
       });
       setExpEditingId(null); setExpEditDraft(null);
       refreshExpenses();
+      refreshExpTrend();
     } catch {}
   };
   const deleteExpense = async (id) => {
-    if (!confirm("حذف هذا المصروف نهائياً؟")) return;
-    try { await fetch(`/api/expenses/${id}`, { method: "DELETE" }); refreshExpenses(); } catch {}
+    if (!window.confirm("حذف هذا المصروف نهائياً؟")) return;
+    try { await fetch(`/api/expenses/${id}`, { method: "DELETE" }); refreshExpenses(); refreshExpTrend(); } catch {}
+  };
+  const approveExpense = async (id) => {
+    try {
+      await fetch(`/api/expenses/${id}/approve`, {
+        method:"POST", headers:{"Content-Type":"application/json"},
+        body: JSON.stringify({ actor: (authUser && authUser.email) || null }),
+      });
+      refreshExpenses(); refreshExpTrend();
+      setSavedToast("تمت الموافقة على المصروف"); setTimeout(()=>setSavedToast(""), 1800);
+    } catch {}
+  };
+  const rejectExpense = async (id) => {
+    const reason = window.prompt("سبب الرفض (اختياري):") || null;
+    try {
+      await fetch(`/api/expenses/${id}/reject`, {
+        method:"POST", headers:{"Content-Type":"application/json"},
+        body: JSON.stringify({ actor: (authUser && authUser.email) || null, reason }),
+      });
+      refreshExpenses(); refreshExpTrend();
+      setSavedToast("تم رفض المصروف"); setTimeout(()=>setSavedToast(""), 1800);
+    } catch {}
+  };
+  const uploadExpenseReceipt = async (file) => {
+    if (!file) return null;
+    if (file.size > 3 * 1024 * 1024) { setSavedToast("الإيصال أكبر من 3MB"); setTimeout(()=>setSavedToast(""), 2200); return null; }
+    setExpUploading(true);
+    try {
+      const fd = new FormData();
+      fd.append("receipt", file);
+      const r = await fetch("/api/expenses/upload-receipt", { method:"POST", body: fd });
+      const data = await r.json().catch(()=>({}));
+      if (r.ok && data.url) {
+        setExpUploading(false);
+        return data.url;
+      }
+      setExpUploading(false);
+      setSavedToast(`فشل رفع الإيصال: ${data.error || r.status}`);
+      setTimeout(()=>setSavedToast(""), 2400);
+      return null;
+    } catch { setExpUploading(false); return null; }
+  };
+  // Copy a recurring-suggestion forward into this month
+  const acceptRecurringSuggestion = async (s) => {
+    try {
+      const today = new Date().toISOString().slice(0,10);
+      await fetch("/api/expenses", {
+        method:"POST", headers:{"Content-Type":"application/json"},
+        body: JSON.stringify({
+          category: s.category, category_id: s.category_id,
+          description: s.description, quantity: s.quantity, unit_price: s.unit_price, amount: s.amount,
+          date: today, notes: s.notes,
+          type: s.type, supplier_id: s.supplier_id, payment_method: s.payment_method,
+          is_recurring: true,
+          created_by: (authUser && authUser.email) || null,
+          actor_role: activeRole,
+        }),
+      });
+      refreshExpenses(); refreshExpTrend(); refreshExpSugg();
+    } catch {}
   };
 
   // ── Finance ────────────────────────────────────────────────────────────────
@@ -4563,33 +4738,101 @@ function AdminDash({ go }) {
 
             const inputSm = { padding:"6px 10px", border:ui.border, borderRadius:6, background:ui.cardBg,
               fontFamily:ui.fontBody, fontSize:13, color:ui.text, outline:"none", direction:"rtl", boxSizing:"border-box" };
-            const tdCell = { padding:"9px 12px", fontSize:12.5, color:ui.text, fontFamily:ui.fontBody, verticalAlign:"middle" };
+            const tdCell  = { padding:"9px 12px", fontSize:12.5, color:ui.text, fontFamily:ui.fontBody, verticalAlign:"middle" };
 
-            // Totals by category across the loaded month
+            // Categories: prefer DB-backed list (active rows) but fall back to
+            // the hardcoded legacy enum so the page works pre-migration.
+            const effCategories = (expCategories && expCategories.length)
+              ? expCategories.filter(c => c.active)
+                  .map(c => ({ key: c.key, id: c.id, l: c.name_ar, color: c.color || "#6B7280", icon: c.icon || "" }))
+              : EXPENSE_CATEGORIES;
+            const catByKey = Object.fromEntries(effCategories.map(c => [c.key, c]));
+            const catLabel = (k) => (catByKey[k] || { l:k }).l;
+            const catColor = (k) => (catByKey[k] || { color:"#6B7280" }).color;
+            const catById  = Object.fromEntries(effCategories.filter(c=>c.id).map(c=>[c.id, c]));
+
+            // ── Totals (approved only — pending/rejected excluded) ───────
+            const approved = expenses.filter(e => (e.status || "approved") === "approved");
             const totals = {};
-            EXPENSE_CATEGORIES.forEach(c => totals[c.key] = 0);
-            expenses.forEach(e => { totals[e.category] = (totals[e.category]||0) + (Number(e.amount)||0); });
+            effCategories.forEach(c => totals[c.key] = 0);
+            approved.forEach(e => { totals[e.category] = (totals[e.category]||0) + (Number(e.amount)||0); });
             const totalAll = Object.values(totals).reduce((s,n)=>s+n,0);
 
-            // For metric cards: salaries / marketing / packing / (shipping + general + overhead)
-            const cardItems = [
-              { k:"_all",    l:"إجمالي المصروفات", v: totalAll, color: ui.text },
-              { k:"salaries",  l:"الرواتب",      v: totals.salaries  || 0, color:"#534AB7" },
-              { k:"marketing", l:"التسويق",      v: totals.marketing || 0, color:"#3B82F6" },
-              { k:"packing",   l:"التغليف",      v: totals.packing   || 0, color:"#16A34A" },
-              { k:"_shipgen",  l:"شحن + عام + تشغيلي", v: (totals.shipping||0) + (totals.general||0) + (totals.overhead||0), color:"#F97316" },
-            ];
+            // KPIs
+            // Top category by spend
+            const topCatKey = Object.keys(totals).sort((a,b)=>totals[b]-totals[a])[0];
+            const topCatAmt = topCatKey ? totals[topCatKey] : 0;
+            const topCatPct = totalAll > 0 ? Math.round((topCatAmt / totalAll) * 100) : 0;
+            // Fixed vs variable
+            const fixedSum    = approved.filter(e => e.type === "fixed").reduce((s,e)=>s+(Number(e.amount)||0), 0);
+            const variableSum = approved.filter(e => e.type !== "fixed").reduce((s,e)=>s+(Number(e.amount)||0), 0);
+            // Month-over-month % change (computed from the trend if loaded)
+            const trendCurr = expTrend.length >= 1 ? expTrend[expTrend.length - 1] : null;
+            const trendPrev = expTrend.length >= 2 ? expTrend[expTrend.length - 2] : null;
+            const trendSum  = (b) => b ? Object.values(b.byCategory).reduce((s,n)=>s+(Number(n)||0),0) : 0;
+            const monthChange = (() => {
+              const c = trendSum(trendCurr), p = trendSum(trendPrev);
+              if (!p) return null;
+              return Math.round(((c - p) / p) * 100);
+            })();
+            // Burn rate (expenses / revenue) — use finSummary if loaded
+            const revenueMonth = (finSummary && finSummary.revenue) || 0;
+            const burnRate = revenueMonth > 0 ? Math.round((totalAll / revenueMonth) * 100) : null;
+
+            // Pie + bar chart data
+            const pieSlices = effCategories
+              .filter(c => (totals[c.key] || 0) > 0)
+              .map(c => ({ label: c.l, value: totals[c.key], color: c.color }));
+
+            // Per-tab counts (count of entries within current month)
+            const tabCounts = { _all: expenses.length };
+            effCategories.forEach(c => { tabCounts[c.key] = expenses.filter(e => e.category === c.key).length; });
+
+            // Active tab subset + filter pipeline
+            const tabRows = expCatTab === "all" ? expenses : expenses.filter(e => e.category === expCatTab);
+            const q = (expFilters.q || "").trim().toLowerCase();
+            const minA = Number(expFilters.min) || null;
+            const maxA = Number(expFilters.max) || null;
+            const filtered = tabRows.filter(e => {
+              if (expFilters.type !== "all" && (e.type || "variable") !== expFilters.type) return false;
+              if (expFilters.payment_method !== "all" && (e.payment_method || "cash") !== expFilters.payment_method) return false;
+              if (expFilters.supplier_id !== "all" && (e.supplier_id || "") !== expFilters.supplier_id) return false;
+              if (minA != null && Number(e.amount||0) < minA) return false;
+              if (maxA != null && Number(e.amount||0) > maxA) return false;
+              if (q) {
+                const supplierName = (expSuppliers.find(s => s.id === e.supplier_id) || {}).name || "";
+                const hay = `${e.description||""} ${e.notes||""} ${supplierName}`.toLowerCase();
+                if (!hay.includes(q)) return false;
+              }
+              return true;
+            });
+            const sorted = filtered.slice();
+            if (expFilters.sort === "amountDesc") sorted.sort((a,b)=>(b.amount||0)-(a.amount||0));
+            else if (expFilters.sort === "amountAsc") sorted.sort((a,b)=>(a.amount||0)-(b.amount||0));
+            else sorted.sort((a,b) => String(b.date||"").localeCompare(String(a.date||"")));
+
+            const activeCat = expCatTab === "all" ? null : (catByKey[expCatTab] || null);
+            const draftCatKey = expCatTab === "all" ? expDraft.category_key : expCatTab;
+
+            const supplierName = (id) => (expSuppliers.find(s => s.id === id) || {}).name || "—";
+            const pmLabel = (m) => ({cash:"كاش",transfer:"تحويل",card:"فيزا",wallet:"محفظة"})[m] || m;
+            const pmColor = (m) => ({cash:"#F0FDF4",transfer:"#EFF6FF",card:"#FEF3C7",wallet:"#F5F3FF"})[m] || "#F3F4F6";
+            const pmFg    = (m) => ({cash:"#15803D",transfer:"#1D4ED8",card:"#92400E",wallet:"#6D28D9"})[m] || "#374151";
+            const statusBadge = (s) => {
+              if (s === "pending")   return { bg:"#FEF3C7", fg:"#92400E", t:"بانتظار الموافقة" };
+              if (s === "rejected")  return { bg:"#FEE2E2", fg:"#B91C1C", t:"مرفوض" };
+              return { bg:"#DCFCE7", fg:"#15803D", t:"موافق" };
+            };
 
             const exportCsv = () => {
-              const head = ["الفئة","الوصف","الكمية","سعر الوحدة","الإجمالي","التاريخ","ملاحظات"];
-              const catLabel = (k) => (EXPENSE_CATEGORIES.find(c=>c.key===k) || {l:k}).l;
-              const esc = (v) => {
-                const s = v == null ? "" : String(v);
-                return /[",\n]/.test(s) ? `"${s.replace(/"/g,'""')}"` : s;
-              };
+              const head = ["الفئة","الوصف","النوع","الكمية","سعر الوحدة","الإجمالي","المورد","طريقة الدفع","التاريخ","الحالة","ملاحظات"];
+              const esc = (v) => { const s = v == null ? "" : String(v); return /[",\n]/.test(s) ? `"${s.replace(/"/g,'""')}"` : s; };
               const lines = [head.join(",")];
-              expenses.forEach(e => lines.push([
-                catLabel(e.category), e.description, e.quantity, e.unit_price, e.amount, e.date, e.notes
+              sorted.forEach(e => lines.push([
+                catLabel(e.category), e.description, e.type==="fixed"?"ثابت":"متغير",
+                e.quantity, e.unit_price, e.amount,
+                supplierName(e.supplier_id), pmLabel(e.payment_method || "cash"),
+                e.date, statusBadge(e.status).t, e.notes
               ].map(esc).join(",")));
               const blob = new Blob(["﻿" + lines.join("\n")], { type:"text/csv;charset=utf-8;" });
               const url = URL.createObjectURL(blob);
@@ -4599,197 +4842,445 @@ function AdminDash({ go }) {
               URL.revokeObjectURL(url);
             };
 
-            const tabRows = expenses.filter(e => e.category === expCatTab);
-            const tabTotal = totals[expCatTab] || 0;
-            const activeCat = EXPENSE_CATEGORIES.find(c => c.key === expCatTab);
+            // Budget vs actual rows
+            const budgetRows = expBudgets
+              .filter(b => Number(b.monthly_budget) > 0)
+              .map(b => {
+                const cat = catById[b.category_id] || effCategories.find(c => c.key === b.key) || { l: b.name_ar || "—", color: b.color || "#6B7280", key: b.key };
+                const spent = totals[cat.key] || 0;
+                const budget = Number(b.monthly_budget) || 0;
+                const pct = budget > 0 ? Math.min(100, Math.round((spent / budget) * 100)) : 0;
+                const tone = spent > budget ? "#DC2626" : pct >= 80 ? "#D97706" : "#16A34A";
+                return { cat, spent, budget, pct, tone, over: Math.max(0, spent - budget), remaining: Math.max(0, budget - spent) };
+              });
 
             return (
               <div>
+                {/* Recurring suggestions banner */}
+                {expSugg.length > 0 && (
+                  <div style={{background:"#FFFBEB",border:"1px solid #FDE68A",color:"#92400E",borderRadius:ui.radius,
+                    padding:"10px 14px",marginBottom:12,display:"flex",alignItems:"center",justifyContent:"space-between",gap:10,flexWrap:"wrap"}}>
+                    <span style={{fontSize:13,fontFamily:ui.fontBody}}>
+                      ⚠ لديك <b>{expSugg.length}</b> مصروف{expSugg.length > 1 ? "ات" : ""} متكرر{expSugg.length > 1 ? "ة" : ""} من الشهر السابق لم تتم إضافتها بعد
+                    </span>
+                    <button onClick={()=>setExpSuggOpen(true)}
+                      style={{padding:"6px 14px",border:"1px solid #FDE68A",background:"#fff",borderRadius:6,
+                        fontFamily:ui.fontBody,fontSize:12.5,color:"#92400E",cursor:"pointer",fontWeight:600}}>
+                      مراجعة المقترحات
+                    </button>
+                  </div>
+                )}
+
                 {/* Top bar */}
-                <div style={{background:ui.cardBg,border:ui.border,borderRadius:ui.radius,padding:"12px 14px",marginBottom:12,
-                  display:"grid",gridTemplateColumns:mob?"1fr":"1fr 1fr auto auto",gap:10,alignItems:"end"}}>
+                <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:12,flexWrap:"wrap",gap:10}}>
                   <div>
-                    <label style={{display:"block",fontSize:11,color:ui.textSub,fontFamily:ui.fontBody,marginBottom:5}}>الشهر</label>
-                    <select value={expMonth} onChange={e=>setExpMonth(e.target.value)} style={{...inputSm, padding:"8px 12px", width:"100%"}}>
-                      {months.map(m => <option key={m.v} value={m.v}>{m.l}</option>)}
-                    </select>
+                    <h2 style={{fontSize:18,fontWeight:600,color:ui.text,fontFamily:ui.fontBody,margin:0}}>المصروفات</h2>
+                    <div style={{fontSize:12,color:ui.textSub,fontFamily:ui.fontBody,marginTop:2}}>إدارة وتتبع كل مصروفات المتجر</div>
                   </div>
-                  <div>
-                    <label style={{display:"block",fontSize:11,color:ui.textSub,fontFamily:ui.fontBody,marginBottom:5}}>السنة</label>
-                    <select value={expYear} onChange={e=>setExpYear(e.target.value)} style={{...inputSm, padding:"8px 12px", width:"100%"}}>
-                      {years.map(y => <option key={y} value={y}>{y}</option>)}
-                    </select>
-                  </div>
-                  <button onClick={refreshExpenses}
-                    style={{display:"flex",alignItems:"center",gap:5,background:ui.cardBg,color:ui.text,
-                      border:ui.border,padding:"8px 14px",cursor:"pointer",fontFamily:ui.fontBody,fontSize:12,borderRadius:6,justifyContent:"center"}}>
-                    <AdmIcon name="refresh" size={13}/> تحديث
-                  </button>
-                  <button onClick={exportCsv} disabled={expenses.length === 0}
-                    style={{display:"flex",alignItems:"center",gap:5,
-                      background: expenses.length === 0 ? "transparent" : ui.text,
-                      color: expenses.length === 0 ? ui.textSub : "#fff",
-                      border: expenses.length === 0 ? ui.border : "none",
-                      padding:"8px 14px",cursor: expenses.length === 0 ? "not-allowed" : "pointer",
-                      fontFamily:ui.fontBody,fontSize:12,borderRadius:6,justifyContent:"center"}}>
-                    تصدير CSV
-                  </button>
-                </div>
-
-                {/* Metric cards */}
-                <div style={{display:"grid",gridTemplateColumns:mob?"1fr 1fr":"repeat(5,1fr)",gap:10,marginBottom:14}}>
-                  {cardItems.map((c,i) => (
-                    <div key={i} style={{background:ui.cardBg,border:ui.border,borderRadius:ui.radius,padding:"14px 16px",borderTop:`3px solid ${c.color}`}}>
-                      <div style={{fontSize:11.5,color:ui.textSub,fontFamily:ui.fontBody,marginBottom:6}}>{c.l}</div>
-                      <div style={{fontSize:mob?17:20,color:ui.text,fontFamily:ui.fontHead,fontWeight:500,lineHeight:1.1}}>
-                        {Math.round(c.v).toLocaleString()}
-                        <span style={{fontSize:11.5,color:ui.textSub,marginInlineStart:5,fontFamily:ui.fontBody}}>ج</span>
-                      </div>
+                  <div style={{display:"flex",gap:8,alignItems:"end",flexWrap:"wrap"}}>
+                    <div>
+                      <label style={{display:"block",fontSize:11,color:ui.textSub,fontFamily:ui.fontBody,marginBottom:5}}>الشهر</label>
+                      <select value={expMonth} onChange={e=>setExpMonth(e.target.value)} style={{...inputSm,padding:"7px 12px"}}>
+                        {months.map(m => <option key={m.v} value={m.v}>{m.l}</option>)}
+                      </select>
                     </div>
-                  ))}
+                    <div>
+                      <label style={{display:"block",fontSize:11,color:ui.textSub,fontFamily:ui.fontBody,marginBottom:5}}>السنة</label>
+                      <select value={expYear} onChange={e=>setExpYear(e.target.value)} style={{...inputSm,padding:"7px 12px"}}>
+                        {years.map(y => <option key={y} value={y}>{y}</option>)}
+                      </select>
+                    </div>
+                    <button onClick={refreshExpenses}
+                      style={{padding:"8px 14px",background:ui.cardBg,color:ui.text,border:ui.border,borderRadius:6,
+                        fontFamily:ui.fontBody,fontSize:12.5,cursor:"pointer"}}>
+                      تحديث
+                    </button>
+                    <button onClick={exportCsv} disabled={sorted.length===0}
+                      style={{padding:"8px 14px",background: sorted.length===0?"transparent":ui.cardBg, color: sorted.length===0?ui.textSub:ui.text,
+                        border:ui.border,borderRadius:6,fontFamily:ui.fontBody,fontSize:12.5,
+                        cursor: sorted.length===0?"not-allowed":"pointer"}}>
+                      تصدير CSV
+                    </button>
+                  </div>
                 </div>
 
-                {/* Category tabs */}
-                <div style={{background:ui.cardBg,border:ui.border,borderRadius:ui.radius,padding:"6px 6px",marginBottom:12,display:"flex",gap:4,overflowX:"auto"}}>
-                  {EXPENSE_CATEGORIES.map(c => (
+                {/* 5 KPI cards */}
+                <div style={{display:"grid",gridTemplateColumns:mob?"1fr 1fr":"repeat(5,1fr)",gap:10,marginBottom:14}}>
+                  <MetricCardBase ui={ui} mob={mob} label="إجمالي المصروفات" value={Math.round(totalAll).toLocaleString()} suffix="ج"
+                    changePct={monthChange != null ? -monthChange : undefined}
+                    hint={monthChange != null ? (monthChange < 0 ? "أقل من الشهر السابق" : "أعلى من الشهر السابق") : undefined}/>
+                  <MetricCardBase ui={ui} mob={mob}
+                    label="أعلى فئة مصروفات"
+                    value={topCatKey ? catLabel(topCatKey) : "—"}
+                    hint={topCatKey ? `${Math.round(topCatAmt).toLocaleString()} ج · ${topCatPct}%` : "—"}/>
+                  <MetricCardBase ui={ui} mob={mob} label="Burn Rate" value={burnRate != null ? burnRate : "—"} suffix={burnRate != null ? "%" : ""}
+                    hint={burnRate != null ? "المصروفات / الإيرادات" : "افتح المالية لاحتسابها"}/>
+                  <MetricCardBase ui={ui} mob={mob} label="مصروفات ثابتة" value={Math.round(fixedSum).toLocaleString()} suffix="ج"/>
+                  <MetricCardBase ui={ui} mob={mob} label="مصروفات متغيرة" value={Math.round(variableSum).toLocaleString()} suffix="ج"/>
+                </div>
+
+                {/* Charts row */}
+                <div style={{display:"grid",gridTemplateColumns: mob ? "1fr" : "1fr 1.6fr", gap:10, marginBottom:14}}>
+                  <div style={{background:ui.cardBg,border:ui.border,borderRadius:ui.radius,padding:"14px 16px"}}>
+                    <div style={{fontSize:13,color:ui.text,fontFamily:ui.fontBody,fontWeight:600,marginBottom:10}}>توزيع المصروفات حسب الفئة</div>
+                    <div style={{display:"grid",gridTemplateColumns:"160px 1fr",gap:14,alignItems:"center"}}>
+                      <ExpensePieChart slices={pieSlices} total={totalAll} ui={ui} size={150}/>
+                      <ChartLegend items={pieSlices} total={totalAll} ui={ui}/>
+                    </div>
+                  </div>
+                  <div style={{background:ui.cardBg,border:ui.border,borderRadius:ui.radius,padding:"14px 16px"}}>
+                    <div style={{fontSize:13,color:ui.text,fontFamily:ui.fontBody,fontWeight:600,marginBottom:10}}>مقارنة آخر 6 شهور</div>
+                    <ExpenseTrendChart months={expTrend} categories={effCategories} ui={ui} height={170}/>
+                    <div style={{display:"flex",flexWrap:"wrap",gap:10,marginTop:8}}>
+                      {effCategories.filter(c => expTrend.some(b => (b.byCategory||{})[c.key] > 0)).map(c => (
+                        <div key={c.key} style={{display:"flex",alignItems:"center",gap:5,fontSize:11,color:ui.textSub,fontFamily:ui.fontBody}}>
+                          <span style={{width:9,height:9,background:c.color,borderRadius:2,display:"inline-block"}}/> {c.l}
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                </div>
+
+                {/* Category tabs (all + per-category, each with a counter) */}
+                <div style={{background:ui.cardBg,border:ui.border,borderRadius:ui.radius,padding:"6px",marginBottom:12,display:"flex",gap:4,overflowX:"auto"}}>
+                  <button onClick={()=>setExpCatTab("all")}
+                    style={{display:"flex",alignItems:"center",gap:6,padding:"7px 12px",border:"none",cursor:"pointer",borderRadius:6,
+                      background: expCatTab==="all" ? ui.text : "transparent",
+                      color: expCatTab==="all" ? "#fff" : ui.textSub,
+                      fontSize:12,fontFamily:ui.fontBody,whiteSpace:"nowrap"}}>
+                    الكل <span style={{background: expCatTab==="all" ? "rgba(255,255,255,.2)" : "#F3F4F6",
+                      color: expCatTab==="all" ? "#fff" : ui.textSub,padding:"1px 7px",borderRadius:9,fontSize:11}}>{tabCounts._all}</span>
+                  </button>
+                  {effCategories.map(c => (
                     <button key={c.key} onClick={()=>setExpCatTab(c.key)}
                       style={{display:"flex",alignItems:"center",gap:6,padding:"7px 12px",border:"none",cursor:"pointer",borderRadius:6,
                         background: expCatTab===c.key ? c.color : "transparent",
                         color: expCatTab===c.key ? "#fff" : ui.textSub,
-                        fontSize:12, fontFamily:ui.fontBody, whiteSpace:"nowrap"}}>
+                        fontSize:12,fontFamily:ui.fontBody,whiteSpace:"nowrap"}}>
                       <span style={{width:6,height:6,borderRadius:"50%",background: expCatTab===c.key ? "#fff" : c.color, display:"inline-block"}}/>
                       {c.l}
+                      <span style={{background: expCatTab===c.key ? "rgba(255,255,255,.2)" : "#F3F4F6",
+                        color: expCatTab===c.key ? "#fff" : ui.textSub,padding:"1px 6px",borderRadius:9,fontSize:11}}>{tabCounts[c.key] || 0}</span>
                     </button>
                   ))}
                 </div>
 
-                {/* Table */}
-                <div style={{background:ui.cardBg,border:ui.border,borderRadius:ui.radius,overflow:"hidden"}}>
-                  <div style={{overflowX:"auto"}}>
-                    <table style={{width:"100%",borderCollapse:"collapse",direction:"rtl",fontFamily:ui.fontBody,minWidth:760}}>
-                      <thead>
-                        <tr style={{background:ui.sideBg,borderBottom:`0.5px solid #E5E5E5`}}>
-                          {["الوصف","الكمية","سعر الوحدة","الإجمالي","التاريخ","ملاحظات",""].map(h=>(
-                            <th key={h} style={{padding:"11px 12px",textAlign:"right",fontSize:11.5,color:ui.textSub,fontWeight:500,whiteSpace:"nowrap"}}>{h}</th>
-                          ))}
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {tabRows.length === 0 ? (
-                          <tr><td colSpan={7} style={{padding:"24px 12px",textAlign:"center",color:ui.textSub,fontSize:12.5,fontFamily:ui.fontBody}}>
-                            لا توجد مصروفات في فئة {activeCat?.l} لهذا الشهر — أضف أول سطر من الأسفل ↓
-                          </td></tr>
-                        ) : tabRows.map(e => {
-                          const editing = expEditingId === e.id;
-                          return (
-                            <tr key={e.id} style={{borderTop:"0.5px solid #EEE"}}>
-                              <td style={tdCell}>
-                                {editing
-                                  ? <input style={{...inputSm, width:"100%"}} value={expEditDraft.description} onChange={ev=>setExpEditDraft({...expEditDraft, description:ev.target.value})}/>
-                                  : e.description || "—"}
-                              </td>
-                              <td style={tdCell}>
-                                {editing
-                                  ? <input type="text" inputMode="numeric" style={{...inputSm, width:70, direction:"ltr", textAlign:"left"}} value={expEditDraft.quantity} onChange={ev=>setExpEditDraft({...expEditDraft, quantity:ev.target.value.replace(/[^0-9.]/g,"")})}/>
-                                  : (Number(e.quantity)||0).toLocaleString()}
-                              </td>
-                              <td style={tdCell}>
-                                {editing
-                                  ? <input type="text" inputMode="numeric" style={{...inputSm, width:90, direction:"ltr", textAlign:"left"}} value={expEditDraft.unit_price} onChange={ev=>setExpEditDraft({...expEditDraft, unit_price:ev.target.value.replace(/[^0-9.]/g,"")})}/>
-                                  : (Number(e.unit_price)||0).toLocaleString() + " ج"}
-                              </td>
-                              <td style={{...tdCell, fontWeight:500}}>
-                                {editing
-                                  ? ((Number(expEditDraft.quantity)||0) * (Number(expEditDraft.unit_price)||0)).toLocaleString() + " ج"
-                                  : (Number(e.amount)||0).toLocaleString() + " ج"}
-                              </td>
-                              <td style={tdCell}>
-                                {editing
-                                  ? <input type="date" style={{...inputSm, padding:"5px 9px"}} value={expEditDraft.date || ""} onChange={ev=>setExpEditDraft({...expEditDraft, date:ev.target.value})}/>
-                                  : (e.date || "—")}
-                              </td>
-                              <td style={{...tdCell, color:ui.textSub, fontSize:11.5, maxWidth:200, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap"}}>
-                                {editing
-                                  ? <input style={{...inputSm, width:"100%"}} value={expEditDraft.notes || ""} onChange={ev=>setExpEditDraft({...expEditDraft, notes:ev.target.value})}/>
-                                  : (e.notes || "—")}
-                              </td>
-                              <td style={{...tdCell, textAlign:"left", whiteSpace:"nowrap"}}>
-                                {editing ? (
-                                  <div style={{display:"flex",gap:4}}>
-                                    <button onClick={saveExpenseEdit} style={{background:ui.text,color:"#fff",border:"none",padding:"4px 10px",cursor:"pointer",fontSize:11,fontFamily:ui.fontBody,borderRadius:4}}>حفظ</button>
-                                    <button onClick={()=>{ setExpEditingId(null); setExpEditDraft(null); }} style={{background:"transparent",border:ui.border,padding:"4px 9px",cursor:"pointer",fontSize:11,color:ui.textSub,fontFamily:ui.fontBody,borderRadius:4}}>إلغاء</button>
-                                  </div>
-                                ) : (
-                                  <div style={{display:"flex",gap:6,alignItems:"center"}}>
-                                    <button title="تعديل" onClick={()=>{ setExpEditingId(e.id); setExpEditDraft({...e, quantity: String(e.quantity), unit_price: String(e.unit_price), date: e.date || ""}); }}
-                                      style={{background:"transparent",border:"none",cursor:"pointer",padding:4,color:ui.textSub,display:"flex"}}>
-                                      <AdmIcon name="pencil" size={14}/>
-                                    </button>
-                                    <button title="حذف" onClick={()=>deleteExpense(e.id)}
-                                      style={{background:"transparent",border:"none",cursor:"pointer",padding:4,color:"#DC2626",display:"flex"}}>
-                                      <AdmIcon name="trash" size={14}/>
-                                    </button>
-                                  </div>
-                                )}
-                              </td>
-                            </tr>
-                          );
-                        })}
-
-                        {/* Inline add row — always present at the bottom */}
-                        <tr style={{borderTop:"0.5px solid #EEE", background:"#FAFAFA"}}>
-                          <td style={{padding:"9px 12px"}}>
-                            <input style={{...inputSm, width:"100%"}} value={expDraft.description}
-                              onChange={e=>setExpDraft({...expDraft, description:e.target.value})}
-                              placeholder={`وصف ${activeCat?.l || ""}...`}/>
-                          </td>
-                          <td style={{padding:"9px 12px"}}>
-                            <input type="text" inputMode="numeric" style={{...inputSm, width:70, direction:"ltr", textAlign:"left"}}
-                              value={expDraft.quantity}
-                              onChange={e=>setExpDraft({...expDraft, quantity:e.target.value.replace(/[^0-9.]/g,"")})}/>
-                          </td>
-                          <td style={{padding:"9px 12px"}}>
-                            <input type="text" inputMode="numeric" style={{...inputSm, width:90, direction:"ltr", textAlign:"left"}}
-                              value={expDraft.unit_price} placeholder="0"
-                              onChange={e=>setExpDraft({...expDraft, unit_price:e.target.value.replace(/[^0-9.]/g,"")})}/>
-                          </td>
-                          <td style={{padding:"9px 12px",fontWeight:500,fontSize:12.5,color:ui.text,fontFamily:ui.fontBody}}>
-                            {((Number(expDraft.quantity)||0) * (Number(expDraft.unit_price)||0)).toLocaleString()} ج
-                          </td>
-                          <td style={{padding:"9px 12px"}}>
-                            <input type="date" style={{...inputSm, padding:"5px 9px"}} value={expDraft.date}
-                              onChange={e=>setExpDraft({...expDraft, date:e.target.value})}/>
-                          </td>
-                          <td style={{padding:"9px 12px"}}>
-                            <input style={{...inputSm, width:"100%"}} value={expDraft.notes}
-                              onChange={e=>setExpDraft({...expDraft, notes:e.target.value})}
-                              placeholder="ملاحظات (اختياري)"/>
-                          </td>
-                          <td style={{padding:"9px 12px",textAlign:"left",whiteSpace:"nowrap"}}>
-                            <button onClick={addExpense} disabled={!expDraft.description.trim()}
-                              style={{background: expDraft.description.trim() ? (activeCat?.color || ui.text) : "#9CA3AF",
-                                color:"#fff",border:"none",padding:"6px 14px",
-                                cursor: expDraft.description.trim() ? "pointer" : "not-allowed",
-                                fontSize:12,fontFamily:ui.fontBody,borderRadius:4}}>
-                              + إضافة
-                            </button>
-                          </td>
-                        </tr>
-                      </tbody>
-                      {/* Category total bar */}
-                      <tfoot>
-                        <tr style={{background: (activeCat?.color || ui.text) + "11", borderTop:`1px solid ${(activeCat?.color || ui.text) + "44"}`}}>
-                          <td colSpan={3} style={{padding:"11px 12px",fontSize:12.5,color:ui.text,fontFamily:ui.fontBody,fontWeight:600}}>
-                            إجمالي {activeCat?.l} لشهر {months.find(m=>m.v===expMonth)?.l} {expYear}
-                          </td>
-                          <td colSpan={4} style={{padding:"11px 12px",fontSize:14,color: activeCat?.color || ui.text, fontFamily:ui.fontHead, fontWeight:600, textAlign:"right"}}>
-                            {tabTotal.toLocaleString()} ج
-                          </td>
-                        </tr>
-                      </tfoot>
-                    </table>
-                  </div>
+                {/* Filter bar */}
+                <div style={{background:ui.cardBg,border:ui.border,borderRadius:ui.radius,padding:"10px 12px",marginBottom:12,
+                  display:"grid",gap:8,gridTemplateColumns: mob?"1fr":"minmax(180px,2fr) repeat(5, minmax(0,1fr))"}}>
+                  <input value={expFilters.q} onChange={e=>setExpFilters({...expFilters, q:e.target.value})}
+                    placeholder="بحث بالوصف أو المورد..."
+                    style={{padding:"8px 12px",border:ui.border,borderRadius:6,background:ui.cardBg,
+                      fontFamily:ui.fontBody,fontSize:12.5,color:ui.text,outline:"none",direction:"rtl"}}/>
+                  <select value={expFilters.type} onChange={e=>setExpFilters({...expFilters, type:e.target.value})}
+                    style={{padding:"8px 10px",border:ui.border,borderRadius:6,background:ui.cardBg,fontFamily:ui.fontBody,fontSize:12,color:ui.text,outline:"none"}}>
+                    <option value="all">كل الأنواع</option>
+                    <option value="fixed">ثابت</option>
+                    <option value="variable">متغير</option>
+                  </select>
+                  <select value={expFilters.payment_method} onChange={e=>setExpFilters({...expFilters, payment_method:e.target.value})}
+                    style={{padding:"8px 10px",border:ui.border,borderRadius:6,background:ui.cardBg,fontFamily:ui.fontBody,fontSize:12,color:ui.text,outline:"none"}}>
+                    <option value="all">كل طرق الدفع</option>
+                    <option value="cash">كاش</option>
+                    <option value="transfer">تحويل</option>
+                    <option value="card">فيزا</option>
+                    <option value="wallet">محفظة</option>
+                  </select>
+                  <input type="text" inputMode="numeric" value={expFilters.min} onChange={e=>setExpFilters({...expFilters, min:e.target.value.replace(/[^0-9.]/g,'')})}
+                    placeholder="أقل مبلغ"
+                    style={{padding:"8px 10px",border:ui.border,borderRadius:6,background:ui.cardBg,fontFamily:ui.fontBody,fontSize:12,color:ui.text,outline:"none",direction:"ltr",textAlign:"left"}}/>
+                  <input type="text" inputMode="numeric" value={expFilters.max} onChange={e=>setExpFilters({...expFilters, max:e.target.value.replace(/[^0-9.]/g,'')})}
+                    placeholder="أعلى مبلغ"
+                    style={{padding:"8px 10px",border:ui.border,borderRadius:6,background:ui.cardBg,fontFamily:ui.fontBody,fontSize:12,color:ui.text,outline:"none",direction:"ltr",textAlign:"left"}}/>
+                  <select value={expFilters.sort} onChange={e=>setExpFilters({...expFilters, sort:e.target.value})}
+                    style={{padding:"8px 10px",border:ui.border,borderRadius:6,background:ui.cardBg,fontFamily:ui.fontBody,fontSize:12,color:ui.text,outline:"none"}}>
+                    <option value="date">الأحدث</option>
+                    <option value="amountDesc">الأعلى مبلغاً</option>
+                    <option value="amountAsc">الأقل مبلغاً</option>
+                  </select>
                 </div>
+
+                {/* Result count */}
+                <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8,flexWrap:"wrap",gap:8}}>
+                  <span style={{fontSize:12.5,color:ui.textSub,fontFamily:ui.fontBody}}>
+                    {sorted.length === expenses.length ? `${expenses.length} مصروف` : `${sorted.length} من ${expenses.length} مصروف`}
+                  </span>
+                </div>
+
+                {/* Table */}
+                <div style={{background:ui.cardBg,border:ui.border,borderRadius:ui.radius,overflow:"hidden",overflowX:"auto"}}>
+                  <table style={{width:"100%",borderCollapse:"collapse",direction:"rtl",fontFamily:ui.fontBody,minWidth:1100}}>
+                    <thead>
+                      <tr style={{background:ui.sideBg,borderBottom:"0.5px solid #E5E5E5"}}>
+                        {(expCatTab === "all"
+                          ? ["الوصف","الفئة","النوع","الكمية","سعر الوحدة","الإجمالي","المورد","الدفع","التاريخ","الحالة","ملاحظات",""]
+                          : ["الوصف","النوع","الكمية","سعر الوحدة","الإجمالي","المورد","الدفع","التاريخ","الحالة","ملاحظات",""]
+                        ).map(h => (
+                          <th key={h} style={{padding:"11px 12px",textAlign:"right",fontSize:11.5,color:ui.textSub,fontWeight:500,whiteSpace:"nowrap"}}>{h}</th>
+                        ))}
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {sorted.length === 0 ? (
+                        <tr><td colSpan={expCatTab === "all" ? 12 : 11} style={{padding:"26px 14px",textAlign:"center",color:ui.textSub,fontSize:12.5,fontFamily:ui.fontBody}}>
+                          {expenses.length === 0
+                            ? `لا توجد مصروفات لشهر ${months.find(m=>m.v===expMonth)?.l} ${expYear} — أضف أول سطر من الأسفل ↓`
+                            : "لا توجد نتائج تطابق الفلاتر — جرّب توسيع المعايير"}
+                        </td></tr>
+                      ) : sorted.map(e => {
+                        const editing = expEditingId === e.id;
+                        const stat    = statusBadge(e.status);
+                        return (
+                          <tr key={e.id} style={{borderTop:"0.5px solid #EEE", background: e.status === "pending" ? "#FFFBEB" : e.status === "rejected" ? "#FEF2F2" : "transparent"}}>
+                            <td style={tdCell}>
+                              {editing
+                                ? <input style={{...inputSm, width:"100%"}} value={expEditDraft.description||""} onChange={ev=>setExpEditDraft({...expEditDraft, description:ev.target.value})}/>
+                                : (e.description || "—")}
+                            </td>
+                            {expCatTab === "all" && (
+                              <td style={tdCell}>
+                                <span style={{fontSize:11,padding:"3px 9px",borderRadius:20,background:catColor(e.category) + "22",color:catColor(e.category),fontWeight:600,whiteSpace:"nowrap"}}>
+                                  {catLabel(e.category)}
+                                </span>
+                              </td>
+                            )}
+                            <td style={tdCell}>
+                              <span style={{fontSize:11,padding:"3px 9px",borderRadius:20, background: e.type === "fixed" ? "#EFF6FF" : "#F3F4F6", color: e.type === "fixed" ? "#1D4ED8" : ui.textSub}}>
+                                {e.type === "fixed" ? "ثابت" : "متغير"}
+                              </span>
+                            </td>
+                            <td style={tdCell}>{editing
+                              ? <input type="text" inputMode="numeric" style={{...inputSm, width:70, direction:"ltr", textAlign:"left"}} value={expEditDraft.quantity} onChange={ev=>setExpEditDraft({...expEditDraft, quantity:ev.target.value.replace(/[^0-9.]/g,'')})}/>
+                              : (Number(e.quantity)||0).toLocaleString()}</td>
+                            <td style={tdCell}>{editing
+                              ? <input type="text" inputMode="decimal" style={{...inputSm, width:90, direction:"ltr", textAlign:"left"}} value={expEditDraft.unit_price} onChange={ev=>setExpEditDraft({...expEditDraft, unit_price:ev.target.value.replace(/[^0-9.]/g,'')})}/>
+                              : (Number(e.unit_price)||0).toLocaleString() + " ج"}</td>
+                            <td style={{...tdCell, fontWeight:500, background:"#FAFAFA"}}>
+                              {editing
+                                ? ((Number(expEditDraft.quantity)||0) * (Number(expEditDraft.unit_price)||0)).toLocaleString() + " ج"
+                                : (Number(e.amount)||0).toLocaleString() + " ج"}
+                            </td>
+                            <td style={tdCell}>{supplierName(e.supplier_id)}</td>
+                            <td style={tdCell}>
+                              <span style={{fontSize:11,padding:"3px 9px",borderRadius:20,background: pmColor(e.payment_method||"cash"),color: pmFg(e.payment_method||"cash"),whiteSpace:"nowrap"}}>
+                                {pmLabel(e.payment_method||"cash")}
+                              </span>
+                            </td>
+                            <td style={{...tdCell,whiteSpace:"nowrap",color:ui.textSub,fontSize:11.5}}>{e.date || "—"}</td>
+                            <td style={tdCell}>
+                              <span style={{fontSize:10.5,padding:"3px 9px",borderRadius:20,background:stat.bg,color:stat.fg,whiteSpace:"nowrap"}} title={e.rejection_reason || ""}>{stat.t}</span>
+                            </td>
+                            <td style={{...tdCell, color:ui.textSub, fontSize:11.5, maxWidth:160, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap"}} title={e.notes || ""}>
+                              {e.receipt_path && (
+                                <a href={e.receipt_path} target="_blank" rel="noreferrer" title="عرض الإيصال" style={{color:"#1D4ED8",textDecoration:"none",marginInlineEnd:6}}>📎</a>
+                              )}
+                              {e.notes || "—"}
+                            </td>
+                            <td style={{...tdCell, textAlign:"left",whiteSpace:"nowrap"}}>
+                              {editing ? (
+                                <div style={{display:"flex",gap:4}}>
+                                  <button onClick={saveExpenseEdit} style={{background:ui.text,color:"#fff",border:"none",padding:"4px 10px",cursor:"pointer",fontSize:11,fontFamily:ui.fontBody,borderRadius:4}}>حفظ</button>
+                                  <button onClick={()=>{ setExpEditingId(null); setExpEditDraft(null); }} style={{background:"transparent",border:ui.border,padding:"4px 9px",cursor:"pointer",fontSize:11,color:ui.textSub,fontFamily:ui.fontBody,borderRadius:4}}>إلغاء</button>
+                                </div>
+                              ) : (
+                                <div style={{display:"flex",gap:4,alignItems:"center",justifyContent:"flex-end"}}>
+                                  {e.status === "pending" && isSuper && (
+                                    <>
+                                      <button title="موافقة" onClick={()=>approveExpense(e.id)} style={{background:"#DCFCE7",color:"#15803D",border:"none",padding:"4px 8px",borderRadius:4,fontSize:11,cursor:"pointer",fontFamily:ui.fontBody}}>✓</button>
+                                      <button title="رفض" onClick={()=>rejectExpense(e.id)} style={{background:"#FEE2E2",color:"#B91C1C",border:"none",padding:"4px 8px",borderRadius:4,fontSize:11,cursor:"pointer",fontFamily:ui.fontBody}}>✗</button>
+                                    </>
+                                  )}
+                                  <button title="تعديل" onClick={()=>{ setExpEditingId(e.id); setExpEditDraft({...e, quantity:String(e.quantity), unit_price:String(e.unit_price)}); }}
+                                    style={{background:"transparent",border:"none",cursor:"pointer",padding:4,color:ui.textSub,display:"flex"}}>
+                                    <AdmIcon name="pencil" size={14}/>
+                                  </button>
+                                  <button title="حذف" onClick={()=>deleteExpense(e.id)}
+                                    style={{background:"transparent",border:"none",cursor:"pointer",padding:4,color:"#DC2626",display:"flex"}}>
+                                    <AdmIcon name="trash" size={14}/>
+                                  </button>
+                                </div>
+                              )}
+                            </td>
+                          </tr>
+                        );
+                      })}
+
+                      {/* Inline add row */}
+                      <tr style={{borderTop:"0.5px solid #EEE", background:"#FAFAFA"}}>
+                        <td style={{padding:"9px 12px"}}>
+                          <input style={{...inputSm, width:"100%"}} value={expDraft.description}
+                            onChange={e=>setExpDraft({...expDraft, description:e.target.value})}
+                            placeholder={`وصف ${expCatTab==="all" ? "المصروف" : (activeCat?.l || "")}`}/>
+                        </td>
+                        {expCatTab === "all" && (
+                          <td style={{padding:"9px 12px"}}>
+                            <select value={expDraft.category_key} onChange={e=>setExpDraft({...expDraft, category_key:e.target.value})}
+                              style={{...inputSm, padding:"6px 8px"}}>
+                              <option value="">اختر فئة...</option>
+                              {effCategories.map(c => <option key={c.key} value={c.key}>{c.l}</option>)}
+                            </select>
+                          </td>
+                        )}
+                        <td style={{padding:"9px 12px"}}>
+                          <select value={expDraft.type} onChange={e=>setExpDraft({...expDraft, type:e.target.value})}
+                            style={{...inputSm, padding:"6px 8px"}}>
+                            <option value="variable">متغير</option>
+                            <option value="fixed">ثابت</option>
+                          </select>
+                        </td>
+                        <td style={{padding:"9px 12px"}}>
+                          <input type="text" inputMode="numeric" style={{...inputSm, width:70, direction:"ltr", textAlign:"left"}}
+                            value={expDraft.quantity} onChange={e=>setExpDraft({...expDraft, quantity:e.target.value.replace(/[^0-9.]/g,'')})}/>
+                        </td>
+                        <td style={{padding:"9px 12px"}}>
+                          <input type="text" inputMode="decimal" style={{...inputSm, width:90, direction:"ltr", textAlign:"left"}}
+                            value={expDraft.unit_price} onChange={e=>setExpDraft({...expDraft, unit_price:e.target.value.replace(/[^0-9.]/g,'')})}/>
+                        </td>
+                        <td style={{padding:"9px 12px",fontWeight:500,fontSize:12.5,color:ui.text,fontFamily:ui.fontBody,background:"#F3F4F6"}}>
+                          {((Number(expDraft.quantity)||0) * (Number(expDraft.unit_price)||0)).toLocaleString()} ج
+                        </td>
+                        <td style={{padding:"9px 12px"}}>
+                          <input list="exp-supplier-list" style={{...inputSm, width:"100%"}}
+                            value={(expSuppliers.find(s => s.id === expDraft.supplier_id) || {}).name || expDraft._supplierTyped || ""}
+                            onChange={e => {
+                              const val = e.target.value;
+                              const hit = expSuppliers.find(s => s.name === val);
+                              setExpDraft({...expDraft, supplier_id: hit ? hit.id : "", _supplierTyped: hit ? "" : val});
+                            }}
+                            placeholder="اسم المورد"/>
+                          <datalist id="exp-supplier-list">
+                            {expSuppliers.map(s => <option key={s.id} value={s.name}/>)}
+                          </datalist>
+                        </td>
+                        <td style={{padding:"9px 12px"}}>
+                          <select value={expDraft.payment_method} onChange={e=>setExpDraft({...expDraft, payment_method:e.target.value})}
+                            style={{...inputSm, padding:"6px 8px"}}>
+                            <option value="cash">كاش</option>
+                            <option value="transfer">تحويل</option>
+                            <option value="card">فيزا</option>
+                            <option value="wallet">محفظة</option>
+                          </select>
+                        </td>
+                        <td style={{padding:"9px 12px"}}>
+                          <input type="date" style={{...inputSm, padding:"5px 9px"}} value={expDraft.date}
+                            onChange={e=>setExpDraft({...expDraft, date:e.target.value})}/>
+                        </td>
+                        <td style={{padding:"9px 12px"}}>
+                          {/* Receipt + recurring controls live here in the add-row's status slot */}
+                          <div style={{display:"flex",alignItems:"center",gap:6}}>
+                            <label style={{cursor: expUploading?"wait":"pointer",padding:"4px 8px",border:ui.border,borderRadius:5,fontSize:11,color:ui.textSub,fontFamily:ui.fontBody}}>
+                              {expUploading ? "..." : expDraft.receipt_path ? "✓ إيصال" : "📎 إيصال"}
+                              <input type="file" accept="image/jpeg,image/png,image/webp,application/pdf" style={{display:"none"}}
+                                onChange={async (e) => { const url = await uploadExpenseReceipt(e.target.files && e.target.files[0]); if (url) setExpDraft({...expDraft, receipt_path:url}); e.target.value=""; }}/>
+                            </label>
+                            <label style={{display:"flex",alignItems:"center",gap:3,fontSize:11,color:ui.textSub,fontFamily:ui.fontBody,cursor:"pointer"}}>
+                              <input type="checkbox" checked={expDraft.is_recurring} onChange={e=>setExpDraft({...expDraft, is_recurring:e.target.checked})}
+                                style={{accentColor:ui.text,cursor:"pointer"}}/>
+                              متكرر
+                            </label>
+                          </div>
+                        </td>
+                        <td style={{padding:"9px 12px"}}>
+                          <input style={{...inputSm, width:"100%"}} value={expDraft.notes}
+                            onChange={e=>setExpDraft({...expDraft, notes:e.target.value})}
+                            placeholder="ملاحظات (اختياري)"/>
+                        </td>
+                        <td style={{padding:"9px 12px",textAlign:"left",whiteSpace:"nowrap"}}>
+                          <button onClick={addExpense} disabled={!expDraft.description.trim() || (expCatTab==="all" && !expDraft.category_key)}
+                            style={{background: (expDraft.description.trim() && (expCatTab!=="all" || expDraft.category_key)) ? (catColor(draftCatKey) || ui.text) : "#9CA3AF",
+                              color:"#fff",border:"none",padding:"6px 14px",
+                              cursor: (expDraft.description.trim() && (expCatTab!=="all" || expDraft.category_key)) ? "pointer" : "not-allowed",
+                              fontSize:12,fontFamily:ui.fontBody,borderRadius:4}}>
+                            إضافة
+                          </button>
+                        </td>
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
+
+                {/* Budget vs actual */}
+                {budgetRows.length > 0 && (
+                  <div style={{background:ui.cardBg,border:ui.border,borderRadius:ui.radius,marginTop:14}}>
+                    <button onClick={()=>setExpBudgetsOpen(o=>!o)}
+                      style={{width:"100%",background:"transparent",border:"none",cursor:"pointer",padding:"12px 14px",
+                        display:"flex",alignItems:"center",justifyContent:"space-between",
+                        fontFamily:ui.fontBody,fontSize:13.5,color:ui.text,fontWeight:600}}>
+                      <span>الميزانية مقابل الفعلي ({budgetRows.length})</span>
+                      <span style={{color:ui.textSub,fontSize:12}}>{expBudgetsOpen ? "▲" : "▼"}</span>
+                    </button>
+                    {expBudgetsOpen && (
+                      <div style={{padding:"0 14px 14px"}}>
+                        {budgetRows.map(b => (
+                          <div key={b.cat.key} style={{padding:"10px 0",borderTop:"0.5px solid #EEE"}}>
+                            <div style={{display:"flex",justifyContent:"space-between",fontFamily:ui.fontBody,fontSize:12.5,color:ui.text,marginBottom:5}}>
+                              <span style={{display:"flex",alignItems:"center",gap:6}}>
+                                <span style={{width:8,height:8,background:b.cat.color,borderRadius:2}}/>{b.cat.l}
+                              </span>
+                              <span style={{color:ui.textSub}}>
+                                {b.spent.toLocaleString()} / {b.budget.toLocaleString()} ج
+                                {b.over > 0 ? <span style={{color:"#DC2626",marginInlineStart:8}}> · زيادة {b.over.toLocaleString()} ج</span>
+                                            : <span style={{color:ui.textSub,marginInlineStart:8}}> · متبقي {b.remaining.toLocaleString()} ج</span>}
+                              </span>
+                            </div>
+                            <div style={{height:6,background:"#F3F4F6",borderRadius:3,overflow:"hidden"}}>
+                              <div style={{width: `${b.pct}%`, height:"100%", background:b.tone, transition:"width .3s"}}/>
+                            </div>
+                          </div>
+                        ))}
+                        <div style={{textAlign:"left",marginTop:8}}>
+                          <button onClick={()=>{ setTab("settings"); setSettingsTab("expenses"); }}
+                            style={{background:"transparent",border:"none",color:"#1D4ED8",fontFamily:ui.fontBody,fontSize:12,cursor:"pointer",padding:0}}>
+                            إدارة الميزانيات ←
+                          </button>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {/* Recurring suggestions modal */}
+                {expSuggOpen && (
+                  <div onClick={()=>setExpSuggOpen(false)}
+                    style={{position:"fixed",inset:0,background:"rgba(0,0,0,.55)",zIndex:800,display:"flex",alignItems:"center",justifyContent:"center",padding:16,direction:"rtl"}}>
+                    <div onClick={e=>e.stopPropagation()}
+                      style={{background:ui.cardBg,maxWidth:560,width:"100%",maxHeight:"80vh",overflow:"auto",padding:18,borderRadius:8,boxShadow:"0 12px 48px rgba(0,0,0,.25)"}}>
+                      <h3 style={{fontSize:15,fontWeight:600,color:ui.text,fontFamily:ui.fontBody,margin:"0 0 12px"}}>المصروفات المتكررة من الشهر السابق</h3>
+                      {expSugg.length === 0 ? (
+                        <div style={{padding:"20px 0",textAlign:"center",color:ui.textSub,fontSize:12.5,fontFamily:ui.fontBody}}>لا توجد مقترحات</div>
+                      ) : expSugg.map(s => (
+                        <div key={s.id} style={{display:"flex",alignItems:"center",justifyContent:"space-between",gap:10,padding:"10px 0",borderTop:"0.5px solid #EEE"}}>
+                          <div style={{minWidth:0}}>
+                            <div style={{fontSize:13,color:ui.text,fontWeight:500,fontFamily:ui.fontBody}}>{s.description || "—"}</div>
+                            <div style={{fontSize:11.5,color:ui.textSub,fontFamily:ui.fontBody,marginTop:2}}>{catLabel(s.category)} · {(Number(s.amount)||0).toLocaleString()} ج</div>
+                          </div>
+                          <div style={{display:"flex",gap:6}}>
+                            <button onClick={async ()=>{ await acceptRecurringSuggestion(s); }}
+                              style={{padding:"5px 12px",background:"#DCFCE7",color:"#15803D",border:"none",borderRadius:5,fontSize:11.5,fontFamily:ui.fontBody,cursor:"pointer"}}>
+                              إضافة
+                            </button>
+                            <button onClick={()=>setExpSugg(prev => prev.filter(x => x.id !== s.id))}
+                              style={{padding:"5px 12px",background:"transparent",border:ui.border,borderRadius:5,fontSize:11.5,fontFamily:ui.fontBody,color:ui.textSub,cursor:"pointer"}}>
+                              تجاهل
+                            </button>
+                          </div>
+                        </div>
+                      ))}
+                      <div style={{display:"flex",gap:8,justifyContent:"flex-end",marginTop:14}}>
+                        {expSugg.length > 0 && (
+                          <button onClick={async ()=>{ for (const s of expSugg) { await acceptRecurringSuggestion(s); } setExpSuggOpen(false); }}
+                            style={{padding:"7px 14px",background:ui.text,color:"#fff",border:"none",borderRadius:6,fontSize:12.5,fontFamily:ui.fontBody,cursor:"pointer"}}>
+                            إضافة الكل
+                          </button>
+                        )}
+                        <button onClick={()=>setExpSuggOpen(false)}
+                          style={{padding:"7px 14px",background:"transparent",border:ui.border,borderRadius:6,fontSize:12.5,fontFamily:ui.fontBody,color:ui.textSub,cursor:"pointer"}}>
+                          إغلاق
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                )}
               </div>
             );
           })()}
@@ -5323,7 +5814,8 @@ function AdminDash({ go }) {
                   {[
                     ["store","المتجر"],["account","الحساب"],["emails","الإيميلات"],
                     ["payment","الدفع"],["shipping_free","الشحن"],
-                    ["notifications","الإشعارات"],["team","الفريق"],["seo","SEO"]
+                    ["notifications","الإشعارات"],["team","الفريق"],
+                    ["expenses","المصروفات"],["seo","SEO"]
                   ].map(([k,l])=>(
                     <button key={k} onClick={()=>setSettingsTab(k)}
                       style={{padding:"8px 14px",border:"none",cursor:"pointer",borderRadius:6,
@@ -5937,6 +6429,18 @@ function AdminDash({ go }) {
                         حفظ الفريق والصلاحيات
                       </button>
                     </div>
+                  );
+                })()}
+
+                {settingsTab === "expenses" && (() => {
+                  // Load on tab open (idempotent)
+                  return (
+                    <ExpenseSettingsPanel
+                      ui={ui} mob={mob} isSuper={isSuper}
+                      storeCfg={storeCfg} setStoreCfg={setStoreCfg}
+                      saveSetting={saveSetting}
+                      onAnyChange={() => { refreshExpCategories(); refreshExpSuppliers(); refreshExpBudgets(); refreshExpenses(); }}
+                    />
                   );
                 })()}
 
@@ -6927,6 +7431,390 @@ const PlaceholderBase = React.memo(function PlaceholderBase({ icon, title, body,
     </div>
   );
 });
+
+// ─── Inline SVG charts for Expenses ──────────────────────────────────────────
+// No external chart deps. Kept at module scope so React reuses the same
+// component identity across parent re-renders.
+const ExpensePieChart = React.memo(function ExpensePieChart({ slices, total, ui, size = 150 }) {
+  const data = (slices || []).filter(s => Number(s.value) > 0);
+  const sum  = Number(total) || data.reduce((s, x) => s + Number(x.value || 0), 0);
+  if (!data.length || sum <= 0) {
+    return (
+      <div style={{display:"flex",alignItems:"center",justifyContent:"center",height:size,color:ui.textSub,fontFamily:ui.fontBody,fontSize:12}}>
+        لا توجد بيانات
+      </div>
+    );
+  }
+  const r = size / 2 - 4;
+  const cx = size / 2, cy = size / 2;
+  let angle = -Math.PI / 2;
+  const paths = data.map((s, i) => {
+    const v = Number(s.value) || 0;
+    const slice = (v / sum) * Math.PI * 2;
+    const x1 = cx + r * Math.cos(angle);
+    const y1 = cy + r * Math.sin(angle);
+    angle += slice;
+    const x2 = cx + r * Math.cos(angle);
+    const y2 = cy + r * Math.sin(angle);
+    const largeArc = slice > Math.PI ? 1 : 0;
+    const d = `M ${cx} ${cy} L ${x1} ${y1} A ${r} ${r} 0 ${largeArc} 1 ${x2} ${y2} Z`;
+    const pct = Math.round((v / sum) * 100);
+    return <path key={i} d={d} fill={s.color || "#9CA3AF"} stroke="#fff" strokeWidth={1}>
+      <title>{`${s.label}: ${v.toLocaleString()} ج (${pct}%)`}</title>
+    </path>;
+  });
+  return (
+    <svg width={size} height={size} viewBox={`0 0 ${size} ${size}`} role="img" aria-label="توزيع المصروفات">
+      {paths}
+    </svg>
+  );
+});
+
+// 6-month grouped-by-category bar chart. `months` is an array of
+// { label, byCategory: { [catKey]: amount } }. `categories` is an array of
+// { key, label, color }.
+const ExpenseTrendChart = React.memo(function ExpenseTrendChart({ months, categories, ui, height = 160 }) {
+  const data = months || [];
+  if (!data.length) {
+    return <div style={{height,display:"flex",alignItems:"center",justifyContent:"center",color:ui.textSub,fontFamily:ui.fontBody,fontSize:12}}>لا توجد بيانات</div>;
+  }
+  const totals = data.map(m => Object.values(m.byCategory || {}).reduce((s,n)=>s+Number(n||0),0));
+  const maxV  = Math.max(1, ...totals);
+  const padX = 40, padTop = 8, padBottom = 20;
+  const innerH = height - padTop - padBottom;
+  return (
+    <div style={{overflowX:"auto"}}>
+      <svg width={Math.max(260, data.length * 90)} height={height} role="img" aria-label="مقارنة 6 شهور">
+        {data.map((m, i) => {
+          const x = padX + i * 80;
+          const total = totals[i] || 0;
+          let acc = 0;
+          return (
+            <g key={i}>
+              {categories.map(c => {
+                const v = Number((m.byCategory||{})[c.key] || 0);
+                if (v <= 0) return null;
+                const segH = Math.round((v / maxV) * innerH);
+                const y = padTop + innerH - Math.round(((acc + v) / maxV) * innerH);
+                acc += v;
+                return <rect key={c.key} x={x} y={y} width={56} height={segH} fill={c.color}>
+                  <title>{`${m.label} · ${c.label}: ${v.toLocaleString()} ج`}</title>
+                </rect>;
+              })}
+              <text x={x + 28} y={padTop + innerH + 14} textAnchor="middle" fontSize="10" fill={ui.textSub} fontFamily={ui.fontBody}>{m.label}</text>
+              <text x={x + 28} y={padTop + innerH - Math.round((total / maxV) * innerH) - 3} textAnchor="middle" fontSize="9.5" fill={ui.text} fontFamily={ui.fontBody}>
+                {total > 0 ? Math.round(total / 1000) + "k" : ""}
+              </text>
+            </g>
+          );
+        })}
+      </svg>
+    </div>
+  );
+});
+
+// Tiny chart-legend pill (color dot + label + amount).
+const ChartLegend = React.memo(function ChartLegend({ items, ui, total }) {
+  return (
+    <div style={{display:"flex",flexDirection:"column",gap:6}}>
+      {(items || []).map((it, i) => {
+        const pct = total > 0 ? Math.round((Number(it.value) / total) * 100) : 0;
+        return (
+          <div key={i} style={{display:"flex",alignItems:"center",justifyContent:"space-between",gap:8,fontSize:12,fontFamily:ui.fontBody}}>
+            <div style={{display:"flex",alignItems:"center",gap:6,minWidth:0}}>
+              <span style={{width:10,height:10,background:it.color || "#9CA3AF",borderRadius:2,flexShrink:0}}/>
+              <span style={{color:ui.text,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{it.label}</span>
+            </div>
+            <div style={{display:"flex",alignItems:"center",gap:6,color:ui.textSub,whiteSpace:"nowrap"}}>
+              <span>{Number(it.value).toLocaleString()} ج</span>
+              <span style={{color:ui.textSub,fontSize:11}}>· {pct}%</span>
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+});
+
+// ─── Expense Settings Panel ──────────────────────────────────────────────────
+// Module-scope so typing in any field doesn't trigger AdminDash re-renders.
+// Owns its own fetch state for categories / suppliers / budgets. Approval
+// settings live on settings.store (so they're loaded with the rest of store
+// config) and persisted via the parent's saveSetting().
+function ExpenseSettingsPanel({ ui, mob, isSuper, storeCfg, setStoreCfg, saveSetting, onAnyChange }) {
+  const [cats,      setCats]      = useState([]);
+  const [sups,      setSups]      = useState([]);
+  const [budgets,   setBudgets]   = useState([]);
+  const [busy,      setBusy]      = useState(false);
+  const [msg,       setMsg]       = useState("");
+
+  // ── Drafts ──
+  const [catDraft,  setCatDraft]  = useState({ name_ar:"", name_en:"", color:"#6B7280", icon:"" });
+  const [supDraft,  setSupDraft]  = useState({ name:"", phone:"", email:"", notes:"" });
+  const [budgetDraft, setBudgetDraft] = useState({}); // { [category_id]: amount string }
+
+  const reload = useCallback(async () => {
+    try {
+      const [c, s, b] = await Promise.all([
+        fetch("/api/expense-categories?all=1").then(r => r.ok ? r.json() : []),
+        fetch("/api/suppliers").then(r => r.ok ? r.json() : []),
+        fetch("/api/expense-budgets").then(r => r.ok ? r.json() : []),
+      ]);
+      setCats(Array.isArray(c) ? c : []);
+      setSups(Array.isArray(s) ? s : []);
+      const bArr = Array.isArray(b) ? b : [];
+      setBudgets(bArr);
+      // Seed the budget draft with current values
+      const draft = {};
+      bArr.forEach(x => { if (x.category_id) draft[x.category_id] = String(x.monthly_budget || ""); });
+      setBudgetDraft(draft);
+    } catch {}
+  }, []);
+  useEffect(() => { reload(); }, [reload]);
+
+  const flash = (t) => { setMsg(t); setTimeout(()=>setMsg(""), 2200); };
+
+  // ── Categories ──
+  const addCategory = async () => {
+    if (!catDraft.name_ar.trim()) return;
+    setBusy(true);
+    try {
+      const r = await fetch("/api/expense-categories", {
+        method:"POST", headers:{"Content-Type":"application/json"},
+        body: JSON.stringify(catDraft),
+      });
+      if (r.ok) {
+        setCatDraft({ name_ar:"", name_en:"", color:"#6B7280", icon:"" });
+        flash("تمت إضافة الفئة");
+        reload(); onAnyChange && onAnyChange();
+      }
+    } catch {} finally { setBusy(false); }
+  };
+  const patchCategory = async (id, patch) => {
+    try {
+      await fetch(`/api/expense-categories/${id}`, {
+        method:"PATCH", headers:{"Content-Type":"application/json"},
+        body: JSON.stringify(patch),
+      });
+      reload(); onAnyChange && onAnyChange();
+    } catch {}
+  };
+  const deleteCategory = async (c) => {
+    if (!window.confirm(`حذف فئة "${c.name_ar}"؟`)) return;
+    try {
+      const r = await fetch(`/api/expense-categories/${c.id}`, { method:"DELETE" });
+      if (!r.ok) { const j = await r.json().catch(()=>({})); flash(`فشل الحذف: ${j.error || r.status}`); return; }
+      reload(); onAnyChange && onAnyChange();
+    } catch {}
+  };
+
+  // ── Suppliers ──
+  const addSupplier = async () => {
+    if (!supDraft.name.trim()) return;
+    setBusy(true);
+    try {
+      const r = await fetch("/api/suppliers", {
+        method:"POST", headers:{"Content-Type":"application/json"},
+        body: JSON.stringify(supDraft),
+      });
+      if (r.ok) {
+        setSupDraft({ name:"", phone:"", email:"", notes:"" });
+        flash("تمت إضافة المورد");
+        reload(); onAnyChange && onAnyChange();
+      }
+    } catch {} finally { setBusy(false); }
+  };
+  const deleteSupplier = async (s) => {
+    if (!window.confirm(`حذف المورد "${s.name}"؟`)) return;
+    try { await fetch(`/api/suppliers/${s.id}`, { method:"DELETE" }); reload(); onAnyChange && onAnyChange(); } catch {}
+  };
+
+  // ── Budgets ──
+  const saveBudget = async (categoryId) => {
+    const amt = Number(budgetDraft[categoryId]) || 0;
+    try {
+      await fetch(`/api/expense-budgets/${categoryId}`, {
+        method:"PUT", headers:{"Content-Type":"application/json"},
+        body: JSON.stringify({ monthly_budget: amt }),
+      });
+      reload(); flash("تم حفظ الميزانية");
+    } catch {}
+  };
+
+  // ── Approval system (saved into settings.store) ──
+  const approvalEnabled   = !!storeCfg.expense_approval_enabled;
+  const approvalThreshold = Number(storeCfg.expense_approval_threshold) || 1000;
+  const saveStoreApproval = async (patch) => {
+    const next = { ...storeCfg, ...patch };
+    setStoreCfg(next);
+    try { await saveSetting("store", next); flash("تم حفظ إعدادات الموافقة"); } catch {}
+  };
+
+  const card = { background:ui.cardBg, border:ui.border, borderRadius:ui.radius, padding: mob?"14px":"18px", marginBottom:12 };
+  const cardTitle = { fontSize:13, fontWeight:600, color:ui.text, fontFamily:ui.fontBody, marginBottom:12, paddingBottom:8, borderBottom:"0.5px solid #EEE" };
+  const inputStyle = { width:"100%", padding:"8px 11px", border:ui.border, borderRadius:6, background:ui.cardBg, fontFamily:ui.fontBody, fontSize:13, color:ui.text, outline:"none", direction:"rtl", boxSizing:"border-box" };
+
+  return (
+    <div>
+      {msg && (
+        <div style={{padding:"8px 14px",borderRadius:6,marginBottom:10,background:"#DCFCE7",color:"#15803D",fontSize:12.5,fontFamily:ui.fontBody,border:"0.5px solid #86EFAC"}}>{msg}</div>
+      )}
+
+      {/* CATEGORIES ─────────────────────────────────────────────────────── */}
+      <div style={card}>
+        <div style={cardTitle}>الفئات ({cats.length})</div>
+        <div style={{overflowX:"auto"}}>
+          <table style={{width:"100%",borderCollapse:"collapse",direction:"rtl",fontFamily:ui.fontBody,minWidth:680}}>
+            <thead>
+              <tr style={{background:ui.sideBg,borderBottom:"0.5px solid #E5E5E5"}}>
+                {["الاسم (عربي)","Name (EN)","اللون","أيقونة","حالة",""].map(h=>(
+                  <th key={h} style={{padding:"10px 12px",textAlign:"right",fontSize:11.5,color:ui.textSub,fontWeight:500}}>{h}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {cats.map(c => (
+                <tr key={c.id} style={{borderTop:"0.5px solid #EEE"}}>
+                  <td style={{padding:"8px 12px"}}>
+                    <input style={{...inputStyle,padding:"6px 9px"}} defaultValue={c.name_ar}
+                      onBlur={e => { if (e.target.value !== c.name_ar) patchCategory(c.id, { name_ar: e.target.value }); }}/>
+                  </td>
+                  <td style={{padding:"8px 12px"}}>
+                    <input style={{...inputStyle,padding:"6px 9px",direction:"ltr",textAlign:"left"}} defaultValue={c.name_en || ""}
+                      onBlur={e => { if ((e.target.value||"") !== (c.name_en||"")) patchCategory(c.id, { name_en: e.target.value }); }}/>
+                  </td>
+                  <td style={{padding:"8px 12px"}}>
+                    <input type="color" defaultValue={c.color || "#6B7280"} onBlur={e => { if (e.target.value !== c.color) patchCategory(c.id, { color: e.target.value }); }}
+                      style={{width:36,height:28,border:"none",cursor:"pointer",padding:0,background:"transparent"}}/>
+                  </td>
+                  <td style={{padding:"8px 12px"}}>
+                    <input style={{...inputStyle,padding:"6px 9px",width:60,textAlign:"center"}} defaultValue={c.icon || ""}
+                      onBlur={e => { if ((e.target.value||"") !== (c.icon||"")) patchCategory(c.id, { icon: e.target.value }); }}/>
+                  </td>
+                  <td style={{padding:"8px 12px"}}>
+                    <button onClick={()=>patchCategory(c.id, { active: !c.active })}
+                      style={{width:38,height:22,borderRadius:11,border:"none",background: c.active ? "#16A34A" : "#D4D4D4",position:"relative",cursor:"pointer"}}>
+                      <span style={{position:"absolute",top:2,[c.active?"left":"right"]:2,width:18,height:18,background:"#fff",borderRadius:"50%",boxShadow:"0 1px 2px rgba(0,0,0,.2)"}}/>
+                    </button>
+                  </td>
+                  <td style={{padding:"8px 12px",textAlign:"left"}}>
+                    {!c.is_default && (
+                      <button onClick={()=>deleteCategory(c)} style={{background:"transparent",border:"none",color:"#DC2626",cursor:"pointer",fontSize:14}}>×</button>
+                    )}
+                    {c.is_default && <span style={{fontSize:10.5,color:ui.textSub,fontFamily:ui.fontBody}}>افتراضي</span>}
+                  </td>
+                </tr>
+              ))}
+              {/* Inline add row */}
+              <tr style={{borderTop:"0.5px solid #EEE",background:"#FAFAFA"}}>
+                <td style={{padding:"8px 12px"}}><input style={{...inputStyle,padding:"6px 9px"}} value={catDraft.name_ar} onChange={e=>setCatDraft({...catDraft,name_ar:e.target.value})} placeholder="فئة جديدة..."/></td>
+                <td style={{padding:"8px 12px"}}><input style={{...inputStyle,padding:"6px 9px",direction:"ltr",textAlign:"left"}} value={catDraft.name_en} onChange={e=>setCatDraft({...catDraft,name_en:e.target.value})} placeholder="EN"/></td>
+                <td style={{padding:"8px 12px"}}><input type="color" value={catDraft.color} onChange={e=>setCatDraft({...catDraft,color:e.target.value})} style={{width:36,height:28,border:"none",cursor:"pointer",padding:0,background:"transparent"}}/></td>
+                <td style={{padding:"8px 12px"}}><input style={{...inputStyle,padding:"6px 9px",width:60,textAlign:"center"}} value={catDraft.icon} onChange={e=>setCatDraft({...catDraft,icon:e.target.value})} placeholder="🧾"/></td>
+                <td/>
+                <td style={{padding:"8px 12px",textAlign:"left"}}>
+                  <button onClick={addCategory} disabled={busy || !catDraft.name_ar.trim()}
+                    style={{background: catDraft.name_ar.trim() ? ui.text : "#9CA3AF",color:"#fff",border:"none",padding:"6px 14px",borderRadius:4,fontSize:12,fontFamily:ui.fontBody,cursor: catDraft.name_ar.trim()?"pointer":"not-allowed"}}>إضافة</button>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <div style={{fontSize:11.5,color:ui.textSub,fontFamily:ui.fontBody,marginTop:8}}>الفئات الافتراضية لا يمكن حذفها — يمكنك فقط إعادة تسميتها أو إيقافها</div>
+      </div>
+
+      {/* BUDGETS ─────────────────────────────────────────────────────────── */}
+      <div style={card}>
+        <div style={cardTitle}>الميزانيات الشهرية</div>
+        <div style={{fontSize:12,color:ui.textSub,fontFamily:ui.fontBody,marginBottom:10}}>اضبط ميزانية شهرية لكل فئة — ستظهر في قسم "الميزانية مقابل الفعلي" بصفحة المصروفات</div>
+        <div style={{display:"grid",gridTemplateColumns:mob?"1fr":"1fr 1fr",gap:10}}>
+          {cats.filter(c => c.active).map(c => (
+            <div key={c.id} style={{display:"flex",alignItems:"center",gap:8,padding:"8px 10px",border:"0.5px solid #EEE",borderRadius:6,background:"#FAFAFA"}}>
+              <span style={{width:10,height:10,background:c.color,borderRadius:2,flexShrink:0}}/>
+              <span style={{flex:1,fontSize:13,color:ui.text,fontFamily:ui.fontBody,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{c.name_ar}</span>
+              <input type="text" inputMode="numeric"
+                value={budgetDraft[c.id] || ""}
+                onChange={e=>setBudgetDraft({...budgetDraft, [c.id]: e.target.value.replace(/[^0-9.]/g,'')})}
+                onBlur={()=>saveBudget(c.id)}
+                placeholder="0"
+                style={{...inputStyle,padding:"5px 8px",width:100,direction:"ltr",textAlign:"left"}}/>
+              <span style={{fontSize:11.5,color:ui.textSub,fontFamily:ui.fontBody}}>ج / شهر</span>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      {/* APPROVAL SYSTEM ─────────────────────────────────────────────────── */}
+      <div style={card}>
+        <div style={cardTitle}>نظام الموافقات</div>
+        <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"6px 0"}}>
+          <div>
+            <div style={{fontSize:13,color:ui.text,fontFamily:ui.fontBody}}>تفعيل الموافقة على المصروفات الكبيرة</div>
+            <div style={{fontSize:11.5,color:ui.textSub,fontFamily:ui.fontBody,marginTop:2}}>عند التفعيل، أي مصروف يضيفه شخص غير Super Admin ويتجاوز الحد المحدد سيظهر في الإنبوكس بانتظار الموافقة</div>
+          </div>
+          <button onClick={()=>isSuper && saveStoreApproval({ expense_approval_enabled: !approvalEnabled })} disabled={!isSuper}
+            style={{width:38,height:22,borderRadius:11,border:"none",background: approvalEnabled?"#16A34A":"#D4D4D4",position:"relative",cursor: isSuper?"pointer":"not-allowed",opacity: isSuper?1:0.6}}>
+            <span style={{position:"absolute",top:2,[approvalEnabled?"left":"right"]:2,width:18,height:18,background:"#fff",borderRadius:"50%",boxShadow:"0 1px 2px rgba(0,0,0,.2)"}}/>
+          </button>
+        </div>
+        {approvalEnabled && (
+          <div style={{marginTop:10,paddingTop:10,borderTop:"0.5px solid #EEE"}}>
+            <label style={{display:"block",fontSize:12,color:ui.text,fontFamily:ui.fontBody,marginBottom:5}}>الحد الأدنى للمصروف الذي يتطلب موافقة (ج)</label>
+            <input type="text" inputMode="numeric" defaultValue={approvalThreshold}
+              onBlur={e => saveStoreApproval({ expense_approval_threshold: Number(e.target.value.replace(/[^0-9.]/g,''))||0 })}
+              disabled={!isSuper}
+              style={{...inputStyle,maxWidth:240,direction:"ltr",textAlign:"left"}}/>
+            <div style={{fontSize:11,color:ui.textSub,fontFamily:ui.fontBody,marginTop:5}}>المعتمد: Super Admin فقط</div>
+          </div>
+        )}
+        {!isSuper && (
+          <div style={{marginTop:8,fontSize:11.5,color:"#92400E",fontFamily:ui.fontBody,background:"#FFFBEB",padding:"7px 10px",borderRadius:5}}>
+            🔒 إعدادات الموافقة تتطلب صلاحية Super Admin
+          </div>
+        )}
+      </div>
+
+      {/* SUPPLIERS ───────────────────────────────────────────────────────── */}
+      <div style={card}>
+        <div style={cardTitle}>الموردين ({sups.length})</div>
+        <div style={{overflowX:"auto"}}>
+          <table style={{width:"100%",borderCollapse:"collapse",direction:"rtl",fontFamily:ui.fontBody,minWidth:560}}>
+            <thead>
+              <tr style={{background:ui.sideBg,borderBottom:"0.5px solid #E5E5E5"}}>
+                {["الاسم","الهاتف","الإيميل","ملاحظات",""].map(h=>(
+                  <th key={h} style={{padding:"10px 12px",textAlign:"right",fontSize:11.5,color:ui.textSub,fontWeight:500}}>{h}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {sups.map(s => (
+                <tr key={s.id} style={{borderTop:"0.5px solid #EEE"}}>
+                  <td style={{padding:"8px 12px",fontSize:13,color:ui.text,fontFamily:ui.fontBody}}>{s.name}</td>
+                  <td style={{padding:"8px 12px",fontSize:12,color:ui.textSub,fontFamily:"monospace"}}>{s.phone || "—"}</td>
+                  <td style={{padding:"8px 12px",fontSize:12,color:ui.textSub,fontFamily:"monospace"}}>{s.email || "—"}</td>
+                  <td style={{padding:"8px 12px",fontSize:11.5,color:ui.textSub,fontFamily:ui.fontBody,maxWidth:240,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{s.notes || "—"}</td>
+                  <td style={{padding:"8px 12px",textAlign:"left"}}>
+                    <button onClick={()=>deleteSupplier(s)} style={{background:"transparent",border:"none",color:"#DC2626",cursor:"pointer",fontSize:14}}>×</button>
+                  </td>
+                </tr>
+              ))}
+              <tr style={{borderTop:"0.5px solid #EEE",background:"#FAFAFA"}}>
+                <td style={{padding:"8px 12px"}}><input style={{...inputStyle,padding:"6px 9px"}} value={supDraft.name} onChange={e=>setSupDraft({...supDraft,name:e.target.value})} placeholder="مورد جديد..."/></td>
+                <td style={{padding:"8px 12px"}}><input style={{...inputStyle,padding:"6px 9px",direction:"ltr",textAlign:"left"}} value={supDraft.phone} onChange={e=>setSupDraft({...supDraft,phone:e.target.value})} placeholder="01000000000"/></td>
+                <td style={{padding:"8px 12px"}}><input style={{...inputStyle,padding:"6px 9px",direction:"ltr",textAlign:"left"}} value={supDraft.email} onChange={e=>setSupDraft({...supDraft,email:e.target.value})} placeholder="email@..."/></td>
+                <td style={{padding:"8px 12px"}}><input style={{...inputStyle,padding:"6px 9px"}} value={supDraft.notes} onChange={e=>setSupDraft({...supDraft,notes:e.target.value})} placeholder="ملاحظات"/></td>
+                <td style={{padding:"8px 12px",textAlign:"left"}}>
+                  <button onClick={addSupplier} disabled={busy || !supDraft.name.trim()}
+                    style={{background: supDraft.name.trim() ? ui.text : "#9CA3AF",color:"#fff",border:"none",padding:"6px 14px",borderRadius:4,fontSize:12,fontFamily:ui.fontBody,cursor: supDraft.name.trim()?"pointer":"not-allowed"}}>إضافة</button>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  );
+}
 
 // Switch toggle for booleans (in_stock / featured / is_best_seller / etc.)
 const SwitchToggle = React.memo(function SwitchToggle({ value, onChange, label, disabled, hint, ui }) {

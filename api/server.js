@@ -393,6 +393,90 @@ db.exec(`
 `);
 try { db.exec('CREATE INDEX IF NOT EXISTS idx_activity_customer ON customer_activity_log(customer_email, created_at)'); } catch {}
 
+// ── Expenses: CRM-grade columns + supporting tables ─────────────────────────
+// All additive. Existing rows get sensible defaults so the old GET shape stays
+// compatible with the legacy frontend until the new UI ships.
+ensureColumn('expenses', 'type',             "TEXT DEFAULT 'variable'");        // fixed | variable
+ensureColumn('expenses', 'supplier_id',      'TEXT');                            // FK → suppliers.id (nullable)
+ensureColumn('expenses', 'payment_method',   "TEXT DEFAULT 'cash'");            // cash | transfer | card | wallet
+ensureColumn('expenses', 'receipt_path',     'TEXT');                            // /uploads/receipts/...
+ensureColumn('expenses', 'is_recurring',     'INTEGER DEFAULT 0');               // 1 → suggested next month
+ensureColumn('expenses', 'status',           "TEXT DEFAULT 'approved'");        // approved | pending | rejected
+ensureColumn('expenses', 'approved_by',      'TEXT');                            // admin email/id
+ensureColumn('expenses', 'approved_at',      'DATETIME');
+ensureColumn('expenses', 'rejection_reason', 'TEXT');
+ensureColumn('expenses', 'created_by',       'TEXT');                            // admin email/id who added the row
+ensureColumn('expenses', 'category_id',      'TEXT');                            // optional FK → expense_categories.id
+ensureColumn('expenses', 'source_ref',       'TEXT');                            // e.g. "return:<id>" when auto-generated
+
+db.exec(`
+  CREATE TABLE IF NOT EXISTS expense_categories (
+    id          TEXT PRIMARY KEY,
+    key         TEXT UNIQUE NOT NULL,         -- short slug used as legacy expenses.category value
+    name_ar     TEXT NOT NULL,
+    name_en     TEXT,
+    color       TEXT DEFAULT '#6B7280',
+    icon        TEXT,                          -- optional emoji or icon name
+    is_default  INTEGER DEFAULT 0,             -- 1 → seeded default, can be renamed but not deleted
+    active      INTEGER DEFAULT 1,
+    sort_order  INTEGER DEFAULT 0,
+    created_at  DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at  DATETIME DEFAULT CURRENT_TIMESTAMP
+  )
+`);
+db.exec(`
+  CREATE TABLE IF NOT EXISTS suppliers (
+    id         TEXT PRIMARY KEY,
+    name       TEXT UNIQUE NOT NULL,
+    phone      TEXT,
+    email      TEXT,
+    notes      TEXT,
+    active     INTEGER DEFAULT 1,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+  )
+`);
+db.exec(`
+  CREATE TABLE IF NOT EXISTS category_budgets (
+    category_id    TEXT PRIMARY KEY,
+    monthly_budget REAL DEFAULT 0,
+    updated_at     DATETIME DEFAULT CURRENT_TIMESTAMP
+  )
+`);
+
+// Seed default categories (idempotent). The keys here match the legacy
+// EXPENSE_CATEGORIES enum used by the old expenses.category column, plus the
+// new ones the spec requires. Default rows have is_default=1 so the admin UI
+// can block hard-delete (rename + hide-only allowed).
+(() => {
+  const seeds = [
+    { key: 'salaries',  name_ar: 'رواتب',           name_en: 'Salaries',         color: '#534AB7', icon: '👥', sort_order: 1 },
+    { key: 'marketing', name_ar: 'تسويق',           name_en: 'Marketing',        color: '#3B82F6', icon: '📣', sort_order: 2 },
+    { key: 'packing',   name_ar: 'تغليف ومواد',     name_en: 'Packing',          color: '#16A34A', icon: '📦', sort_order: 3 },
+    { key: 'shipping',  name_ar: 'شحن',              name_en: 'Shipping',         color: '#F97316', icon: '🚚', sort_order: 4 },
+    { key: 'overhead',  name_ar: 'تشغيلي',           name_en: 'Operating',        color: '#EC4899', icon: '⚙', sort_order: 5 },
+    { key: 'general',   name_ar: 'عام',              name_en: 'General',          color: '#6B7280', icon: '🧾', sort_order: 6 },
+    { key: 'purchases', name_ar: 'مشتريات منتجات',   name_en: 'Product purchases', color: '#0EA5E9', icon: '🛒', sort_order: 7 },
+    { key: 'banking',   name_ar: 'مصاريف بنكية',     name_en: 'Banking fees',     color: '#9333EA', icon: '🏦', sort_order: 8 },
+    { key: 'taxes',     name_ar: 'ضرائب',            name_en: 'Taxes',            color: '#DC2626', icon: '🧾', sort_order: 9 },
+    { key: 'returns',   name_ar: 'مرتجعات',          name_en: 'Returns',          color: '#B45309', icon: '↩',  sort_order: 10 },
+  ];
+  const ins = db.prepare(`
+    INSERT INTO expense_categories (id, key, name_ar, name_en, color, icon, is_default, active, sort_order)
+    VALUES (?, ?, ?, ?, ?, ?, 1, 1, ?)
+    ON CONFLICT(key) DO NOTHING
+  `);
+  seeds.forEach((s, i) => ins.run(`ec_def_${s.key}`, s.key, s.name_ar, s.name_en, s.color, s.icon, s.sort_order || i));
+  // Backfill expenses.category_id from category.key for legacy rows
+  try {
+    const rows = db.prepare("SELECT id, category FROM expenses WHERE category_id IS NULL AND category IS NOT NULL").all();
+    if (rows.length) {
+      const lookup = new Map(db.prepare('SELECT id, key FROM expense_categories').all().map(r => [r.key, r.id]));
+      const upd = db.prepare('UPDATE expenses SET category_id = ? WHERE id = ?');
+      db.transaction(() => { rows.forEach(r => { const cid = lookup.get(r.category); if (cid) upd.run(cid, r.id); }); })();
+    }
+  } catch (err) { console.warn('[nawra-api] expense category_id backfill skipped:', err.message); }
+})();
+
 // Slug uniqueness — best-effort. We add a partial unique index that excludes
 // NULLs so legacy rows without a slug don't all collide on NULL.
 try { db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_products_slug ON products(slug) WHERE slug IS NOT NULL'); } catch {}
@@ -2250,17 +2334,52 @@ app.get('/api/stock-changes', (_req, res) => {
 });
 
 // ── EXPENSES ──────────────────────────────────────────────────────────────────
-// Categories used by the admin: salaries, marketing, packing, shipping, overhead, general
-const EXPENSE_CATEGORIES = ['salaries','marketing','packing','shipping','overhead','general'];
+// Categories are now DB-backed via expense_categories. The legacy enum is
+// kept ONLY as a fallback for validation when category_id isn't supplied —
+// older clients still POST the bare `category` slug, which we accept.
+const LEGACY_CATEGORY_KEYS = new Set([
+  'salaries','marketing','packing','shipping','overhead','general',
+  'purchases','banking','taxes','returns',
+]);
+const EXPENSE_PAYMENT_METHODS = new Set(['cash','transfer','card','wallet']);
+const EXPENSE_TYPES = new Set(['fixed','variable']);
+
+// Returns the configured "expense approval required above X EGP" threshold.
+// Stored in settings.store.expense_approval_* (set via Settings → المصروفات).
+function getExpenseApprovalConfig() {
+  try {
+    const row = db.prepare('SELECT value FROM settings WHERE key = ?').get('store');
+    const store = row ? JSON.parse(row.value || '{}') : {};
+    return {
+      enabled:   !!store.expense_approval_enabled,
+      threshold: Number(store.expense_approval_threshold) || 0,
+    };
+  } catch { return { enabled: false, threshold: 0 }; }
+}
+
+function expenseRowOut(r) {
+  if (!r) return null;
+  // Cast booleans + numbers for the frontend
+  return {
+    ...r,
+    is_recurring: !!r.is_recurring,
+  };
+}
 
 app.get('/api/expenses', (req, res) => {
   try {
-    const { month, year, category, from, to } = req.query;
+    const { month, year, category, category_id, from, to, status, type, payment_method, supplier_id, q } = req.query;
     let sql = 'SELECT * FROM expenses WHERE 1=1';
     const params = [];
-    if (category) { sql += ' AND category = ?'; params.push(category); }
-    if (from)     { sql += ' AND date >= ?';   params.push(from); }
-    if (to)       { sql += ' AND date <= ?';   params.push(to); }
+    if (category)        { sql += ' AND category = ?';        params.push(category); }
+    if (category_id)     { sql += ' AND category_id = ?';     params.push(category_id); }
+    if (status)          { sql += ' AND status = ?';          params.push(status); }
+    if (type)            { sql += ' AND type = ?';            params.push(type); }
+    if (payment_method)  { sql += ' AND payment_method = ?';  params.push(payment_method); }
+    if (supplier_id)     { sql += ' AND supplier_id = ?';     params.push(supplier_id); }
+    if (q)               { sql += ' AND (description LIKE ? OR notes LIKE ?)'; const like = `%${q}%`; params.push(like, like); }
+    if (from) { sql += ' AND date >= ?'; params.push(from); }
+    if (to)   { sql += ' AND date <= ?'; params.push(to); }
     if (month && year) {
       const mm = String(month).padStart(2, '0');
       sql += ' AND date >= ? AND date <= ?';
@@ -2270,33 +2389,88 @@ app.get('/api/expenses', (req, res) => {
       params.push(`${year}-01-01`, `${year}-12-31`);
     }
     sql += ' ORDER BY date DESC, created_at DESC';
-    const rows = db.prepare(sql).all(...params);
+    const rows = db.prepare(sql).all(...params).map(expenseRowOut);
     res.json(rows);
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 function computeAmount(qty, unit, given) {
   const computed = (Number(qty)||0) * (Number(unit)||0);
-  // If the caller supplies an explicit amount, honour it; otherwise auto-compute
   if (given !== undefined && given !== null && given !== '' && !Number.isNaN(Number(given))) return Number(given);
   return computed;
+}
+
+// Resolve a category slug → id, or accept an id directly. Returns null/null on
+// invalid input so the caller can 400 out.
+function resolveCategory({ category, category_id }) {
+  if (category_id) {
+    const row = db.prepare('SELECT id, key FROM expense_categories WHERE id = ?').get(category_id);
+    if (row) return { id: row.id, key: row.key };
+  }
+  if (category) {
+    const row = db.prepare('SELECT id, key FROM expense_categories WHERE key = ?').get(category);
+    if (row) return { id: row.id, key: row.key };
+    // Legacy enum fallback — accept the bare slug without a DB row
+    if (LEGACY_CATEGORY_KEYS.has(category)) return { id: null, key: category };
+  }
+  return { id: null, key: null };
 }
 
 app.post('/api/expenses', (req, res) => {
   try {
     const e = req.body || {};
-    if (!e.category) return res.status(400).json({ error: 'category required' });
-    if (!EXPENSE_CATEGORIES.includes(e.category)) return res.status(400).json({ error: 'invalid category' });
+    const cat = resolveCategory(e);
+    if (!cat.key) return res.status(400).json({ error: 'category required' });
+
     const id = e.id || `ex_${Date.now().toString(36)}_${Math.random().toString(36).slice(2,5)}`;
     const qty  = Number(e.quantity)   || 0;
     const unit = Number(e.unit_price) || 0;
     const amt  = computeAmount(qty, unit, e.amount);
     const date = e.date || new Date().toISOString().slice(0,10);
+    const type = EXPENSE_TYPES.has(e.type) ? e.type : 'variable';
+    const pm   = EXPENSE_PAYMENT_METHODS.has(e.payment_method) ? e.payment_method : 'cash';
+
+    // Approval workflow — if enabled and the expense crosses the threshold AND
+    // the caller is not the super admin, mark as pending.
+    const cfg = getExpenseApprovalConfig();
+    const isSuper = e.created_by === SUPER_ADMIN_FALLBACK || e.actor_role === 'super_admin';
+    let status = 'approved';
+    if (cfg.enabled && cfg.threshold > 0 && amt >= cfg.threshold && !isSuper) {
+      status = 'pending';
+    }
+    if (e.status === 'pending' || e.status === 'rejected' || e.status === 'approved') status = e.status;
+
     db.prepare(`
-      INSERT INTO expenses (id, category, description, quantity, unit_price, amount, date, notes)
-      VALUES (?,?,?,?,?,?,?,?)
-    `).run(id, e.category, e.description||null, qty, unit, amt, date, e.notes||null);
-    res.json({ ok: true, id, amount: amt });
+      INSERT INTO expenses (
+        id, category, category_id, description, quantity, unit_price, amount, date, notes,
+        type, supplier_id, payment_method, receipt_path, is_recurring,
+        status, approved_by, approved_at, rejection_reason, created_by, source_ref
+      ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+    `).run(
+      id, cat.key, cat.id, e.description||null, qty, unit, amt, date, e.notes||null,
+      type, e.supplier_id || null, pm, e.receipt_path || null, e.is_recurring ? 1 : 0,
+      status,
+      status === 'approved' ? (e.created_by || SUPER_ADMIN_FALLBACK) : null,
+      status === 'approved' ? new Date().toISOString() : null,
+      null,
+      e.created_by || null,
+      e.source_ref || null,
+    );
+
+    // If pending → notify super admin via inbox.
+    if (status === 'pending') {
+      sendMessage({
+        from_user_id: e.created_by || null,
+        from_user_name: e.created_by_name || 'الإدارة',
+        to_user_id: SUPER_ADMIN_FALLBACK,
+        type: 'request',
+        subject: `مصروف بانتظار الموافقة: ${(e.description||'').slice(0,60) || '—'}`,
+        body: `${cat.key} · ${amt.toLocaleString()} ج`,
+        metadata: { kind: 'expense_approval', expense_id: id, amount: amt, category: cat.key, requires_action: true },
+      });
+    }
+
+    res.json({ ok: true, id, amount: amt, status });
   } catch (err) { console.error('POST /api/expenses error:', err); res.status(500).json({ error: err.message }); }
 });
 
@@ -2305,20 +2479,46 @@ app.put('/api/expenses/:id', (req, res) => {
     const cur = db.prepare('SELECT * FROM expenses WHERE id = ?').get(req.params.id);
     if (!cur) return res.status(404).json({ error: 'not found' });
     const e = req.body || {};
+
     const qty  = e.quantity   !== undefined ? Number(e.quantity)   : cur.quantity;
     const unit = e.unit_price !== undefined ? Number(e.unit_price) : cur.unit_price;
     const amt  = e.amount     !== undefined ? Number(e.amount)     : computeAmount(qty, unit);
+
+    // Optional category change — resolve via slug OR id.
+    let catKey = cur.category;
+    let catId  = cur.category_id;
+    if (e.category != null || e.category_id != null) {
+      const resolved = resolveCategory(e);
+      if (resolved.key) { catKey = resolved.key; catId = resolved.id; }
+    }
+
+    const type = e.type != null && EXPENSE_TYPES.has(e.type) ? e.type : cur.type;
+    const pm   = e.payment_method != null && EXPENSE_PAYMENT_METHODS.has(e.payment_method) ? e.payment_method : cur.payment_method;
+
     db.prepare(`
       UPDATE expenses SET
-        category    = COALESCE(?, category),
-        description = COALESCE(?, description),
-        quantity    = ?, unit_price = ?, amount = ?,
-        date        = COALESCE(?, date),
-        notes       = COALESCE(?, notes),
-        updated_at  = datetime('now')
+        category        = ?,
+        category_id     = ?,
+        description     = COALESCE(?, description),
+        quantity        = ?, unit_price = ?, amount = ?,
+        date            = COALESCE(?, date),
+        notes           = COALESCE(?, notes),
+        type            = ?,
+        supplier_id     = COALESCE(?, supplier_id),
+        payment_method  = ?,
+        receipt_path    = COALESCE(?, receipt_path),
+        is_recurring    = COALESCE(?, is_recurring),
+        updated_at      = datetime('now')
       WHERE id = ?
-    `).run(e.category||null, e.description||null, qty, unit, amt, e.date||null, e.notes||null, req.params.id);
-    res.json(db.prepare('SELECT * FROM expenses WHERE id = ?').get(req.params.id));
+    `).run(
+      catKey, catId,
+      e.description ?? null, qty, unit, amt,
+      e.date ?? null, e.notes ?? null,
+      type, e.supplier_id ?? null, pm, e.receipt_path ?? null,
+      e.is_recurring === undefined ? null : (e.is_recurring ? 1 : 0),
+      req.params.id
+    );
+    res.json(expenseRowOut(db.prepare('SELECT * FROM expenses WHERE id = ?').get(req.params.id)));
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
@@ -2329,6 +2529,242 @@ app.delete('/api/expenses/:id', (req, res) => {
     res.json({ ok: true });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
+
+// ── Expense approval flow ────────────────────────────────────────────────────
+app.post('/api/expenses/:id/approve', (req, res) => {
+  try {
+    const cur = db.prepare('SELECT * FROM expenses WHERE id = ?').get(req.params.id);
+    if (!cur) return res.status(404).json({ error: 'not found' });
+    const actor = (req.body && req.body.actor) || SUPER_ADMIN_FALLBACK;
+    db.prepare(`
+      UPDATE expenses SET status = 'approved', approved_by = ?, approved_at = datetime('now'), rejection_reason = NULL
+      WHERE id = ?
+    `).run(actor, req.params.id);
+    if (cur.created_by) {
+      sendMessage({
+        from_user_id: actor, from_user_name: 'Super Admin',
+        to_user_id: cur.created_by, type: 'approval',
+        subject: 'تمت الموافقة على مصروف',
+        body: `${cur.description || '—'} · ${(cur.amount||0).toLocaleString()} ج`,
+        metadata: { kind: 'expense_approved', expense_id: cur.id },
+      });
+    }
+    res.json({ ok: true });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.post('/api/expenses/:id/reject', (req, res) => {
+  try {
+    const cur = db.prepare('SELECT * FROM expenses WHERE id = ?').get(req.params.id);
+    if (!cur) return res.status(404).json({ error: 'not found' });
+    const actor  = (req.body && req.body.actor)  || SUPER_ADMIN_FALLBACK;
+    const reason = (req.body && req.body.reason) || null;
+    db.prepare(`
+      UPDATE expenses SET status = 'rejected', approved_by = ?, approved_at = datetime('now'), rejection_reason = ?
+      WHERE id = ?
+    `).run(actor, reason, req.params.id);
+    if (cur.created_by) {
+      sendMessage({
+        from_user_id: actor, from_user_name: 'Super Admin',
+        to_user_id: cur.created_by, type: 'rejection',
+        subject: 'تم رفض مصروف',
+        body: reason || 'بدون سبب محدد',
+        metadata: { kind: 'expense_rejected', expense_id: cur.id, reason },
+      });
+    }
+    res.json({ ok: true });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// Recurring-expense suggestions: look at last month's expenses where
+// is_recurring = 1, exclude any that already exist this month with the same
+// description + supplier_id + category_id. Returns the list — frontend asks
+// the user to confirm each one before copying it forward.
+app.get('/api/expenses/recurring-suggestions', (req, res) => {
+  try {
+    const now = new Date();
+    const thisMonth = `${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,'0')}`;
+    const lastMonth = (() => {
+      const d = new Date(now.getFullYear(), now.getMonth() - 1, 1);
+      return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}`;
+    })();
+    const lastRows = db.prepare(`
+      SELECT * FROM expenses WHERE is_recurring = 1 AND date >= ? AND date < ?
+    `).all(`${lastMonth}-01`, `${thisMonth}-01`);
+    const thisRows = db.prepare(`SELECT description, category_id, supplier_id FROM expenses WHERE date >= ? AND date < ?`)
+      .all(`${thisMonth}-01`, `${(() => { const d=new Date(now.getFullYear(), now.getMonth()+1, 1); return d.toISOString().slice(0,10); })()}`);
+    const seen = new Set(thisRows.map(r => `${r.description||''}|${r.category_id||''}|${r.supplier_id||''}`));
+    const suggestions = lastRows
+      .filter(r => !seen.has(`${r.description||''}|${r.category_id||''}|${r.supplier_id||''}`))
+      .map(expenseRowOut);
+    res.json({ suggestions });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// ── Expense categories CRUD ──────────────────────────────────────────────────
+app.get('/api/expense-categories', (req, res) => {
+  try {
+    const all = req.query.all === '1';
+    const sql = all
+      ? 'SELECT * FROM expense_categories ORDER BY sort_order, name_ar'
+      : 'SELECT * FROM expense_categories WHERE active = 1 ORDER BY sort_order, name_ar';
+    res.json(db.prepare(sql).all());
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+app.post('/api/expense-categories', (req, res) => {
+  try {
+    const c = req.body || {};
+    if (!c.name_ar) return res.status(400).json({ error: 'name_ar required' });
+    const id  = c.id  || `ec_${Date.now().toString(36)}_${Math.random().toString(36).slice(2,5)}`;
+    const key = c.key || String(c.name_ar).toLowerCase().replace(/\s+/g,'_').replace(/[^a-z0-9_؀-ۿ-]/g,'').slice(0,40) || `cat_${id.slice(-5)}`;
+    const maxOrder = db.prepare('SELECT COALESCE(MAX(sort_order),0) AS m FROM expense_categories').get().m;
+    db.prepare(`
+      INSERT INTO expense_categories (id, key, name_ar, name_en, color, icon, is_default, active, sort_order)
+      VALUES (?, ?, ?, ?, ?, ?, 0, 1, ?)
+    `).run(id, key, c.name_ar, c.name_en || null, c.color || '#6B7280', c.icon || null, (maxOrder || 0) + 1);
+    res.json(db.prepare('SELECT * FROM expense_categories WHERE id = ?').get(id));
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+app.patch('/api/expense-categories/:id', (req, res) => {
+  try {
+    const cur = db.prepare('SELECT * FROM expense_categories WHERE id = ?').get(req.params.id);
+    if (!cur) return res.status(404).json({ error: 'not found' });
+    const c = req.body || {};
+    db.prepare(`
+      UPDATE expense_categories SET
+        name_ar = COALESCE(?, name_ar),
+        name_en = COALESCE(?, name_en),
+        color   = COALESCE(?, color),
+        icon    = COALESCE(?, icon),
+        active  = COALESCE(?, active),
+        sort_order = COALESCE(?, sort_order),
+        updated_at = datetime('now')
+      WHERE id = ?
+    `).run(c.name_ar ?? null, c.name_en ?? null, c.color ?? null, c.icon ?? null,
+           c.active === undefined ? null : (c.active ? 1 : 0),
+           c.sort_order ?? null, req.params.id);
+    res.json(db.prepare('SELECT * FROM expense_categories WHERE id = ?').get(req.params.id));
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+app.delete('/api/expense-categories/:id', (req, res) => {
+  try {
+    const cur = db.prepare('SELECT * FROM expense_categories WHERE id = ?').get(req.params.id);
+    if (!cur) return res.status(404).json({ error: 'not found' });
+    if (cur.is_default) return res.status(400).json({ error: 'cannot delete a default category (you can deactivate it instead)' });
+    const inUse = db.prepare('SELECT 1 FROM expenses WHERE category_id = ? LIMIT 1').get(req.params.id);
+    if (inUse) return res.status(400).json({ error: 'category is in use by existing expenses' });
+    db.prepare('DELETE FROM expense_categories WHERE id = ?').run(req.params.id);
+    res.json({ ok: true });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// ── Suppliers CRUD ──────────────────────────────────────────────────────────
+app.get('/api/suppliers', (req, res) => {
+  try {
+    const rows = db.prepare('SELECT * FROM suppliers WHERE active = 1 ORDER BY name').all();
+    res.json(rows);
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+app.post('/api/suppliers', (req, res) => {
+  try {
+    const s = req.body || {};
+    if (!s.name) return res.status(400).json({ error: 'name required' });
+    const id = s.id || `sup_${Date.now().toString(36)}_${Math.random().toString(36).slice(2,5)}`;
+    db.prepare(`
+      INSERT INTO suppliers (id, name, phone, email, notes)
+      VALUES (?, ?, ?, ?, ?)
+      ON CONFLICT(name) DO UPDATE SET
+        phone = excluded.phone, email = excluded.email, notes = excluded.notes
+    `).run(id, s.name, s.phone || null, s.email || null, s.notes || null);
+    res.json(db.prepare('SELECT * FROM suppliers WHERE name = ?').get(s.name));
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+app.patch('/api/suppliers/:id', (req, res) => {
+  try {
+    const cur = db.prepare('SELECT * FROM suppliers WHERE id = ?').get(req.params.id);
+    if (!cur) return res.status(404).json({ error: 'not found' });
+    const s = req.body || {};
+    db.prepare(`
+      UPDATE suppliers SET
+        name   = COALESCE(?, name),
+        phone  = COALESCE(?, phone),
+        email  = COALESCE(?, email),
+        notes  = COALESCE(?, notes),
+        active = COALESCE(?, active)
+      WHERE id = ?
+    `).run(s.name ?? null, s.phone ?? null, s.email ?? null, s.notes ?? null,
+           s.active === undefined ? null : (s.active ? 1 : 0),
+           req.params.id);
+    res.json(db.prepare('SELECT * FROM suppliers WHERE id = ?').get(req.params.id));
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+app.delete('/api/suppliers/:id', (req, res) => {
+  try {
+    const info = db.prepare('DELETE FROM suppliers WHERE id = ?').run(req.params.id);
+    if (!info.changes) return res.status(404).json({ error: 'not found' });
+    res.json({ ok: true });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// ── Category budgets (one row per category) ─────────────────────────────────
+app.get('/api/expense-budgets', (req, res) => {
+  try {
+    const rows = db.prepare(`
+      SELECT cb.category_id, cb.monthly_budget, c.key, c.name_ar, c.color
+      FROM category_budgets cb
+      LEFT JOIN expense_categories c ON c.id = cb.category_id
+    `).all();
+    res.json(rows);
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+app.put('/api/expense-budgets/:categoryId', (req, res) => {
+  try {
+    const amount = Number((req.body || {}).monthly_budget) || 0;
+    db.prepare(`
+      INSERT INTO category_budgets (category_id, monthly_budget, updated_at)
+      VALUES (?, ?, datetime('now'))
+      ON CONFLICT(category_id) DO UPDATE SET
+        monthly_budget = excluded.monthly_budget,
+        updated_at     = datetime('now')
+    `).run(req.params.categoryId, amount);
+    res.json({ ok: true, category_id: req.params.categoryId, monthly_budget: amount });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// ── Receipt upload (image OR pdf) ────────────────────────────────────────────
+const RECEIPTS_DIR = path.join(__dirname, '..', 'uploads', 'receipts');
+try { fs.mkdirSync(RECEIPTS_DIR, { recursive: true }); } catch {}
+if (multer) {
+  const upload = multer({
+    storage: multer.memoryStorage(),
+    limits: { fileSize: 3 * 1024 * 1024 },
+    fileFilter: (_req, file, cb) => {
+      const ok = /^(image\/(jpeg|png|webp)|application\/pdf)$/.test(file.mimetype);
+      cb(ok ? null : new Error('only jpg / png / webp / pdf accepted'), ok);
+    },
+  });
+  app.post('/api/expenses/upload-receipt', upload.single('receipt'), async (req, res) => {
+    try {
+      if (!req.file) return res.status(400).json({ error: 'no file' });
+      const stamp = Date.now().toString(36) + Math.random().toString(36).slice(2,5);
+      const isPdf = req.file.mimetype === 'application/pdf';
+      // Images → convert to webp; PDFs → store raw
+      let outPath;
+      if (!isPdf && sharp) {
+        outPath = path.join(RECEIPTS_DIR, `${stamp}.webp`);
+        await sharp(req.file.buffer).rotate().resize({ width: 1600, height: 1600, fit: 'inside', withoutEnlargement: true }).webp({ quality: 82 }).toFile(outPath);
+        return res.json({ ok: true, url: `/uploads/receipts/${stamp}.webp`, kind: 'image' });
+      }
+      // PDF (or no sharp): just write the bytes through
+      const ext = isPdf ? 'pdf' : (req.file.mimetype.split('/')[1] || 'bin');
+      outPath = path.join(RECEIPTS_DIR, `${stamp}.${ext}`);
+      fs.writeFileSync(outPath, req.file.buffer);
+      res.json({ ok: true, url: `/uploads/receipts/${stamp}.${ext}`, kind: isPdf ? 'pdf' : 'image' });
+    } catch (err) { res.status(500).json({ error: err.message }); }
+  });
+} else {
+  app.post('/api/expenses/upload-receipt', (_req, res) => res.status(503).json({ error: 'multer not installed on server' }));
+}
 
 // ── FINANCE — derived endpoints ───────────────────────────────────────────────
 // Revenue: SUM(orders.total) where status != 'ملغي'
