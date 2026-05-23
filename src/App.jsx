@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, createContext, useContext } from "react";
+import React, { useState, useEffect, useRef, createContext, useContext } from "react";
 import LogoImg from '/nawra-logo.png';
 
 // ─── Translations ─────────────────────────────────────────────────────────────
@@ -725,6 +725,7 @@ function CartSide({ open, close, go }) {
   const [savedAddrs, setSavedAddrs] = useState([]);
   const [selAddrId, setSelAddrId] = useState(null);
   const [showNewAddrInCart, setShowNewAddrInCart] = useState(false);
+  const [customerNotes, setCustomerNotes] = useState("");
   const W = mob ? "100vw" : "390px";
 
   // Load user's saved addresses when entering checkout step
@@ -769,8 +770,22 @@ function CartSide({ open, close, go }) {
       date: new Date().toLocaleDateString("ar-EG"),
       name, phone, city, address, lat: lat||null, lng: lng||null,
       userEmail: user?.email || null,
-      items: cart.map(i => ({ name: i.nameAr || i.nameEn || i.name || "", qty: i.qty, price: i.price })),
-      total: tot + ship, status: "جديد"
+      items: cart.map(i => ({
+        id: i.id,
+        name: i.nameAr || i.nameEn || i.name || "",
+        qty: i.qty, price: i.price,
+        img: i.img || null,
+      })),
+      total: tot + ship, status: "جديد",
+      // New fields — recorded so admin Order Details can show the breakdown,
+      // payment method, and any customer note. Defaults: cash-on-delivery, unpaid.
+      subtotal: tot,
+      shipping_cost: ship,
+      discount_amount: 0,
+      coupon_code: null,
+      payment_method: "cash",
+      payment_status: "unpaid",
+      customer_notes: (customerNotes || "").trim() || null,
     };
     try {
       const res = await fetch("/api/orders", { method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify(order) });
@@ -780,7 +795,7 @@ function CartSide({ open, close, go }) {
     const prev = JSON.parse(localStorage.getItem("nawra_orders") || "[]");
     localStorage.setItem("nawra_orders", JSON.stringify([order, ...prev]));
     window.dispatchEvent(new CustomEvent("nawra-new-order", { detail: order }));
-    clr(); setStep(2);
+    clr(); setCustomerNotes(""); setStep(2);
   };
 
   // Submit from manual form
@@ -839,6 +854,16 @@ function CartSide({ open, close, go }) {
                 <span style={{fontFamily:C.fa,fontSize:13}}>{t("cartTotal")}</span>
                 <span>{tot+ship} {t("egp")}</span>
               </div>
+            </div>
+
+            {/* Customer notes (optional) — shown to the admin in Order Details */}
+            <div style={{ marginBottom:16 }}>
+              <label style={{ display:"block", fontFamily:C.fe, fontSize:10, letterSpacing:"0.2em", color:C.mu, marginBottom:5, textTransform:"uppercase" }}>
+                {lang === "ar" ? "ملاحظات للطلب (اختياري)" : "Order notes (optional)"}
+              </label>
+              <textarea rows={2} value={customerNotes} onChange={e => setCustomerNotes(e.target.value)}
+                placeholder={lang === "ar" ? "مثلاً: اتصلوا قبل الوصول..." : "e.g. Please call before arrival..."}
+                style={{ width:"100%", padding:"10px 12px", border:"1px solid rgba(196,149,106,.25)", background:C.wh, fontFamily:C.fb, fontSize:13, outline:"none", boxSizing:"border-box", resize:"vertical", minHeight:54, direction:dir }} />
             </div>
 
             {/* CASE 1 — Logged-in + has saved addresses + not adding new ─ pick one */}
@@ -1267,6 +1292,8 @@ function AdminDash({ go }) {
   // Legacy localStorage sessions stored role as "admin"; treat them as super
   // until they log out & back in (which will fetch the proper role).
   const isSuper = activeRole === "super_admin" || activeRole === "admin";
+  // Per ROLES spec: super admin and "مشرف طلبات" can update order status / cancel
+  const canManageOrders = isSuper || activeRole === "orders_admin";
 
   // ── Approvals (product delete / stock reduce / etc.) + Notifications ───────
   const [approvals, setApprovals] = useState([]);
@@ -1971,26 +1998,44 @@ function AdminDash({ go }) {
     setEditId(p.id); setShowAdd(true);
   };
 
-  const updateOrderStatus = async (id, status) => {
+  // Update one order's status and (optionally) payment_status / cancellation
+  // reason. Sends actor metadata so the server can append a status_history row
+  // with "who did what when". Always mirrors to localStorage so other tabs and
+  // the customer's MyOrders page pick up the change in real time.
+  const updateOrderStatus = async (id, statusOrPatch, extra = {}) => {
+    // Backwards-compatible: callers can pass either (id, "تم الشحن") OR
+    // (id, { status, cancellation_reason, payment_status, note, ... })
+    const patch = typeof statusOrPatch === "string"
+      ? { status: statusOrPatch, ...extra }
+      : { ...statusOrPatch, ...extra };
+
+    const actor_id   = (authUser && authUser.email) || null;
+    const actor_name = (authUser && (authUser.name || authUser.email)) || "الإدارة";
+
     // Optimistic local update
-    setOrderList(prev => prev.map(o => o.id === id ? { ...o, status } : o));
+    setOrderList(prev => prev.map(o => o.id === id ? { ...o, ...patch } : o));
     setStatusEdit({});
-    // Persist to API
+    let fresh = null;
     try {
-      await fetch(`/api/orders/${id}`, {
+      const r = await fetch(`/api/orders/${id}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ status })
+        body: JSON.stringify({ ...patch, actor_id, actor_name }),
       });
+      if (r.ok) {
+        const data = await r.json().catch(() => null);
+        if (data && data.order) {
+          fresh = data.order;
+          setOrderList(prev => prev.map(o => o.id === id ? { ...o, ...fresh } : o));
+        }
+      }
     } catch {}
-    // ALWAYS mirror to localStorage — fires the "storage" event in any other
-    // open tab/window, which both this admin's other tabs AND the customer's
-    // MyOrders page listen for. Real-time cross-tab status updates.
     try {
       const orders = JSON.parse(localStorage.getItem("nawra_orders") || "[]");
       localStorage.setItem("nawra_orders",
-        JSON.stringify(orders.map(o => o.id === id ? { ...o, status } : o)));
+        JSON.stringify(orders.map(o => o.id === id ? { ...o, ...patch, ...(fresh||{}) } : o)));
     } catch {}
+    return fresh;
   };
 
   const statCard = (label, value, color="#2A1F0E") => (
@@ -2000,9 +2045,120 @@ function AdminDash({ go }) {
     </div>
   );
 
-  // Detail modal state — opened by clicking any order card
-  const [detailOrderId, setDetailOrderId] = useState(null);
-  const detailOrder = detailOrderId ? orderList.find(o => o.id === detailOrderId) : null;
+  // Detail page state — keyed by hash route. Clicking an order navigates to
+  // `#admin/orders/<id>` so the browser back button takes the admin back to
+  // the list. `detailOrderId` is derived from the hash on every render.
+  const detailOrderId = (() => {
+    if (typeof window === "undefined") return null;
+    const h = window.location.hash || "";
+    const m = h.match(/^#admin\/orders\/(.+)$/);
+    return m ? decodeURIComponent(m[1]) : null;
+  })();
+  const setDetailOrderId = (id) => {
+    if (id == null) {
+      // Returning to the list — keep the user on the orders tab.
+      if (window.location.hash !== "#admin") window.location.hash = "#admin";
+      setTab("orders");
+    } else {
+      window.location.hash = `#admin/orders/${encodeURIComponent(id)}`;
+    }
+  };
+  // Order may have been cached only by short order_number — try both id forms.
+  const detailOrder = detailOrderId
+    ? (orderList.find(o => String(o.id) === String(detailOrderId)) ||
+       orderList.find(o => String(o.order_number) === String(detailOrderId)))
+    : null;
+  // Whenever the user lands on an order-detail URL, ensure the active tab is
+  // "orders" (so leaving the detail returns to the right list, and the topbar
+  // title is correct).
+  useEffect(() => {
+    if (detailOrderId && tab !== "orders") setTab("orders");
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [detailOrderId]);
+  // Re-render when the hash changes so detailOrderId picks up the new value
+  // (the AdminDash itself doesn't otherwise subscribe to hashchange).
+  const [, forceHashTick] = useState(0);
+  useEffect(() => {
+    const h = () => forceHashTick(n => n + 1);
+    window.addEventListener("hashchange", h);
+    return () => window.removeEventListener("hashchange", h);
+  }, []);
+
+  // ── Orders page filters / selection / pagination / auto-refresh ────────────
+  const [ordSearch,       setOrdSearch]       = useState("");
+  const [ordStatusFilter, setOrdStatusFilter] = useState("all");   // all | جديد | قيد التجهيز | تم الشحن | مكتمل | ملغي
+  const [ordPayFilter,    setOrdPayFilter]    = useState("all");   // all | cash | visa | wallet
+  const [ordFrom,         setOrdFrom]         = useState("");      // YYYY-MM-DD
+  const [ordTo,           setOrdTo]           = useState("");
+  const [ordSelected,     setOrdSelected]     = useState({});      // { [id]: true }
+  const [ordPage,         setOrdPage]         = useState(1);
+  const ORD_PER_PAGE = 20;
+  const [ordLastRefresh,  setOrdLastRefresh]  = useState(Date.now());
+  const [, forceClockTick] = useState(0);
+  // Refresh the orders list every 60s while the orders tab is open. Separate
+  // from the 10s general poll (which already runs for overview).
+  useEffect(() => {
+    if (tab !== "orders") return;
+    refreshOrders().then(()=>setOrdLastRefresh(Date.now()));
+    const i = setInterval(async () => {
+      await refreshOrders();
+      setOrdLastRefresh(Date.now());
+    }, 60000);
+    // Tick the "آخر تحديث: منذ X" label every 15s for liveness.
+    const clock = setInterval(() => forceClockTick(n => n + 1), 15000);
+    return () => { clearInterval(i); clearInterval(clock); };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tab]);
+  // Reset to page 1 whenever filters change so users don't land on an empty page.
+  useEffect(() => { setOrdPage(1); }, [ordSearch, ordStatusFilter, ordPayFilter, ordFrom, ordTo]);
+
+  // Bulk-update helper — used by the bulk action bar.
+  const bulkUpdateStatus = async (ids, status) => {
+    if (!ids.length) return;
+    const ok = window.confirm(`تغيير حالة ${ids.length} طلب إلى "${status}"؟`);
+    if (!ok) return;
+    for (const id of ids) {
+      // sequential so reservation/shipping side-effects don't race each other
+      // eslint-disable-next-line no-await-in-loop
+      await updateOrderStatus(id, status);
+    }
+    setOrdSelected({});
+    setSavedToast(`تم تحديث ${ids.length} طلب`);
+    setTimeout(()=>setSavedToast(""), 2200);
+  };
+
+  // Human-readable "X ago" for the last-refresh label.
+  const relTime = (ts) => {
+    const s = Math.max(0, Math.round((Date.now() - ts) / 1000));
+    if (s < 5)   return "الآن";
+    if (s < 60)  return `منذ ${s} ث`;
+    const m = Math.floor(s / 60);
+    if (m < 60)  return `منذ ${m} د`;
+    const h = Math.floor(m / 60);
+    return `منذ ${h} س`;
+  };
+
+  // Resolve a thumbnail URL for an order line item. Falls back to the legacy
+  // PRODS catalog (matched by Arabic name) for orders saved before items
+  // started carrying their own img field.
+  const thumbForItem = (it) => {
+    if (it && it.img) return it.img;
+    if (!it || !it.name) return null;
+    const p = (prods || []).find(p =>
+      p.nameAr === it.name || p.nameEn === it.name || p.name === it.name);
+    return (p && p.img) || null;
+  };
+
+  // Payment-method label + colour. Single source of truth so the table cell,
+  // the filter badge, and the detail page all match.
+  const PAY_METHOD_LABEL = { cash: "كاش", visa: "فيزا", wallet: "محفظة" };
+  const PAY_METHOD_STYLE = {
+    cash:   { bg: "#F0FDF4", fg: "#15803D" },
+    visa:   { bg: "#EFF6FF", fg: "#1D4ED8" },
+    wallet: { bg: "#FEF3C7", fg: "#92400E" },
+  };
+  const payStyle = (m) => PAY_METHOD_STYLE[m] || PAY_METHOD_STYLE.cash;
+  const payLabel = (m) => PAY_METHOD_LABEL[m] || PAY_METHOD_LABEL.cash;
 
   // Customers — fetched from /api/users (single source of truth: SQLite)
   const [allUsers, setAllUsers] = useState([]);
@@ -2211,9 +2367,13 @@ function AdminDash({ go }) {
 
   // ── Sidebar nav button ─────────────────────────────────────────────────────
   const NavBtn = ({ item }) => {
-    const active = tab === item.k;
+    const active = tab === item.k && !detailOrderId;
     return (
-      <button onClick={()=>setTab(item.k)}
+      <button onClick={()=>{
+        // Leave any order-detail subroute when switching tabs.
+        if (window.location.hash !== "#admin") window.location.hash = "#admin";
+        setTab(item.k);
+      }}
         style={{
           display:"flex", alignItems:"center", gap:10, width:"100%",
           padding:"10px 16px",
@@ -2652,49 +2812,311 @@ function AdminDash({ go }) {
 
           {/* ORDERS */}
           {tab === "orders" && (
-            <div>
-              <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:12}}>
-                <span style={{fontSize:13,color:ui.textSub,fontFamily:ui.fontBody}}>الإجمالي: {orderList.length} طلب</span>
-                <button onClick={refreshOrders}
-                  style={{display:"flex",alignItems:"center",gap:5,background:ui.cardBg,color:ui.text,
-                    border:ui.border,padding:"6px 12px",cursor:"pointer",fontFamily:ui.fontBody,
-                    fontSize:12,borderRadius:6}}>
-                  <AdmIcon name="refresh" size={13}/> تحديث
-                </button>
-              </div>
-              {orderList.length===0 ? (
-                <Placeholder icon="shopping-cart" title="مفيش طلبات لحد دلوقتي" body="هتبان الطلبات هنا أول ما عميل يكمّل عملية الشراء." />
-              ) : (
-                <div style={{background:ui.cardBg,border:ui.border,borderRadius:ui.radius,overflow:"hidden"}}>
-                  {orderList.map((o,i)=>{
-                    const b = badgeStyle(o.status);
-                    return (
-                      <div key={o.id} onClick={()=>setDetailOrderId(o.id)}
-                        style={{display:"grid",gridTemplateColumns:mob?"1fr":"1.5fr 1fr 1fr auto auto",
-                          gap:10,alignItems:"center",padding:"12px 16px",
-                          borderTop: i>0 ? `0.5px solid #EEE` : "none",cursor:"pointer",
-                          transition:"background .15s"}}
-                        onMouseEnter={e=>e.currentTarget.style.background="#FAFAFA"}
-                        onMouseLeave={e=>e.currentTarget.style.background="transparent"}>
-                        <div>
-                          <div style={{fontSize:13.5,color:ui.text,fontFamily:ui.fontBody,fontWeight:500}}>{o.name}</div>
-                          <div style={{fontSize:11,color:ui.textSub,fontFamily:ui.fontBody,marginTop:2}}>{o.phone} · {o.city}</div>
-                        </div>
-                        {!mob && <div style={{fontSize:12,color:ui.textSub,fontFamily:ui.fontBody}}>{o.date}</div>}
-                        {!mob && <div style={{fontSize:11,color:ui.textSub,fontFamily:ui.fontBody}}>{(o.items||[]).length} منتجات</div>}
-                        <span style={{fontSize:10,padding:"3px 10px",borderRadius:20,background:b.bg,color:b.fg,fontFamily:ui.fontBody,justifySelf:"start"}}>{o.status}</span>
-                        <div style={{fontSize:13.5,fontWeight:500,color:ui.text,fontFamily:ui.fontBody,textAlign:"left"}}>{(o.total||0).toLocaleString()} ج</div>
-                      </div>
-                    );
-                  })}
-                </div>
-              )}
-              <OrderDetailModal
+            detailOrderId ? (
+              <OrderDetailPage
                 order={detailOrder}
-                onClose={()=>setDetailOrderId(null)}
-                onStatusChange={(id, status)=>updateOrderStatus(id, status)}
+                orderId={detailOrderId}
+                onBack={()=>setDetailOrderId(null)}
+                onStatusChange={updateOrderStatus}
+                canManage={canManageOrders}
+                thumbForItem={thumbForItem}
+                payLabel={payLabel}
+                payStyle={payStyle}
+                badgeStyle={badgeStyle}
+                ui={ui}
+                mob={mob}
+                refreshOrders={refreshOrders}
               />
-            </div>
+            ) : (() => {
+              // ── KPI cards ────────────────────────────────────────────────
+              const today0 = (() => { const d=new Date(); d.setHours(0,0,0,0); return d; })();
+              const todayOrders = orderList.filter(o => {
+                const d = parseOrderDate(o); if (!d) return false;
+                const x = new Date(d); x.setHours(0,0,0,0);
+                return x.getTime() === today0.getTime();
+              });
+              const kpiPreparing = orderList.filter(o => o.status === "قيد التجهيز").length;
+              const kpiShipped   = orderList.filter(o => o.status === "تم الشحن").length;
+              const kpiSalesToday = todayOrders
+                .filter(o => o.status !== "ملغي")
+                .reduce((s,o)=>s+(Number(o.total)||0), 0);
+              const nonCancelled = orderList.filter(o => o.status !== "ملغي");
+              const kpiAvgOrder = nonCancelled.length
+                ? Math.round(nonCancelled.reduce((s,o)=>s+(Number(o.total)||0),0) / nonCancelled.length)
+                : 0;
+
+              // ── Filter pipeline ──────────────────────────────────────────
+              const q = (ordSearch || "").trim().toLowerCase();
+              const fromTs = ordFrom ? new Date(ordFrom+"T00:00:00").getTime() : null;
+              const toTs   = ordTo   ? new Date(ordTo  +"T23:59:59").getTime() : null;
+              const filtered = orderList.filter(o => {
+                if (ordStatusFilter !== "all" && o.status !== ordStatusFilter) return false;
+                if (ordPayFilter !== "all" && (o.payment_method || "cash") !== ordPayFilter) return false;
+                if (fromTs || toTs) {
+                  const d = parseOrderDate(o); if (!d) return false;
+                  const t = d.getTime();
+                  if (fromTs && t < fromTs) return false;
+                  if (toTs   && t > toTs)   return false;
+                }
+                if (q) {
+                  const hay = `${o.order_number||""} ${o.id||""} ${o.name||""} ${o.phone||""}`.toLowerCase();
+                  if (!hay.includes(q)) return false;
+                }
+                return true;
+              });
+
+              // ── Pagination ───────────────────────────────────────────────
+              const totalPages = Math.max(1, Math.ceil(filtered.length / ORD_PER_PAGE));
+              const page = Math.min(ordPage, totalPages);
+              const pageRows = filtered.slice((page-1)*ORD_PER_PAGE, page*ORD_PER_PAGE);
+
+              const selectedIds = Object.keys(ordSelected).filter(k => ordSelected[k]);
+              const allOnPageSelected = pageRows.length > 0 && pageRows.every(o => ordSelected[o.id]);
+              const togglePage = () => {
+                const next = { ...ordSelected };
+                if (allOnPageSelected) { pageRows.forEach(o => { delete next[o.id]; }); }
+                else                    { pageRows.forEach(o => { next[o.id] = true; }); }
+                setOrdSelected(next);
+              };
+
+              // CSV export for the current filtered set (not just this page).
+              const exportFilteredCsv = () => {
+                const head = ["#","الاسم","الهاتف","المدينة","التاريخ","المنتجات","الإجمالي","الدفع","الحالة"];
+                const rows = filtered.map(o => [
+                  o.order_number || o.id, o.name||"", o.phone||"", o.city||"",
+                  o.date||"", (o.items||[]).length,
+                  o.total||0, payLabel(o.payment_method||"cash"), o.status||""
+                ].map(v => `"${String(v).replace(/"/g,'""')}"`).join(","));
+                const csv = "﻿" + [head.join(","), ...rows].join("\n");
+                const url = URL.createObjectURL(new Blob([csv], { type:"text/csv;charset=utf-8" }));
+                const a = document.createElement("a"); a.href = url;
+                a.download = `nawra-orders-${new Date().toISOString().slice(0,10)}.csv`;
+                a.click(); URL.revokeObjectURL(url);
+              };
+
+              return (
+              <div>
+                {/* 4 KPI cards */}
+                <div style={{display:"grid",gridTemplateColumns:mob?"1fr 1fr":"repeat(4,1fr)",gap:10,marginBottom:14}}>
+                  <Metric label="قيد التجهيز"        value={kpiPreparing} />
+                  <Metric label="تم الشحن"            value={kpiShipped} />
+                  <Metric label="مبيعات اليوم"        value={kpiSalesToday.toLocaleString()} suffix="ج" />
+                  <Metric label="متوسط قيمة الطلب"    value={kpiAvgOrder.toLocaleString()} suffix="ج" />
+                </div>
+
+                {/* Filter bar */}
+                <div style={{background:ui.cardBg,border:ui.border,borderRadius:ui.radius,padding:"12px 14px",marginBottom:12,
+                  display:"grid",gap:8,gridTemplateColumns: mob ? "1fr" : "minmax(220px,2fr) repeat(4, minmax(0,1fr))"}}>
+                  <input value={ordSearch} onChange={e=>setOrdSearch(e.target.value)}
+                    placeholder="بحث برقم الطلب، الاسم أو الهاتف..."
+                    style={{padding:"8px 12px",border:ui.border,borderRadius:6,background:ui.cardBg,
+                      fontFamily:ui.fontBody,fontSize:13,color:ui.text,outline:"none",direction:"rtl"}}/>
+                  <select value={ordStatusFilter} onChange={e=>setOrdStatusFilter(e.target.value)}
+                    style={{padding:"8px 10px",border:ui.border,borderRadius:6,background:ui.cardBg,
+                      fontFamily:ui.fontBody,fontSize:12.5,color:ui.text,outline:"none"}}>
+                    <option value="all">كل الحالات</option>
+                    {ORDER_STATUSES.map(s => <option key={s} value={s}>{s}</option>)}
+                  </select>
+                  <select value={ordPayFilter} onChange={e=>setOrdPayFilter(e.target.value)}
+                    style={{padding:"8px 10px",border:ui.border,borderRadius:6,background:ui.cardBg,
+                      fontFamily:ui.fontBody,fontSize:12.5,color:ui.text,outline:"none"}}>
+                    <option value="all">كل طرق الدفع</option>
+                    <option value="cash">كاش</option>
+                    <option value="visa">فيزا</option>
+                    <option value="wallet">محفظة</option>
+                  </select>
+                  <input type="date" value={ordFrom} onChange={e=>setOrdFrom(e.target.value)}
+                    title="من تاريخ"
+                    style={{padding:"7px 9px",border:ui.border,borderRadius:6,background:ui.cardBg,
+                      fontFamily:ui.fontBody,fontSize:12,color:ui.text,outline:"none"}}/>
+                  <input type="date" value={ordTo} onChange={e=>setOrdTo(e.target.value)}
+                    title="إلى تاريخ"
+                    style={{padding:"7px 9px",border:ui.border,borderRadius:6,background:ui.cardBg,
+                      fontFamily:ui.fontBody,fontSize:12,color:ui.text,outline:"none"}}/>
+                </div>
+
+                {/* Result count + last refresh */}
+                <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:8,
+                  flexWrap:"wrap",gap:8}}>
+                  <span style={{fontSize:12.5,color:ui.textSub,fontFamily:ui.fontBody}}>
+                    {filtered.length === orderList.length
+                      ? `${orderList.length} طلب`
+                      : `${filtered.length} من ${orderList.length} طلب`}
+                  </span>
+                  <span style={{fontSize:11.5,color:ui.textSub,fontFamily:ui.fontBody,display:"flex",alignItems:"center",gap:5}}>
+                    <span style={{width:6,height:6,borderRadius:"50%",background:"#22C55E",display:"inline-block"}}/>
+                    آخر تحديث: {relTime(ordLastRefresh)}
+                  </span>
+                </div>
+
+                {/* Bulk action bar — appears when items selected */}
+                {selectedIds.length > 0 && (
+                  <div style={{background:"#EFF6FF",border:"1px solid #BFDBFE",borderRadius:ui.radius,
+                    padding:"10px 14px",marginBottom:10,display:"flex",flexWrap:"wrap",alignItems:"center",gap:10}}>
+                    <span style={{fontSize:12.5,fontFamily:ui.fontBody,color:"#1E40AF",fontWeight:600}}>
+                      {selectedIds.length} محدد
+                    </span>
+                    <div style={{flex:1}}/>
+                    {canManageOrders && (
+                      <select onChange={e=>{ if(e.target.value){ bulkUpdateStatus(selectedIds, e.target.value); e.target.value=""; } }}
+                        defaultValue=""
+                        style={{padding:"6px 10px",border:"1px solid #BFDBFE",borderRadius:6,background:"#fff",
+                          fontFamily:ui.fontBody,fontSize:12,color:ui.text,outline:"none"}}>
+                        <option value="">تغيير الحالة لـ...</option>
+                        {ORDER_STATUSES.map(s => <option key={s} value={s}>{s}</option>)}
+                      </select>
+                    )}
+                    <button onClick={()=>{ window.print(); }}
+                      style={{padding:"6px 11px",border:"1px solid #BFDBFE",background:"#fff",borderRadius:6,
+                        fontFamily:ui.fontBody,fontSize:12,color:ui.text,cursor:"pointer"}}>
+                      🖨 طباعة الفواتير
+                    </button>
+                    <button onClick={exportFilteredCsv}
+                      style={{padding:"6px 11px",border:"1px solid #BFDBFE",background:"#fff",borderRadius:6,
+                        fontFamily:ui.fontBody,fontSize:12,color:ui.text,cursor:"pointer"}}>
+                      تصدير CSV
+                    </button>
+                    <button onClick={()=>setOrdSelected({})}
+                      style={{padding:"6px 10px",border:"none",background:"transparent",
+                        fontFamily:ui.fontBody,fontSize:12,color:"#6B7280",cursor:"pointer"}}>
+                      إلغاء التحديد ✕
+                    </button>
+                  </div>
+                )}
+
+                {/* Table */}
+                {orderList.length===0 ? (
+                  <Placeholder icon="shopping-cart" title="مفيش طلبات لحد دلوقتي" body="هتبان الطلبات هنا أول ما عميل يكمّل عملية الشراء." />
+                ) : filtered.length === 0 ? (
+                  <div style={{background:ui.cardBg,border:ui.border,borderRadius:ui.radius,padding:"34px 18px",textAlign:"center"}}>
+                    <div style={{fontSize:32,marginBottom:8}}>🔎</div>
+                    <div style={{fontSize:13.5,color:ui.text,fontFamily:ui.fontBody,fontWeight:500,marginBottom:4}}>
+                      لا توجد طلبات تطابق الفلاتر
+                    </div>
+                    <div style={{fontSize:12,color:ui.textSub,fontFamily:ui.fontBody}}>
+                      جرب تعديل البحث أو إعادة ضبط الفلاتر
+                    </div>
+                  </div>
+                ) : (
+                  <div style={{background:ui.cardBg,border:ui.border,borderRadius:ui.radius,overflow:"hidden",overflowX:"auto"}}>
+                    <table style={{width:"100%",borderCollapse:"collapse",direction:"rtl",fontFamily:ui.fontBody,minWidth:980}}>
+                      <thead>
+                        <tr style={{background:ui.sideBg,borderBottom:`0.5px solid #E5E5E5`}}>
+                          <th style={{padding:"10px 12px",width:36}}>
+                            <input type="checkbox" checked={allOnPageSelected} onChange={togglePage}
+                              style={{cursor:"pointer",accentColor:ui.text}}/>
+                          </th>
+                          {["#","العميل","التاريخ","المنتجات","الإجمالي","الدفع","حالة الدفع","الحالة",""].map(h=>(
+                            <th key={h} style={{padding:"11px 12px",textAlign:"right",fontSize:11.5,color:ui.textSub,fontWeight:500,whiteSpace:"nowrap"}}>{h}</th>
+                          ))}
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {pageRows.map(o => {
+                          const b = badgeStyle(o.status);
+                          const pm = o.payment_method || "cash";
+                          const ps = o.payment_status || "unpaid";
+                          const psStyle = ps === "paid" ? {bg:"#DCFCE7",fg:"#15803D"} : {bg:"#FEE2E2",fg:"#B91C1C"};
+                          const pmS = payStyle(pm);
+                          const items = o.items || [];
+                          const thumbs = items.slice(0,2).map(thumbForItem).filter(Boolean);
+                          return (
+                            <tr key={o.id} onClick={()=>setDetailOrderId(o.id)}
+                              style={{borderTop:"0.5px solid #EEE",cursor:"pointer",transition:"background .15s"}}
+                              onMouseEnter={e=>e.currentTarget.style.background="#FAFAFA"}
+                              onMouseLeave={e=>e.currentTarget.style.background="transparent"}>
+                              <td style={{padding:"10px 12px"}} onClick={e=>e.stopPropagation()}>
+                                <input type="checkbox"
+                                  checked={!!ordSelected[o.id]}
+                                  onChange={e=>setOrdSelected(s => ({ ...s, [o.id]: e.target.checked }))}
+                                  style={{cursor:"pointer",accentColor:ui.text}}/>
+                              </td>
+                              <td style={{padding:"11px 12px",fontFamily:"monospace",fontSize:12.5,color:ui.text,fontWeight:600,whiteSpace:"nowrap"}}>
+                                #{o.order_number || o.id}
+                              </td>
+                              <td style={{padding:"11px 12px"}}>
+                                <div style={{fontSize:13,color:ui.text,fontWeight:500}}>{o.name}</div>
+                                <div style={{fontSize:11,color:ui.textSub,fontFamily:"monospace",direction:"ltr",textAlign:"right",marginTop:2}}>{o.phone}</div>
+                              </td>
+                              <td style={{padding:"11px 12px",fontSize:12,color:ui.textSub,whiteSpace:"nowrap"}}>{o.date || "—"}</td>
+                              <td style={{padding:"11px 12px"}}>
+                                <div style={{display:"flex",alignItems:"center",gap:6}}>
+                                  {thumbs.length > 0 ? (
+                                    <div style={{display:"flex"}}>
+                                      {thumbs.map((src,i)=>(
+                                        <img key={i} src={src} alt=""
+                                          style={{width:28,height:28,borderRadius:"50%",objectFit:"cover",
+                                            border:"2px solid #fff",marginInlineStart:i?-8:0,background:"#F3F4F6"}}/>
+                                      ))}
+                                    </div>
+                                  ) : (
+                                    <div style={{width:28,height:28,borderRadius:"50%",background:"#F3F4F6",
+                                      display:"flex",alignItems:"center",justifyContent:"center",fontSize:13}}>🛍️</div>
+                                  )}
+                                  <span style={{fontSize:11.5,color:ui.textSub,whiteSpace:"nowrap"}}>
+                                    {items.length} {items.length === 1 ? "منتج" : "منتجات"}
+                                  </span>
+                                </div>
+                              </td>
+                              <td style={{padding:"11px 12px",fontSize:13,color:ui.text,fontWeight:500,whiteSpace:"nowrap"}}>
+                                {(o.total||0).toLocaleString()} <span style={{fontSize:11,color:ui.textSub}}>ج</span>
+                              </td>
+                              <td style={{padding:"11px 12px"}}>
+                                <span style={{fontSize:10.5,padding:"3px 9px",borderRadius:20,background:pmS.bg,color:pmS.fg,whiteSpace:"nowrap"}}>
+                                  {payLabel(pm)}
+                                </span>
+                              </td>
+                              <td style={{padding:"11px 12px"}}>
+                                <span style={{fontSize:10.5,padding:"3px 9px",borderRadius:20,background:psStyle.bg,color:psStyle.fg,whiteSpace:"nowrap"}}>
+                                  {ps === "paid" ? "مدفوع" : "غير مدفوع"}
+                                </span>
+                              </td>
+                              <td style={{padding:"11px 12px"}}>
+                                <span style={{fontSize:10.5,padding:"3px 10px",borderRadius:20,background:b.bg,color:b.fg,whiteSpace:"nowrap"}}>
+                                  {o.status}
+                                </span>
+                              </td>
+                              <td style={{padding:"11px 12px",textAlign:"left",whiteSpace:"nowrap"}}>
+                                <button onClick={e=>{ e.stopPropagation(); setDetailOrderId(o.id); }}
+                                  title="عرض التفاصيل"
+                                  style={{background:"transparent",border:ui.border,padding:"4px 8px",cursor:"pointer",
+                                    fontFamily:ui.fontBody,fontSize:13,color:ui.text,borderRadius:5}}>
+                                  👁
+                                </button>
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+
+                {/* Pagination */}
+                {filtered.length > ORD_PER_PAGE && (
+                  <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginTop:12,
+                    fontFamily:ui.fontBody,fontSize:12.5,color:ui.textSub}}>
+                    <span>
+                      {(page-1)*ORD_PER_PAGE + 1}–{Math.min(page*ORD_PER_PAGE, filtered.length)} من {filtered.length}
+                    </span>
+                    <div style={{display:"flex",gap:6,alignItems:"center"}}>
+                      <button disabled={page <= 1} onClick={()=>setOrdPage(p => Math.max(1, p-1))}
+                        style={{padding:"6px 12px",border:ui.border,borderRadius:6,background:ui.cardBg,
+                          fontFamily:ui.fontBody,fontSize:12,color: page<=1?"#D1D5DB":ui.text,
+                          cursor: page<=1?"not-allowed":"pointer"}}>التالي ←</button>
+                      <span style={{fontSize:12,color:ui.text,padding:"0 8px"}}>
+                        صفحة {page} من {totalPages}
+                      </span>
+                      <button disabled={page >= totalPages} onClick={()=>setOrdPage(p => Math.min(totalPages, p+1))}
+                        style={{padding:"6px 12px",border:ui.border,borderRadius:6,background:ui.cardBg,
+                          fontFamily:ui.fontBody,fontSize:12,color: page>=totalPages?"#D1D5DB":ui.text,
+                          cursor: page>=totalPages?"not-allowed":"pointer"}}>→ السابق</button>
+                    </div>
+                  </div>
+                )}
+              </div>
+              );
+            })()
           )}
 
           {/* PRODUCTS */}
@@ -6028,6 +6450,499 @@ function injectPrintStyles() {
   document.head.appendChild(s);
 }
 
+// ─── Order Detail Page (full-page admin view of one order) ────────────────────
+// Replaces the OrderDetailModal in the admin Orders tab. Renders all the
+// sections required by the new spec: RTL status stepper, payment info,
+// product thumbnails, price breakdown, customer notes, activity timeline,
+// action buttons (WhatsApp, email invoice, PDF, print, copy), sticky bottom
+// status bar, and a separate Cancel button with confirmation modal.
+function OrderDetailPage({
+  order, orderId, onBack, onStatusChange, canManage,
+  thumbForItem, payLabel, payStyle, badgeStyle, ui, mob, refreshOrders,
+}) {
+  const [cancelOpen, setCancelOpen] = useState(false);
+  const [cancelReason, setCancelReason] = useState("");
+  const [emailBusy, setEmailBusy] = useState(false);
+  const [emailFeedback, setEmailFeedback] = useState("");
+  const [copyFeedback, setCopyFeedback] = useState("");
+  const [, tickClock] = useState(0);
+
+  useEffect(() => { injectPrintStyles(); }, []);
+  // Re-render every minute so relative "since X" timestamps stay current.
+  useEffect(() => {
+    const i = setInterval(() => tickClock(n => n + 1), 60000);
+    return () => clearInterval(i);
+  }, []);
+
+  if (!order) {
+    return (
+      <div style={{background:ui.cardBg,border:ui.border,borderRadius:ui.radius,padding:"40px 22px",textAlign:"center"}}>
+        <div style={{fontSize:32,marginBottom:10}}>🔍</div>
+        <div style={{fontSize:14,color:ui.text,fontFamily:ui.fontBody,fontWeight:500,marginBottom:6}}>الطلب غير موجود</div>
+        <div style={{fontSize:12,color:ui.textSub,fontFamily:ui.fontBody,marginBottom:14}}>الرقم: {orderId}</div>
+        <button onClick={onBack}
+          style={{padding:"8px 18px",border:ui.border,borderRadius:6,background:ui.cardBg,
+            fontFamily:ui.fontBody,fontSize:12.5,color:ui.text,cursor:"pointer"}}>← رجوع للطلبات</button>
+      </div>
+    );
+  }
+
+  const orderNum = order.order_number || order.id;
+  const items    = order.items || [];
+  const pm       = order.payment_method || "cash";
+  const ps       = order.payment_status || "unpaid";
+
+  // Price breakdown — fall back to computed values when older orders didn't
+  // store subtotal/shipping/discount (older orders just have `total`).
+  const subtotal = order.subtotal != null
+    ? Number(order.subtotal)
+    : items.reduce((s,i) => s + (Number(i.price)||0) * (Number(i.qty)||0), 0);
+  const shipping = order.shipping_cost != null ? Number(order.shipping_cost) : null;
+  const discount = order.discount_amount != null ? Number(order.discount_amount) : 0;
+  const total    = Number(order.total) || 0;
+
+  // ── Action handlers ────────────────────────────────────────────────────────
+  const handlePrint = () => {
+    document.body.classList.add("nawra-print-mode");
+    const cleanup = () => {
+      document.body.classList.remove("nawra-print-mode");
+      window.removeEventListener("afterprint", cleanup);
+    };
+    window.addEventListener("afterprint", cleanup);
+    setTimeout(cleanup, 3000);
+    window.print();
+  };
+
+  const handleCopy = async () => {
+    try {
+      await navigator.clipboard.writeText(`#${orderNum}`);
+      setCopyFeedback("تم النسخ ✓");
+      setTimeout(()=>setCopyFeedback(""), 1500);
+    } catch {
+      setCopyFeedback("فشل النسخ");
+      setTimeout(()=>setCopyFeedback(""), 1500);
+    }
+  };
+
+  const handleEmailInvoice = async () => {
+    if (!order.userEmail) {
+      setEmailFeedback("لا يوجد إيميل للعميل");
+      setTimeout(()=>setEmailFeedback(""), 2500);
+      return;
+    }
+    setEmailBusy(true);
+    setEmailFeedback("");
+    try {
+      const r = await fetch(`/api/orders/${order.id}/email-invoice`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({}),
+      });
+      if (!r.ok) {
+        const e = await r.json().catch(()=>({error:`HTTP ${r.status}`}));
+        throw new Error(e.error || `HTTP ${r.status}`);
+      }
+      setEmailFeedback(`تم الإرسال إلى ${order.userEmail} ✓`);
+    } catch (e) {
+      setEmailFeedback(`فشل الإرسال: ${e.message}`);
+    } finally {
+      setEmailBusy(false);
+      setTimeout(()=>setEmailFeedback(""), 3000);
+    }
+  };
+
+  const waHref = (() => {
+    if (!order.phone) return null;
+    const digits = String(order.phone).replace(/\D/g, "");
+    if (!digits) return null;
+    // assume Egyptian numbers — prepend country code if user typed local
+    const norm = digits.startsWith("20") ? digits : `20${digits.replace(/^0+/, "")}`;
+    return `https://wa.me/${norm}`;
+  })();
+
+  // Whatsapp + Email + Print + PDF + Copy
+  const actionBtnStyle = {
+    background:"transparent",border:ui.border,padding:"7px 12px",cursor:"pointer",
+    fontFamily:ui.fontBody,fontSize:12.5,color:ui.text,borderRadius:6,
+    display:"inline-flex",alignItems:"center",gap:6,whiteSpace:"nowrap",textDecoration:"none",
+  };
+
+  // ── RTL stepper data ──────────────────────────────────────────────────────
+  const STEPS = [
+    { key: "جديد",        label: "تم الاستلام" },
+    { key: "قيد التجهيز", label: "قيد التجهيز" },
+    { key: "تم الشحن",    label: "تم الشحن"    },
+    { key: "مكتمل",       label: "تم التسليم"  },
+  ];
+  const stepIdx = order.status === "ملغي" ? -1 : Math.max(0, STEPS.findIndex(s => s.key === order.status));
+
+  // ── Activity timeline data ─────────────────────────────────────────────────
+  const history = Array.isArray(order.status_history) ? order.status_history : [];
+
+  const fmtDate = (iso) => {
+    if (!iso) return "—";
+    const d = new Date(iso);
+    if (isNaN(d)) return iso;
+    return d.toLocaleString("ar-EG", { dateStyle: "short", timeStyle: "short" });
+  };
+
+  // ── Render ────────────────────────────────────────────────────────────────
+  return (
+    <div className="order-print-card" style={{direction:"rtl",paddingBottom: canManage ? 80 : 12}}>
+      {/* Top action bar */}
+      <div className="no-print" style={{display:"flex",alignItems:"center",justifyContent:"space-between",
+        flexWrap:"wrap",gap:10,marginBottom:14}}>
+        <button onClick={onBack}
+          style={{background:"transparent",border:"none",cursor:"pointer",fontFamily:ui.fontBody,
+            fontSize:13,color:ui.textSub,display:"flex",alignItems:"center",gap:6,padding:"6px 4px"}}>
+          ← رجوع للطلبات
+        </button>
+        <div style={{display:"flex",flexWrap:"wrap",gap:8,alignItems:"center"}}>
+          {waHref && (
+            <a href={waHref} target="_blank" rel="noreferrer" style={{...actionBtnStyle,background:"#F0FDF4",border:"1px solid #BBF7D0",color:"#15803D"}}>
+              📞 واتساب
+            </a>
+          )}
+          <button onClick={handleEmailInvoice} disabled={emailBusy || !order.userEmail}
+            title={order.userEmail ? `إرسال إلى ${order.userEmail}` : "لا يوجد إيميل للعميل"}
+            style={{...actionBtnStyle, opacity: (emailBusy || !order.userEmail) ? 0.55 : 1,
+              cursor: (emailBusy || !order.userEmail) ? "not-allowed" : "pointer"}}>
+            📧 {emailBusy ? "جارٍ الإرسال..." : "إرسال الفاتورة"}
+          </button>
+          <button onClick={handlePrint} style={actionBtnStyle}>📄 PDF</button>
+          <button onClick={handlePrint} style={actionBtnStyle}>🖨 طباعة</button>
+          <button onClick={handleCopy} style={actionBtnStyle}>📋 نسخ الرقم</button>
+        </div>
+      </div>
+      {(emailFeedback || copyFeedback) && (
+        <div className="no-print" style={{marginBottom:10,padding:"7px 12px",borderRadius:6,
+          background:"#F0FDF4",border:"1px solid #BBF7D0",color:"#15803D",fontSize:12,fontFamily:ui.fontBody}}>
+          {emailFeedback || copyFeedback}
+        </div>
+      )}
+
+      {/* Header card */}
+      <div style={{background:ui.cardBg,border:ui.border,borderRadius:ui.radius,padding:"18px 20px",marginBottom:12}}>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",gap:14,flexWrap:"wrap"}}>
+          <div>
+            <div style={{fontSize:11,color:ui.textSub,fontFamily:ui.fontBody,letterSpacing:".08em",marginBottom:4}}>رقم الطلب</div>
+            <div style={{fontSize:22,color:ui.text,fontFamily:"monospace",fontWeight:700}}>#{orderNum}</div>
+            <div style={{fontSize:12,color:ui.textSub,fontFamily:ui.fontBody,marginTop:4}}>
+              {order.date || (order.created_at ? fmtDate(order.created_at) : "—")}
+            </div>
+          </div>
+          <div style={{textAlign:"left"}}>
+            {(() => { const b = badgeStyle(order.status); return (
+              <span style={{fontSize:12,padding:"5px 14px",borderRadius:20,background:b.bg,color:b.fg,fontFamily:ui.fontBody,fontWeight:600}}>
+                {order.status}
+              </span>
+            ); })()}
+            <div style={{fontSize:18,color:ui.text,fontFamily:ui.fontBody,fontWeight:600,marginTop:8}}>
+              {total.toLocaleString()} <span style={{fontSize:12,color:ui.textSub,fontWeight:400}}>ج</span>
+            </div>
+          </div>
+        </div>
+
+        {/* RTL status stepper — right (first) → left (last) for Arabic flow */}
+        <div style={{marginTop:18}}>
+          {order.status === "ملغي" ? (
+            <div style={{padding:"10px 14px",background:"#FEE2E2",color:"#B91C1C",fontFamily:ui.fontBody,fontSize:13,borderRadius:6,borderInlineStart:"3px solid #DC2626"}}>
+              ❌ تم إلغاء الطلب{order.cancellation_reason ? ` — ${order.cancellation_reason}` : ""}
+            </div>
+          ) : (
+            <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",position:"relative",direction:"rtl"}}>
+              {STEPS.map((s, i) => {
+                const done   = i <= stepIdx;
+                const isCur  = i === stepIdx;
+                const isLast = i === STEPS.length - 1;
+                const nextDone = i + 1 <= stepIdx;
+                return (
+                  <React.Fragment key={s.key}>
+                    <div style={{display:"flex",flexDirection:"column",alignItems:"center",flex:"0 0 auto",position:"relative",zIndex:2}}>
+                      <div style={{
+                        width:34,height:34,borderRadius:"50%",
+                        background: done ? "#22C55E" : isCur ? "#3B82F6" : "#F3F4F6",
+                        color: done || isCur ? "#fff" : "#9CA3AF",
+                        display:"flex",alignItems:"center",justifyContent:"center",
+                        fontSize:14,fontWeight:600,
+                        border: isCur ? "3px solid #DBEAFE" : "none",
+                        boxShadow: isCur ? "0 0 0 4px rgba(59,130,246,.18)" : "none",
+                        animation: isCur ? "nawraPulse 1.8s ease-in-out infinite" : "none",
+                        transition:"all .25s",
+                      }}>
+                        {done ? "✓" : i + 1}
+                      </div>
+                      <div style={{fontSize:11,fontFamily:ui.fontBody,marginTop:6,color: done || isCur ? ui.text : ui.textSub,fontWeight: isCur ? 600 : 400,whiteSpace:"nowrap"}}>
+                        {s.label}
+                      </div>
+                    </div>
+                    {!isLast && (
+                      <div style={{flex:1,height:2,background: nextDone ? "#22C55E" : "#E5E7EB",margin:"0 6px",position:"relative",top:-12,transition:"background .3s"}}/>
+                    )}
+                  </React.Fragment>
+                );
+              })}
+            </div>
+          )}
+        </div>
+        {/* Pulse keyframes — inline so they're available without a CSS file */}
+        <style>{`@keyframes nawraPulse { 0%,100%{box-shadow:0 0 0 4px rgba(59,130,246,.18);} 50%{box-shadow:0 0 0 8px rgba(59,130,246,.08);} }`}</style>
+      </div>
+
+      {/* Two-column main content — collapses to single column on mobile */}
+      <div style={{display:"grid",gap:12,gridTemplateColumns: mob ? "1fr" : "1.6fr 1fr"}}>
+        {/* LEFT column: items + breakdown + notes + timeline */}
+        <div style={{display:"flex",flexDirection:"column",gap:12}}>
+          {/* Items */}
+          <section style={{background:ui.cardBg,border:ui.border,borderRadius:ui.radius,padding:"16px 18px"}}>
+            <h3 style={{fontFamily:ui.fontBody,fontSize:13,fontWeight:600,color:ui.text,margin:"0 0 12px"}}>🛍️ المنتجات ({items.length})</h3>
+            <div style={{display:"flex",flexDirection:"column"}}>
+              {items.map((it, i) => {
+                const thumb = thumbForItem(it);
+                const line = (Number(it.price)||0) * (Number(it.qty)||0);
+                return (
+                  <div key={i} style={{display:"flex",alignItems:"center",gap:12,padding:"10px 0",
+                    borderTop: i ? "0.5px solid #EEE" : "none"}}>
+                    <div style={{width:46,height:46,flexShrink:0,borderRadius:6,overflow:"hidden",background:"#F3F4F6",
+                      display:"flex",alignItems:"center",justifyContent:"center",fontSize:20}}>
+                      {thumb
+                        ? <img src={thumb} alt="" style={{width:"100%",height:"100%",objectFit:"cover"}}/>
+                        : "🧴"}
+                    </div>
+                    <div style={{flex:1,minWidth:0}}>
+                      <div style={{fontSize:13.5,color:ui.text,fontFamily:ui.fontBody,fontWeight:500,
+                        overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{it.name}</div>
+                      <div style={{fontSize:11.5,color:ui.textSub,fontFamily:ui.fontBody,marginTop:2}}>
+                        {Number(it.price)||0} ج × {it.qty}
+                      </div>
+                    </div>
+                    <div style={{fontSize:13.5,color:ui.text,fontFamily:ui.fontBody,fontWeight:600,whiteSpace:"nowrap"}}>
+                      {line.toLocaleString()} ج
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+
+            {/* Price breakdown */}
+            <div style={{marginTop:14,paddingTop:12,borderTop:"1px dashed #E5E5E5"}}>
+              <div style={{display:"flex",justifyContent:"space-between",padding:"4px 0",fontSize:12.5,color:ui.textSub,fontFamily:ui.fontBody}}>
+                <span>المجموع الفرعي</span><span>{subtotal.toLocaleString()} ج</span>
+              </div>
+              {shipping != null && (
+                <div style={{display:"flex",justifyContent:"space-between",padding:"4px 0",fontSize:12.5,color:ui.textSub,fontFamily:ui.fontBody}}>
+                  <span>الشحن</span><span>{shipping > 0 ? `${shipping.toLocaleString()} ج` : "مجاني"}</span>
+                </div>
+              )}
+              {discount > 0 && (
+                <div style={{display:"flex",justifyContent:"space-between",padding:"4px 0",fontSize:12.5,color:"#DC2626",fontFamily:ui.fontBody}}>
+                  <span>الخصم {order.coupon_code ? `(${order.coupon_code})` : ""}</span>
+                  <span>− {discount.toLocaleString()} ج</span>
+                </div>
+              )}
+              <div style={{display:"flex",justifyContent:"space-between",padding:"10px 0 2px",
+                marginTop:6,borderTop:"1px solid #E5E5E5",fontSize:16,color:ui.text,fontFamily:ui.fontBody,fontWeight:700}}>
+                <span>الإجمالي النهائي</span><span>{total.toLocaleString()} ج</span>
+              </div>
+            </div>
+          </section>
+
+          {/* Customer notes — only when present */}
+          {order.customer_notes && order.customer_notes.trim() && (
+            <section style={{background:"#FFFBEB",border:"1px solid #FDE68A",borderRadius:ui.radius,padding:"14px 16px"}}>
+              <h3 style={{fontFamily:ui.fontBody,fontSize:13,fontWeight:600,color:"#92400E",margin:"0 0 6px"}}>📝 ملاحظات العميل</h3>
+              <p style={{margin:0,fontSize:13,color:"#7C2D12",fontFamily:ui.fontBody,lineHeight:1.7,whiteSpace:"pre-wrap"}}>
+                {order.customer_notes}
+              </p>
+            </section>
+          )}
+
+          {/* Activity timeline */}
+          <section style={{background:ui.cardBg,border:ui.border,borderRadius:ui.radius,padding:"16px 18px"}}>
+            <h3 style={{fontFamily:ui.fontBody,fontSize:13,fontWeight:600,color:ui.text,margin:"0 0 12px"}}>🕒 سجل النشاط</h3>
+            {history.length === 0 ? (
+              <p style={{margin:0,fontSize:12,color:ui.textSub,fontFamily:ui.fontBody}}>لا توجد أحداث مسجلة</p>
+            ) : (
+              <div style={{position:"relative"}}>
+                <div style={{position:"absolute",top:6,bottom:6,insetInlineStart:9,width:2,background:"#E5E7EB"}}/>
+                {history.slice().reverse().map((h, i) => (
+                  <div key={i} style={{position:"relative",paddingInlineStart:28,paddingBottom:14}}>
+                    <div style={{position:"absolute",insetInlineStart:3,top:3,width:14,height:14,borderRadius:"50%",
+                      background: i === 0 ? "#22C55E" : "#9CA3AF",border:"3px solid #fff",boxShadow:"0 0 0 1px #E5E7EB"}}/>
+                    <div style={{fontSize:13,color:ui.text,fontFamily:ui.fontBody,fontWeight:500}}>{h.status}</div>
+                    <div style={{fontSize:11.5,color:ui.textSub,fontFamily:ui.fontBody,marginTop:2}}>
+                      {h.by_name || "—"} · {fmtDate(h.at)}
+                    </div>
+                    {h.note && (
+                      <div style={{fontSize:12,color:ui.textSub,fontFamily:ui.fontBody,marginTop:3,fontStyle:"italic"}}>{h.note}</div>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
+          </section>
+        </div>
+
+        {/* RIGHT column: customer + address + payment */}
+        <div style={{display:"flex",flexDirection:"column",gap:12}}>
+          <section style={{background:ui.cardBg,border:ui.border,borderRadius:ui.radius,padding:"14px 16px"}}>
+            <h3 style={{fontFamily:ui.fontBody,fontSize:13,fontWeight:600,color:ui.text,margin:"0 0 10px"}}>👤 العميل</h3>
+            <div style={{fontSize:13.5,color:ui.text,fontFamily:ui.fontBody,fontWeight:500}}>{order.name || "—"}</div>
+            <div style={{fontSize:12.5,color:ui.textSub,fontFamily:"monospace",direction:"ltr",textAlign:"right",marginTop:4}}>{order.phone || "—"}</div>
+            {order.userEmail && (
+              <div style={{fontSize:12,color:ui.textSub,fontFamily:ui.fontBody,marginTop:4,wordBreak:"break-all"}}>{order.userEmail}</div>
+            )}
+          </section>
+
+          <section style={{background:ui.cardBg,border:ui.border,borderRadius:ui.radius,padding:"14px 16px"}}>
+            <h3 style={{fontFamily:ui.fontBody,fontSize:13,fontWeight:600,color:ui.text,margin:"0 0 10px"}}>📍 عنوان التوصيل</h3>
+            <div style={{fontSize:13,color:ui.text,fontFamily:ui.fontBody,lineHeight:1.75}}>
+              {order.address || "—"}
+              {order.city && <><br/>{order.city}</>}
+            </div>
+            {order.lat && order.lng && (
+              <a href={`https://www.google.com/maps?q=${order.lat},${order.lng}`} target="_blank" rel="noreferrer"
+                style={{display:"inline-block",marginTop:8,fontSize:12,color:"#1D4ED8",fontFamily:ui.fontBody,textDecoration:"none"}}>
+                🗺 فتح في الخريطة
+              </a>
+            )}
+          </section>
+
+          {/* Payment info — NEW per spec */}
+          <section style={{background:ui.cardBg,border:ui.border,borderRadius:ui.radius,padding:"14px 16px"}}>
+            <h3 style={{fontFamily:ui.fontBody,fontSize:13,fontWeight:600,color:ui.text,margin:"0 0 10px"}}>💳 معلومات الدفع</h3>
+            <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:8}}>
+              <span style={{fontSize:12.5,color:ui.textSub,fontFamily:ui.fontBody}}>طريقة الدفع</span>
+              {(() => { const s = payStyle(pm); return (
+                <span style={{fontSize:11.5,padding:"3px 10px",borderRadius:20,background:s.bg,color:s.fg,fontFamily:ui.fontBody,fontWeight:600}}>
+                  {payLabel(pm)}
+                </span>
+              ); })()}
+            </div>
+            <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:order.payment_reference?8:0}}>
+              <span style={{fontSize:12.5,color:ui.textSub,fontFamily:ui.fontBody}}>حالة الدفع</span>
+              <div style={{display:"flex",alignItems:"center",gap:6}}>
+                <span style={{fontSize:11.5,padding:"3px 10px",borderRadius:20,
+                  background: ps === "paid" ? "#DCFCE7" : "#FEE2E2",
+                  color: ps === "paid" ? "#15803D" : "#B91C1C",
+                  fontFamily:ui.fontBody,fontWeight:600}}>
+                  {ps === "paid" ? "مدفوع" : "غير مدفوع"}
+                </span>
+                {canManage && order.status !== "ملغي" && (
+                  <button onClick={async ()=>{
+                    await onStatusChange(order.id, {
+                      payment_status: ps === "paid" ? "unpaid" : "paid",
+                    });
+                    refreshOrders && refreshOrders();
+                  }}
+                    title={ps === "paid" ? "تحديد كغير مدفوع" : "تحديد كمدفوع"}
+                    style={{background:"transparent",border:ui.border,padding:"3px 8px",borderRadius:5,
+                      fontFamily:ui.fontBody,fontSize:11,color:ui.textSub,cursor:"pointer"}}>
+                    ↻
+                  </button>
+                )}
+              </div>
+            </div>
+            {order.payment_reference && (
+              <div style={{display:"flex",alignItems:"center",justifyContent:"space-between"}}>
+                <span style={{fontSize:12.5,color:ui.textSub,fontFamily:ui.fontBody}}>رقم العملية</span>
+                <span style={{fontSize:12,color:ui.text,fontFamily:"monospace"}}>{order.payment_reference}</span>
+              </div>
+            )}
+          </section>
+        </div>
+      </div>
+
+      {/* Sticky bottom action bar — status buttons + cancel */}
+      {canManage && (
+        <div className="no-print" style={{
+          position:"sticky",bottom:0,marginTop:14,zIndex:5,
+          background:ui.cardBg,border:ui.border,borderRadius:ui.radius,
+          padding:"10px 14px",
+          boxShadow:"0 -8px 24px rgba(0,0,0,.06)",
+          display:"flex",alignItems:"center",gap:10,flexWrap:"wrap",
+        }}>
+          <span style={{fontSize:12,color:ui.textSub,fontFamily:ui.fontBody,marginInlineEnd:4}}>تحديث الحالة:</span>
+          {ORDER_STATUSES.filter(s => s !== "ملغي").map(s => {
+            const isCurrent = order.status === s;
+            return (
+              <button key={s} disabled={isCurrent} onClick={()=>onStatusChange(order.id, s)}
+                style={{
+                  padding:"7px 14px",
+                  background: isCurrent ? ui.text : "transparent",
+                  color:      isCurrent ? "#fff"  : ui.text,
+                  border: `1px solid ${isCurrent ? ui.text : "#D1D5DB"}`,
+                  borderRadius:6,fontFamily:ui.fontBody,fontSize:12.5,
+                  cursor: isCurrent ? "default" : "pointer",
+                  fontWeight: isCurrent ? 600 : 400,
+                }}>
+                {s}
+              </button>
+            );
+          })}
+          <div style={{flex:1}}/>
+          {order.status !== "ملغي" && (
+            <button onClick={()=>{ setCancelReason(""); setCancelOpen(true); }}
+              style={{padding:"7px 14px",background:"transparent",border:"1px solid #FCA5A5",
+                color:"#B91C1C",borderRadius:6,fontFamily:ui.fontBody,fontSize:12.5,cursor:"pointer",fontWeight:600}}>
+              إلغاء الطلب
+            </button>
+          )}
+        </div>
+      )}
+
+      {/* Cancel confirmation modal */}
+      {cancelOpen && (
+        <div onClick={()=>setCancelOpen(false)}
+          style={{position:"fixed",inset:0,background:"rgba(0,0,0,.55)",zIndex:800,display:"flex",
+            alignItems:"center",justifyContent:"center",padding:16,direction:"rtl"}}>
+          <div onClick={e=>e.stopPropagation()}
+            style={{background:ui.cardBg,maxWidth:440,width:"100%",padding:22,borderRadius:8,boxShadow:"0 12px 48px rgba(0,0,0,.25)"}}>
+            <h3 style={{fontSize:15,fontWeight:600,color:ui.text,fontFamily:ui.fontBody,margin:"0 0 4px"}}>
+              تأكيد إلغاء الطلب
+            </h3>
+            <div style={{fontSize:12.5,color:ui.textSub,fontFamily:ui.fontBody,marginBottom:14}}>
+              #{orderNum} — {order.name}
+            </div>
+            <label style={{display:"block",fontSize:12,color:ui.text,marginBottom:5,fontFamily:ui.fontBody,fontWeight:500}}>
+              سبب الإلغاء (مطلوب)
+            </label>
+            <textarea rows={3} autoFocus
+              value={cancelReason}
+              onChange={e=>setCancelReason(e.target.value)}
+              placeholder="مثال: العميل ألغى الطلب، نفاد المخزون..."
+              style={{padding:"8px 12px",border:`1px solid #FCA5A5`,borderRadius:6,background:"#FEF2F2",
+                fontFamily:ui.fontBody,fontSize:13,color:ui.text,outline:"none",width:"100%",
+                direction:"rtl",resize:"vertical",minHeight:80,boxSizing:"border-box"}}/>
+            <div style={{display:"flex",gap:8,justifyContent:"flex-end",marginTop:12}}>
+              <button onClick={()=>setCancelOpen(false)}
+                style={{padding:"8px 16px",background:"transparent",border:ui.border,borderRadius:6,
+                  fontSize:12.5,color:ui.textSub,fontFamily:ui.fontBody,cursor:"pointer"}}>تراجع</button>
+              <button
+                disabled={cancelReason.trim().length < 3}
+                onClick={async () => {
+                  await onStatusChange(order.id, {
+                    status: "ملغي",
+                    cancellation_reason: cancelReason.trim(),
+                    note: cancelReason.trim(),
+                  });
+                  setCancelOpen(false);
+                  refreshOrders && refreshOrders();
+                }}
+                style={{padding:"8px 18px",
+                  background: cancelReason.trim().length >= 3 ? "#DC2626" : "#9CA3AF",
+                  color:"#fff",border:"none",borderRadius:6,fontSize:12.5,fontFamily:ui.fontBody,
+                  cursor: cancelReason.trim().length >= 3 ? "pointer" : "not-allowed"}}>
+                تأكيد الإلغاء
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function OrderDetailModal({ order, onClose, onStatusChange }) {
   const { t, dir } = useLang();
   useEffect(() => { injectPrintStyles(); }, []);
@@ -6543,11 +7458,11 @@ function AppInner() {
   const { dir } = useLang();
   const [cartOpen, setCartOpen] = useState(false);
   const pid = (() => { const m = route.match(/^#product-(\d+)/); return m ? parseInt(m[1]) : null; })();
-  const isAdmin = route === "#admin";
+  const isAdmin = route === "#admin" || route.startsWith("#admin/");
 
   const page = () => {
     if (route === "#login") return <LoginPage go={go} />;
-    if (route === "#admin") {
+    if (isAdmin) {
       if (!user || !isAdminRole(user.role)) { go("#login"); return null; }
       return <AdminDash go={go} />;
     }

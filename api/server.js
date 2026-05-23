@@ -273,6 +273,31 @@ ensureColumn('orders',    'lng',       'REAL');
 ensureColumn('orders',    'userEmail', 'TEXT');
 ensureColumn('orders',    'stock_applied', 'INTEGER DEFAULT 0'); // 1 once available→reserved ran
 ensureColumn('orders',    'stock_released', 'INTEGER DEFAULT 0'); // 1 once reserved→0 ran
+ensureColumn('orders',    'order_number',       'INTEGER');                  // sequential short id, e.g. 1001
+ensureColumn('orders',    'payment_method',     "TEXT DEFAULT 'cash'");      // cash | visa | wallet
+ensureColumn('orders',    'payment_status',     "TEXT DEFAULT 'unpaid'");    // paid | unpaid
+ensureColumn('orders',    'payment_reference',  'TEXT');                     // transaction id for online payments
+ensureColumn('orders',    'customer_notes',     'TEXT');                     // optional note from checkout
+ensureColumn('orders',    'cancellation_reason','TEXT');                     // required when admin cancels
+ensureColumn('orders',    'status_history',     "TEXT DEFAULT '[]'");        // JSON [{status, at, by_id, by_name, note}]
+ensureColumn('orders',    'subtotal',           'REAL');                     // before shipping/discount
+ensureColumn('orders',    'shipping_cost',      'REAL');                     // shipping fee charged
+ensureColumn('orders',    'discount_amount',    'REAL');                     // coupon savings
+ensureColumn('orders',    'coupon_code',        'TEXT');                     // applied coupon, if any
+
+// Backfill order_number for any legacy orders missing one (one-shot, sequential
+// over created_at). Safe to run on every boot — only touches rows with NULL.
+(() => {
+  try {
+    const max = db.prepare('SELECT COALESCE(MAX(order_number), 1000) AS m FROM orders').get().m || 1000;
+    const missing = db.prepare('SELECT id FROM orders WHERE order_number IS NULL ORDER BY created_at ASC').all();
+    if (!missing.length) return;
+    let n = max;
+    const upd = db.prepare('UPDATE orders SET order_number = ? WHERE id = ?');
+    db.transaction(() => { missing.forEach(r => { n += 1; upd.run(n, r.id); }); })();
+    console.log(`[nawra-api] backfilled order_number for ${missing.length} legacy orders (now up to #${n})`);
+  } catch (e) { console.warn('[nawra-api] order_number backfill skipped:', e.message); }
+})();
 ensureColumn('addresses', 'lat',       'REAL');
 ensureColumn('addresses', 'lng',       'REAL');
 ensureColumn('products',  'stock_reserved', 'INTEGER DEFAULT 0');
@@ -349,7 +374,7 @@ function orderEmailHtml(order) {
           <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border-top:1px solid rgba(201,169,110,.18); padding-top:16px;">
             <tr>
               <td style="color:rgba(255,255,255,.5); font-size:12px;">رقم الطلب</td>
-              <td style="color:#c9a96e; font-size:13px; text-align:left; font-family:monospace;">#${order.id}</td>
+              <td style="color:#c9a96e; font-size:13px; text-align:left; font-family:monospace;">#${order.order_number || order.id}</td>
             </tr>
             <tr>
               <td style="color:rgba(255,255,255,.5); font-size:12px; padding-top:8px;">التاريخ</td>
@@ -429,7 +454,7 @@ async function sendOrderEmail(order) {
     const info = await mailer.sendMail({
       from: `"نوّرَة Skincare" <${gmailUser}>`,
       to:   order.userEmail,
-      subject: `✅ تم استلام طلبك من نوّرَة #${order.id}`,
+      subject: `✅ تم استلام طلبك من نوّرَة #${order.order_number || order.id}`,
       html: orderEmailHtml(order)
     });
     console.log('[nawra-api] ✓ confirmation email sent to', order.userEmail, '|', info.messageId);
@@ -574,16 +599,53 @@ function sendMessage({ from_user_id, from_user_name, to_user_id, type, subject, 
   return id;
 }
 
+// Allocate the next sequential public order number. Starts at 1001 so the first
+// order looks like a real shop's. Wrapped in a tiny txn to avoid two
+// simultaneous POSTs picking the same number.
+const allocateOrderNumber = db.transaction(() => {
+  const row = db.prepare('SELECT COALESCE(MAX(order_number), 1000) AS m FROM orders').get();
+  return (row.m || 1000) + 1;
+});
+
 app.post('/api/orders', (req, res) => {
   try {
-    const { id, date, name, phone, city, address, items, total, status, lat, lng, userEmail } = req.body;
+    const {
+      id, date, name, phone, city, address, items, total, status, lat, lng, userEmail,
+      payment_method, payment_status, payment_reference, customer_notes,
+      subtotal, shipping_cost, discount_amount, coupon_code,
+    } = req.body;
     if (!id || !name) return res.status(400).json({ error: 'id and name required' });
+
+    const orderNumber = allocateOrderNumber();
+    const history = [{
+      status: status || '\u062c\u062f\u064a\u062f',
+      at: new Date().toISOString(),
+      by_id: userEmail || null,
+      by_name: name || '\u0627\u0644\u0639\u0645\u064a\u0644',
+      note: '\u062a\u0645 \u0625\u0646\u0634\u0627\u0621 \u0627\u0644\u0637\u0644\u0628',
+    }];
+
     db.prepare(`
-      INSERT OR REPLACE INTO orders (id,date,name,phone,city,address,items,total,status,lat,lng,userEmail)
-      VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
-    `).run(String(id), date, name, phone, city, address,
-           JSON.stringify(items||[]), Number(total)||0, status||'\u062c\u062f\u064a\u062f',
-           lat||null, lng||null, userEmail||null);
+      INSERT OR REPLACE INTO orders (
+        id, date, name, phone, city, address, items, total, status, lat, lng, userEmail,
+        order_number, payment_method, payment_status, payment_reference, customer_notes,
+        subtotal, shipping_cost, discount_amount, coupon_code, status_history
+      ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+    `).run(
+      String(id), date, name, phone, city, address,
+      JSON.stringify(items||[]), Number(total)||0, status||'\u062c\u062f\u064a\u062f',
+      lat||null, lng||null, userEmail||null,
+      orderNumber,
+      payment_method || 'cash',
+      payment_status || 'unpaid',
+      payment_reference || null,
+      customer_notes || null,
+      subtotal != null ? Number(subtotal) : null,
+      shipping_cost != null ? Number(shipping_cost) : null,
+      discount_amount != null ? Number(discount_amount) : null,
+      coupon_code || null,
+      JSON.stringify(history)
+    );
 
     if (userEmail) upsertUser.run(userEmail, name||null, phone||null, Number(total)||0);
 
@@ -597,19 +659,28 @@ app.post('/api/orders', (req, res) => {
       from_user_name: name || null,
       to_user_id: SUPER_ADMIN_FALLBACK,
       type: 'info',
-      subject: `\u0637\u0644\u0628 \u062c\u062f\u064a\u062f #${id}`,
+      subject: `\u0637\u0644\u0628 \u062c\u062f\u064a\u062f #${orderNumber}`,
       body: `${name} \u00b7 ${city || '\u2014'} \u00b7 ${(Number(total)||0).toLocaleString()} \u062c`,
-      metadata: { kind: 'new_order', order_id: String(id) },
+      metadata: { kind: 'new_order', order_id: String(id), order_number: orderNumber },
     });
 
-    console.log('[nawra-api] order saved:', id, name, total, 'user:', userEmail||'guest');
+    console.log('[nawra-api] order saved:', id, '#'+orderNumber, name, total, 'user:', userEmail||'guest');
 
     // Fire-and-forget: don't block the API response on SMTP latency
-    sendOrderEmail({ id, date, name, phone, city, address, items, total, status, lat, lng, userEmail });
+    sendOrderEmail({ id, order_number: orderNumber, date, name, phone, city, address, items, total, status, lat, lng, userEmail });
 
-    res.json({ ok: true, id });
+    res.json({ ok: true, id, order_number: orderNumber });
   } catch (e) { console.error('POST /api/orders error:', e); res.status(500).json({ error: e.message }); }
 });
+
+function hydrateOrder(r) {
+  if (!r) return r;
+  return {
+    ...r,
+    items: (() => { try { return JSON.parse(r.items||'[]'); } catch { return []; } })(),
+    status_history: (() => { try { return JSON.parse(r.status_history||'[]'); } catch { return []; } })(),
+  };
+}
 
 app.get('/api/orders', (req, res) => {
   try {
@@ -617,29 +688,99 @@ app.get('/api/orders', (req, res) => {
     const rows = userId
       ? db.prepare('SELECT * FROM orders WHERE userEmail = ? ORDER BY created_at DESC').all(userId)
       : db.prepare('SELECT * FROM orders ORDER BY created_at DESC').all();
-    res.json(rows.map(r => ({ ...r, items: JSON.parse(r.items||'[]') })));
+    res.json(rows.map(hydrateOrder));
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.get('/api/orders/:id', (req, res) => {
+  try {
+    const row = db.prepare('SELECT * FROM orders WHERE id = ? OR order_number = ?')
+      .get(req.params.id, Number(req.params.id) || -1);
+    if (!row) return res.status(404).json({ error: 'not found' });
+    res.json(hydrateOrder(row));
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 app.patch('/api/orders/:id', (req, res) => {
   try {
-    const { status } = req.body;
-    const cur = db.prepare('SELECT * FROM orders WHERE id = ?').get(req.params.id);
+    const {
+      status, payment_status, payment_reference,
+      cancellation_reason, actor_id, actor_name, note,
+    } = req.body;
+    const cur = db.prepare('SELECT * FROM orders WHERE id = ? OR order_number = ?')
+      .get(req.params.id, Number(req.params.id) || -1);
     if (!cur) return res.status(404).json({ error: 'not found' });
 
     const items = (() => { try { return JSON.parse(cur.items || '[]'); } catch { return []; } })();
 
-    // Stock lifecycle reacts to status transitions.
-    if (status === '\u062a\u0645 \u0627\u0644\u0634\u062d\u0646' && !cur.stock_released) {
-      shipStockForOrder(cur, items);
-    } else if (status === '\u0645\u0644\u063a\u064a') {
-      cancelStockForOrder(cur, items);
+    // Stock lifecycle reacts to status transitions (only when status actually changes).
+    if (status && status !== cur.status) {
+      if (status === '\u062a\u0645 \u0627\u0644\u0634\u062d\u0646' && !cur.stock_released) {
+        shipStockForOrder(cur, items);
+      } else if (status === '\u0645\u0644\u063a\u064a') {
+        cancelStockForOrder(cur, items);
+      }
     }
 
-    const info = db.prepare('UPDATE orders SET status=? WHERE id=?').run(status, req.params.id);
+    // Append to status_history when the status changes.
+    let history = [];
+    try { history = JSON.parse(cur.status_history || '[]'); } catch {}
+    if (!Array.isArray(history)) history = [];
+    if (status && status !== cur.status) {
+      history.push({
+        status,
+        at: new Date().toISOString(),
+        by_id: actor_id || null,
+        by_name: actor_name || '\u0627\u0644\u0625\u062f\u0627\u0631\u0629',
+        note: note || (status === '\u0645\u0644\u063a\u064a' && cancellation_reason ? cancellation_reason : null),
+      });
+    }
+
+    // Build dynamic UPDATE
+    const sets = [];
+    const vals = [];
+    if (status != null)              { sets.push('status = ?');              vals.push(status); }
+    if (payment_status != null)      { sets.push('payment_status = ?');      vals.push(payment_status); }
+    if (payment_reference != null)   { sets.push('payment_reference = ?');   vals.push(payment_reference); }
+    if (cancellation_reason != null) { sets.push('cancellation_reason = ?'); vals.push(cancellation_reason); }
+    sets.push('status_history = ?'); vals.push(JSON.stringify(history));
+
+    // Auto-mark cash orders as paid on delivery.
+    if (status === '\u0645\u0643\u062a\u0645\u0644' && cur.payment_method === 'cash' && cur.payment_status !== 'paid') {
+      sets.push('payment_status = ?'); vals.push('paid');
+    }
+
+    vals.push(cur.id);
+    const info = db.prepare(`UPDATE orders SET ${sets.join(', ')} WHERE id = ?`).run(...vals);
     if (!info.changes) return res.status(404).json({ error: 'not found' });
-    res.json({ ok: true });
-  } catch (e) { res.status(500).json({ error: e.message }); }
+
+    const fresh = db.prepare('SELECT * FROM orders WHERE id = ?').get(cur.id);
+    res.json({ ok: true, order: hydrateOrder(fresh) });
+  } catch (e) { console.error('PATCH /api/orders error:', e); res.status(500).json({ error: e.message }); }
+});
+
+// Re-send the order confirmation/invoice email to the customer on demand.
+app.post('/api/orders/:id/email-invoice', async (req, res) => {
+  try {
+    const row = db.prepare('SELECT * FROM orders WHERE id = ? OR order_number = ?')
+      .get(req.params.id, Number(req.params.id) || -1);
+    if (!row) return res.status(404).json({ error: 'not found' });
+    const order = hydrateOrder(row);
+    const to = req.body && req.body.to ? String(req.body.to) : order.userEmail;
+    if (!to) return res.status(400).json({ error: 'no recipient email available for this order' });
+    if (!mailer) return res.status(503).json({ error: 'email transport not configured' });
+    const info = await mailer.sendMail({
+      from: `"\u0646\u0648\u0651\u0631\u064e\u0629 Skincare" <${gmailUser}>`,
+      to,
+      subject: `\ud83e\uddfe \u0641\u0627\u062a\u0648\u0631\u0629 \u0637\u0644\u0628\u0643 \u0645\u0646 \u0646\u0648\u0651\u0631\u064e\u0629 #${order.order_number || order.id}`,
+      html: orderEmailHtml(order),
+    });
+    console.log('[nawra-api] \u2713 invoice email sent to', to, '|', info.messageId);
+    res.json({ ok: true, to, messageId: info.messageId });
+  } catch (e) {
+    console.error('POST /api/orders/:id/email-invoice error:', e);
+    res.status(500).json({ error: e.message });
+  }
 });
 
 // ── USERS ─────────────────────────────────────────────────────────────────────
