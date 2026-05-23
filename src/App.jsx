@@ -2224,7 +2224,7 @@ function AdminDash({ go }) {
     const d = new Date(raw);
     if (!isNaN(d)) return d;
     // try "DD/MM/YYYY" or "D/M/YYYY"
-    const m = String(raw).match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2,4})/);
+    const m = String(raw).match(/^(\d{1,2})[/-](\d{1,2})[/-](\d{2,4})/);
     if (m) {
       const yr = m[3].length === 2 ? 2000 + Number(m[3]) : Number(m[3]);
       return new Date(yr, Number(m[2]) - 1, Number(m[1]));
