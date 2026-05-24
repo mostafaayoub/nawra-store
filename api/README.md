@@ -29,18 +29,21 @@ the real file). Required keys:
 
 ## Auto-deploy
 
-The repo's `.github/workflows/deploy.yml` copies `api/server.js` and
-`api/package.json` into `/var/www/nawra-api/` on every push to `main`,
-runs `npm install`, and restarts the PM2 process. The `.env` and the
-SQLite `orders.db` files on the server are preserved.
+The repo's `.github/workflows/deploy.yml` SSHes into the VPS, pulls the
+latest `main` into `/var/www/nawra-store`, runs `npm ci` + `npm run build`
+for the frontend, runs `npm install` inside `api/`, and restarts the PM2
+process. PM2 executes `/var/www/nawra-store/api/server.js` in-place — there
+is no longer a separate `/var/www/nawra-api/` copy. The `.env` and the
+SQLite `orders.db` files inside `api/` are preserved across `git reset`.
 
 ## Manual deploy (if Actions is down)
 
 ```bash
 ssh root@194.5.157.90
-cd /var/www/nawra/api          # repo's api/ folder (pulled by deploy.yml)
-cp server.js   /var/www/nawra-api/server.js
-cp package.json /var/www/nawra-api/package.json
-cd /var/www/nawra-api && npm install --prefer-offline
+cd /var/www/nawra-store
+git fetch origin main && git reset --hard origin/main
+npm ci --prefer-offline && npm run build
+cd api && npm install --prefer-offline && cd ..
 pm2 restart nawra-api
+nginx -t && systemctl reload nginx
 ```
