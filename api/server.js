@@ -2425,16 +2425,22 @@ function resolveCategory({ category, category_id }) {
   return { id: null, key: null };
 }
 
-// Resolve a beneficiary: use supplier_id if given, else find-or-create by
-// beneficiary_name. Returns the (possibly new) supplier id, or null when no
-// beneficiary was specified at all.
+// Resolve a beneficiary into a supplier id.
+// Precedence:
+//   1. If `beneficiary_name` is non-empty → find-or-create by name (this
+//      lets an edit RENAME the beneficiary without changing supplier_id
+//      semantics — the caller "I typed a new name" wins).
+//   2. Else if `supplier_id` points at an existing row → use it.
+//   3. Else null.
 function resolveBeneficiary({ supplier_id, beneficiary_name, beneficiary_type }) {
-  if (supplier_id) {
-    const row = db.prepare('SELECT id FROM suppliers WHERE id = ?').get(supplier_id);
-    if (row) return row.id;
-  }
   const name = String(beneficiary_name || '').trim();
-  if (!name) return null;
+  if (!name) {
+    if (supplier_id) {
+      const row = db.prepare('SELECT id FROM suppliers WHERE id = ?').get(supplier_id);
+      if (row) return row.id;
+    }
+    return null;
+  }
   // Find existing by name (case-insensitive match would need COLLATE; SQLite is
   // case-insensitive by default for ASCII, but Arabic compares as-typed which
   // is what we want for human-entered names anyway).
