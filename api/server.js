@@ -527,6 +527,41 @@ function slugify(s) {
     .slice(0, 80);
 }
 
+// ── Test-data self-heal ──────────────────────────────────────────────────────
+// Convention: smoke tests / deploy probes MUST embed the literal marker
+// `__NAWRA_TEST__` in the most distinctive textual field of any row they
+// create (description / name / email / etc). This boot-time purge scrubs
+// those rows so a crashed or aborted test never leaves residue in
+// production data. Combined with try/finally cleanup in the smoke scripts
+// themselves, the system is double-protected: a clean exit cleans the rows
+// immediately, and the next PM2 restart cleans anything missed.
+const TEST_MARKER = '__NAWRA_TEST__';
+(() => {
+  const targets = [
+    { table: 'expenses',           field: 'description' },
+    { table: 'orders',             field: 'name' },
+    { table: 'products',           field: 'name' },
+    { table: 'suppliers',          field: 'name' },
+    { table: 'expense_categories', field: 'name_ar' },
+    { table: 'users',              field: 'email' },
+    { table: 'customer_notes',     field: 'note' },
+    { table: 'messages',           field: 'subject' },
+  ];
+  let total = 0;
+  targets.forEach(({ table, field }) => {
+    try {
+      const info = db.prepare(`DELETE FROM ${table} WHERE ${field} LIKE ?`).run(`%${TEST_MARKER}%`);
+      if (info.changes > 0) {
+        console.log(`[nawra-api] test-data purge: ${table}.${field} → removed ${info.changes}`);
+        total += info.changes;
+      }
+    } catch (err) {
+      console.warn(`[nawra-api] test-data purge skipped for ${table}: ${err.message}`);
+    }
+  });
+  if (total === 0) console.log('[nawra-api] test-data purge: nothing to remove');
+})();
+
 console.log('[nawra-api] DB ready:', path.join(__dirname, 'orders.db'));
 
 app.use(cors({ origin: '*' }));
