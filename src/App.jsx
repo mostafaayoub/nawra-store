@@ -5217,12 +5217,41 @@ function AdminDash({ go }) {
                                   </select>
                                 </div>
                               ) : (
-                                <div>
-                                  <div style={{fontSize:12.5,color:ui.text}}>{beneficiaryName(e)}</div>
-                                  {e.beneficiary_type && e.beneficiary_type !== "supplier" && beneficiaryName(e) !== "—" && (
-                                    <div style={{fontSize:10,color:ui.textSub,fontFamily:ui.fontBody}}>{benTypeLabel(e.beneficiary_type)}</div>
-                                  )}
-                                </div>
+                                // When the row has a beneficiary, render the
+                                // name + optional type pill. When it doesn't
+                                // (legacy rows from before the Phase 2 fix
+                                // saved supplier_id at all), show a subtle
+                                // "+ أضف جهة" affordance that drops into edit
+                                // mode focused on the beneficiary field.
+                                beneficiaryName(e) !== "—" ? (
+                                  <div>
+                                    <div style={{fontSize:12.5,color:ui.text}}>{beneficiaryName(e)}</div>
+                                    {e.beneficiary_type && e.beneficiary_type !== "supplier" && (
+                                      <div style={{fontSize:10,color:ui.textSub,fontFamily:ui.fontBody}}>{benTypeLabel(e.beneficiary_type)}</div>
+                                    )}
+                                  </div>
+                                ) : (
+                                  <button onClick={() => {
+                                    setExpEditingId(e.id);
+                                    setExpEditDraft({
+                                      ...e,
+                                      quantity: String(e.quantity ?? ""),
+                                      unit_price: String(e.unit_price ?? ""),
+                                      type: e.type || "variable",
+                                      payment_method: e.payment_method || "cash",
+                                      beneficiary_type: e.beneficiary_type || "supplier",
+                                      is_recurring: !!e.is_recurring,
+                                      receipt_path: e.receipt_path || "",
+                                      _beneficiaryTyped: "",
+                                    });
+                                  }}
+                                    title="لم يتم حفظ جهة لهذا المصروف — اضغط للإضافة"
+                                    style={{background:"transparent",border:"1px dashed #D4D4D4",borderRadius:4,
+                                      padding:"3px 8px",cursor:"pointer",fontFamily:ui.fontBody,fontSize:11,
+                                      color:ui.textSub,fontStyle:"italic"}}>
+                                    + أضف جهة
+                                  </button>
+                                )
                               )}
                             </td>
                             {/* Payment method */}
