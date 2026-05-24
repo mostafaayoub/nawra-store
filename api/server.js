@@ -486,6 +486,7 @@ ensureColumn('users', 'marketing_emails_enabled',     'INTEGER DEFAULT 1');
 ensureColumn('users', 'whatsapp_notifications_enabled','INTEGER DEFAULT 1');
 ensureColumn('users', 'date_of_birth',         'TEXT');
 ensureColumn('users', 'gender',                'TEXT');
+ensureColumn('users', 'store_credit_balance',  'REAL DEFAULT 0');
 
 db.exec(`
   CREATE TABLE IF NOT EXISTS customer_notes (
@@ -857,6 +858,113 @@ async function sendOrderEmail(order) {
     console.log('[nawra-api] ✓ confirmation email sent to', order.userEmail, '|', info.messageId);
   } catch (err) {
     console.error('[nawra-api] ✗ email send failed for', order.userEmail, ':', err.message);
+  }
+}
+
+// ── Return email templates ───────────────────────────────────────────────────
+// One small reusable template — the heading + intro change per `kind` but the
+// brand frame stays identical to the order confirmation aesthetic. Fires
+// from the POST /api/returns + PATCH approve/reject/refunded handlers.
+function returnEmailHtml({ kind, returnRow, customer, intro, items, totalRefund, extra }) {
+  const lines = (items || []).map(it => `
+    <tr style="border-top:1px solid rgba(201,169,110,.12);">
+      <td style="padding:11px 13px; color:#fff; font-size:13px;">${(it.product_name || '').toString().replace(/</g,'&lt;')}</td>
+      <td style="padding:11px 13px; color:rgba(255,255,255,.8); font-size:13px; text-align:center;">×${it.quantity || 1}</td>
+      <td style="padding:11px 13px; color:#fff; font-size:13px; text-align:left;">${(Number(it.refund_amount)||0).toLocaleString()} ج</td>
+    </tr>`).join('');
+  const titleByKind = {
+    submitted: '📦 تم استلام طلب الإرجاع',
+    approved:  '✅ تمت الموافقة على إرجاعك',
+    rejected:  '❌ نأسف — تم رفض طلب الإرجاع',
+    refunded:  '💰 تم استرداد المبلغ',
+  };
+  return `<!DOCTYPE html><html lang="ar" dir="rtl"><head><meta charset="UTF-8"/></head>
+<body style="margin:0;padding:0;background:#0d0d0d;font-family:'Segoe UI',Tahoma,Arial,sans-serif;">
+  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#0d0d0d;padding:30px 14px;">
+    <tr><td align="center">
+      <table role="presentation" width="600" cellpadding="0" cellspacing="0" style="max-width:600px;background:#1a1a1a;color:#fff;border:1px solid rgba(201,169,110,.18);">
+        <tr><td align="center" style="padding:32px 20px 24px;border-bottom:1px solid rgba(201,169,110,.18);">
+          <div style="color:#c9a96e;font-size:38px;font-weight:400;letter-spacing:0.12em;font-family:'Times New Roman',serif;">نوّرَة</div>
+          <div style="color:rgba(201,169,110,.6);font-size:11px;letter-spacing:0.3em;margin-top:5px;">SKINCARE&nbsp;&nbsp;E-SHOP</div>
+        </td></tr>
+        <tr><td align="center" style="padding:32px 20px 6px;">
+          <h2 style="margin:6px 0 0;color:#fff;font-size:20px;font-weight:500;">${titleByKind[kind] || 'تحديث طلب الإرجاع'}</h2>
+          <p style="color:rgba(255,255,255,.65);margin:8px 0 0;font-size:13.5px;">${intro || ''}</p>
+        </td></tr>
+        <tr><td style="padding:18px 28px 6px;">
+          <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border-top:1px solid rgba(201,169,110,.18);padding-top:14px;">
+            <tr><td style="color:rgba(255,255,255,.55);font-size:12px;">رقم المرتجع</td>
+                <td style="color:#c9a96e;font-size:13px;text-align:left;font-family:monospace;">${returnRow.return_number}</td></tr>
+            <tr><td style="color:rgba(255,255,255,.55);font-size:12px;padding-top:6px;">رقم الطلب الأصلي</td>
+                <td style="color:#fff;font-size:13px;text-align:left;padding-top:6px;font-family:monospace;">#${returnRow.order_id || '—'}</td></tr>
+          </table>
+        </td></tr>
+        ${lines ? `<tr><td style="padding:18px 28px 6px;">
+          <h3 style="color:#c9a96e;font-size:12px;letter-spacing:0.22em;margin:0 0 10px;font-weight:600;">المنتجات</h3>
+          <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:rgba(255,255,255,.03);border:1px solid rgba(201,169,110,.15);">
+            <thead><tr style="background:rgba(201,169,110,.1);">
+              <th style="padding:9px 13px;text-align:right;color:#c9a96e;font-size:11px;font-weight:600;">المنتج</th>
+              <th style="padding:9px 13px;text-align:center;color:#c9a96e;font-size:11px;font-weight:600;">الكمية</th>
+              <th style="padding:9px 13px;text-align:left;color:#c9a96e;font-size:11px;font-weight:600;">القيمة</th>
+            </tr></thead>
+            <tbody>${lines}</tbody>
+          </table>
+        </td></tr>` : ''}
+        ${totalRefund != null ? `<tr><td style="padding:14px 28px 6px;">
+          <div style="border-top:1px solid rgba(201,169,110,.18);padding-top:12px;display:flex;justify-content:space-between;color:#fff;font-size:14px;">
+            <span>الإجمالي المسترد</span><b style="color:#c9a96e;">${(Number(totalRefund)||0).toLocaleString()} ج</b>
+          </div>
+        </td></tr>` : ''}
+        ${extra ? `<tr><td style="padding:16px 28px;color:rgba(255,255,255,.85);font-size:13px;line-height:1.7;">${extra}</td></tr>` : ''}
+        <tr><td align="center" style="padding:22px 22px 28px;border-top:1px solid rgba(201,169,110,.18);">
+          <p style="color:rgba(255,255,255,.45);font-size:11px;margin:0;">لأي استفسار راسلنا على واتساب أو ${gmailUser || 'nawraskincare@gmail.com'}</p>
+        </td></tr>
+      </table>
+    </td></tr>
+  </table>
+</body></html>`;
+}
+
+async function sendReturnEmail(kind, returnId, extras = {}) {
+  if (!mailer) { console.warn('[nawra-api] mailer disabled — skipping return email'); return; }
+  try {
+    const row = db.prepare('SELECT * FROM returns WHERE id = ?').get(returnId);
+    if (!row) return;
+    const toEmail = row.customer_id || row.customer_email;
+    if (!toEmail || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(toEmail)) {
+      console.log('[nawra-api] return email skipped — no valid recipient for', row.return_number);
+      return;
+    }
+    const items = db.prepare('SELECT * FROM return_items WHERE return_id = ?').all(returnId);
+    const subjects = {
+      submitted: `📦 تم استلام طلب إرجاعك ${row.return_number}`,
+      approved:  `✅ تمت الموافقة على إرجاعك ${row.return_number}`,
+      rejected:  `بشأن طلب الإرجاع ${row.return_number}`,
+      refunded:  `💰 تم استرداد ${(Number(row.amount)||0).toLocaleString()} ج — ${row.return_number}`,
+    };
+    const intros = {
+      submitted: 'شكراً لتواصلك معنا. فريقنا سيراجع طلبك خلال 24 ساعة.',
+      approved:  'تمت الموافقة على طلبك. سيتم تنسيق استلام/استرداد المنتج قريباً.',
+      rejected:  extras.reason ? `للأسف لم نتمكن من قبول الطلب: ${extras.reason}` : 'للأسف لم نتمكن من قبول هذا الطلب.',
+      refunded:  `تم تنفيذ استرداد المبلغ${row.refund_method ? ` عبر ${({cash:'كاش',transfer:'تحويل بنكي',wallet:'محفظة',store_credit:'رصيد متجر',exchange:'استبدال'})[row.refund_method] || row.refund_method}` : ''}.`,
+    };
+    let extra = '';
+    if (kind === 'refunded' && row.refund_reference) {
+      extra = `<b>المرجع:</b> <span style="font-family:monospace;color:#c9a96e;">${row.refund_reference}</span>`;
+    }
+    if (kind === 'refunded' && row.refund_method === 'store_credit' && extras.store_credit) {
+      extra = `تم إضافة <b>${extras.store_credit.credit.toLocaleString()} ج</b> إلى رصيدك (${extras.store_credit.base.toLocaleString()} ج + ${extras.store_credit.bonus_pct}% مكافأة).`;
+    }
+    const html = returnEmailHtml({ kind, returnRow: row, items, totalRefund: row.amount, intro: intros[kind], extra });
+    const info = await mailer.sendMail({
+      from: `"نوّرَة Skincare" <${gmailUser}>`,
+      to: toEmail,
+      subject: subjects[kind] || `تحديث طلب الإرجاع ${row.return_number}`,
+      html,
+    });
+    console.log(`[nawra-api] ✓ return email (${kind}) → ${toEmail} | ${info.messageId}`);
+  } catch (err) {
+    console.error('[nawra-api] ✗ return email failed:', err.message);
   }
 }
 
@@ -2112,7 +2220,7 @@ function hydrateReturn(r) {
   let customer = null;
   const email = r.customer_id || r.customer_email;
   if (email) {
-    customer = db.prepare('SELECT email, name, phone, category, totalOrders, totalSpent FROM users WHERE LOWER(email) = LOWER(?)').get(email) || null;
+    customer = db.prepare('SELECT email, name, phone, category, totalOrders, totalSpent, store_credit_balance FROM users WHERE LOWER(email) = LOWER(?)').get(email) || null;
     if (customer) {
       const retCount = db.prepare('SELECT COUNT(*) AS c FROM returns WHERE LOWER(COALESCE(customer_id, customer_email)) = LOWER(?)').get(email).c;
       customer.total_returns = retCount;
@@ -2316,6 +2424,10 @@ app.post('/api/returns', (req, res) => {
       body: `${customer || 'عميل'} طلب إرجاع طلب #${r.order_id} بقيمة ${(Number(computedAmount)||0).toLocaleString()} ج`,
       metadata: { kind: 'return_request', return_id: id, return_number: retNum, order_id: r.order_id, requires_action: false },
     });
+    // Fire-and-forget confirmation email to the customer (and an alert email
+    // to super admin if a separate address is set in env). Errors logged but
+    // don't fail the request — the row is already created.
+    sendReturnEmail('submitted', id);
     res.json({ ok: true, id, return_number: retNum, amount: computedAmount });
   } catch (e) { console.error('POST /api/returns', e); res.status(500).json({ error: e.message }); }
 });
@@ -2408,12 +2520,130 @@ app.patch('/api/returns/:id', (req, res) => {
     vals.push(cur.id);
     db.prepare(`UPDATE returns SET ${sets.join(', ')} WHERE id = ?`).run(...vals);
 
+    // ── Phase 2 side-effects ───────────────────────────────────────────
+    // When a return transitions to 'refunded' we trigger three integrations.
+    // Each is wrapped in try/catch so a downstream failure doesn't block the
+    // status update — the activity log captures whatever ran successfully.
+    const sideEffects = { restocked: [], expense_id: null, store_credit: null };
+    if (newStatus === 'refunded' && cur.status !== 'refunded') {
+      // -- 2a. Inventory restock per return_item.restock_action --
+      try {
+        const items = db.prepare('SELECT * FROM return_items WHERE return_id = ?').all(cur.id);
+        items.forEach(it => {
+          if (!it.product_id || !it.restock_action || it.restock_action === 'pending') return;
+          const product = db.prepare('SELECT * FROM products WHERE id = ?').get(it.product_id);
+          if (!product) return;
+          const qty = Number(it.quantity) || 0;
+          if (qty <= 0) return;
+          let movementType = null, reason = null, newAvail = product.stock || 0, newDam = product.stock_damaged || 0;
+          if (it.restock_action === 'restock_available') {
+            newAvail = (product.stock || 0) + qty;
+            db.prepare('UPDATE products SET stock = ? WHERE id = ?').run(newAvail, product.id);
+            movementType = 'return_good'; reason = `مرتجع سليم — رجع للمخزون (${cur.return_number})`;
+          } else if (it.restock_action === 'move_to_damaged') {
+            newDam = (product.stock_damaged || 0) + qty;
+            db.prepare('UPDATE products SET stock_damaged = ? WHERE id = ?').run(newDam, product.id);
+            movementType = 'damaged'; reason = `مرتجع تالف — هالك (${cur.return_number})`;
+          } else if (it.restock_action === 'write_off') {
+            movementType = 'write_off'; reason = `إتلاف مرتجع — لا يعود للمخزون (${cur.return_number})`;
+          }
+          if (movementType) {
+            try {
+              recordMovement({
+                product_id: product.id, product_name: product.name,
+                type: movementType,
+                quantity_delta: (it.restock_action === 'restock_available' ? +qty : 0),
+                balance_after_available: newAvail,
+                balance_after_reserved:  product.stock_reserved || 0,
+                balance_after_damaged:   newDam,
+                reason, reference: cur.return_number,
+                unit_cost: Number(product.cost) || 0,
+                user_id: actor, user_name: actorName,
+              });
+              sideEffects.restocked.push({ product_id: product.id, qty, action: it.restock_action });
+            } catch (e) { console.warn('[nawra-api] return restock movement skipped:', e.message); }
+          }
+        });
+      } catch (e) { console.warn('[nawra-api] return restock skipped:', e.message); }
+
+      // -- 2b. Finance: refund-as-expense (cash / transfer / wallet only) --
+      const refundsCountAsExpense = ['cash', 'transfer', 'wallet'].includes(cur.refund_method || r.refund_method);
+      if (refundsCountAsExpense) {
+        try {
+          const expId = `ex_${Date.now().toString(36)}_${Math.random().toString(36).slice(2,5)}`;
+          // Resolve the seeded 'returns' category id; fall back to legacy slug.
+          const catRow = db.prepare("SELECT id, key FROM expense_categories WHERE key = 'returns'").get();
+          const today = new Date().toISOString().slice(0, 10);
+          db.prepare(`
+            INSERT INTO expenses (id, category, category_id, description, quantity, unit_price, amount,
+                                  date, notes, type, payment_method, status,
+                                  approved_by, approved_at, created_by, source_ref)
+            VALUES (?, ?, ?, ?, 1, ?, ?, ?, ?, 'variable', ?, 'approved', ?, datetime('now'), ?, ?)
+          `).run(
+            expId, catRow ? catRow.key : 'returns', catRow ? catRow.id : null,
+            `استرداد مرتجع ${cur.return_number} — ${cur.customer || cur.customer_email || '—'}`,
+            Number(cur.amount) || 0, Number(cur.amount) || 0,
+            today, `طريقة: ${cur.refund_method || r.refund_method}${cur.refund_reference || r.refund_reference ? ` · مرجع: ${cur.refund_reference || r.refund_reference}` : ''}`,
+            cur.refund_method || r.refund_method,
+            actor || SUPER_ADMIN_FALLBACK,
+            actor || SUPER_ADMIN_FALLBACK,
+            `return:${cur.id}`,
+          );
+          sideEffects.expense_id = expId;
+        } catch (e) { console.warn('[nawra-api] refund-as-expense skipped:', e.message); }
+      }
+
+      // -- 2c. Store credit: when refund_method='store_credit' --
+      if ((cur.refund_method || r.refund_method) === 'store_credit') {
+        try {
+          // Read bonus % from settings.store.returns.store_credit_bonus_pct (default 5).
+          let bonusPct = 5;
+          try {
+            const row = db.prepare("SELECT value FROM settings WHERE key='store'").get();
+            const store = row ? JSON.parse(row.value || '{}') : {};
+            const rcfg = (store.returns || {});
+            const b = Number(rcfg.store_credit_bonus_pct);
+            if (Number.isFinite(b) && b >= 0 && b <= 100) bonusPct = b;
+          } catch {}
+          const base = Number(cur.amount) || 0;
+          const bonus = Math.round(base * bonusPct) / 100;
+          const credit = base + bonus;
+          const email = cur.customer_id || cur.customer_email;
+          if (email) {
+            const u = db.prepare('SELECT email, store_credit_balance FROM users WHERE LOWER(email) = LOWER(?)').get(email);
+            if (u) {
+              const newBal = (Number(u.store_credit_balance) || 0) + credit;
+              db.prepare('UPDATE users SET store_credit_balance = ? WHERE LOWER(email) = LOWER(?)').run(newBal, email);
+              // Add to the customer activity log too (existing CRM table).
+              try {
+                db.prepare(`
+                  INSERT INTO customer_activity_log (id, customer_email, event_type, event_data, actor_id, actor_name)
+                  VALUES (?, ?, 'store_credit_added', ?, ?, ?)
+                `).run(
+                  `act_${Date.now().toString(36)}_${Math.random().toString(36).slice(2,5)}`,
+                  email,
+                  JSON.stringify({ return_number: cur.return_number, base, bonus_pct: bonusPct, bonus, credit, new_balance: newBal }),
+                  actor, actorName || 'النظام',
+                );
+              } catch {}
+              sideEffects.store_credit = { email, base, bonus_pct: bonusPct, bonus, credit, new_balance: newBal };
+            }
+          }
+        } catch (e) { console.warn('[nawra-api] store credit accrual skipped:', e.message); }
+      }
+    }
+
     // Activity log for the meaningful transitions. Inspection event is
     // logged above (inspectionApplied=true) — handled here for completeness.
     if (newStatus && newStatus !== cur.status) {
       logReturnActivity({
         return_id: cur.id, event_type: newStatus,
-        event_data: { from: cur.status, to: newStatus, reason: r.rejection_reason || null, refund_method: r.refund_method || null },
+        event_data: {
+          from: cur.status, to: newStatus,
+          reason: r.rejection_reason || null,
+          refund_method: r.refund_method || cur.refund_method || null,
+          side_effects: sideEffects,
+        },
         actor_id: actor, actor_name: actorName,
       });
     }
@@ -2426,7 +2656,14 @@ app.patch('/api/returns/:id', (req, res) => {
     }
 
     const fresh = db.prepare('SELECT * FROM returns WHERE id=?').get(cur.id);
-    res.json({ ...hydrateReturn(fresh), inspectionApplied });
+    // Customer-facing email for the meaningful transitions. Fire-and-forget
+    // so a mailer hiccup doesn't 500 the PATCH.
+    if (newStatus && newStatus !== cur.status) {
+      if (newStatus === 'approved') sendReturnEmail('approved', cur.id);
+      else if (newStatus === 'rejected') sendReturnEmail('rejected', cur.id, { reason: r.rejection_reason || null });
+      else if (newStatus === 'refunded') sendReturnEmail('refunded', cur.id, { store_credit: sideEffects.store_credit });
+    }
+    res.json({ ...hydrateReturn(fresh), inspectionApplied, sideEffects });
   } catch (e) { console.error('PATCH /api/returns', e); res.status(500).json({ error: e.message }); }
 });
 

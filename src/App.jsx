@@ -6439,7 +6439,7 @@ function AdminDash({ go }) {
                     ["store","المتجر"],["account","الحساب"],["emails","الإيميلات"],
                     ["payment","الدفع"],["shipping_free","الشحن"],
                     ["notifications","الإشعارات"],["team","الفريق"],
-                    ["expenses","المصروفات"],["seo","SEO"]
+                    ["expenses","المصروفات"],["returns","المرتجعات"],["seo","SEO"]
                   ].map(([k,l])=>(
                     <button key={k} onClick={()=>setSettingsTab(k)}
                       style={{padding:"8px 14px",border:"none",cursor:"pointer",borderRadius:6,
@@ -7067,6 +7067,16 @@ function AdminDash({ go }) {
                     />
                   );
                 })()}
+
+                {settingsTab === "returns" && (
+                  <ReturnsSettingsPanel
+                    ui={ui} mob={mob} isSuper={isSuper}
+                    storeCfg={storeCfg} setStoreCfg={setStoreCfg}
+                    saveSetting={saveSetting}
+                    reasons={retReasons}
+                    onReasonsChanged={refreshRetReasons}
+                  />
+                )}
 
                 {settingsTab === "seo" && (
                   <div>
@@ -8165,6 +8175,207 @@ const ChartLegend = React.memo(function ChartLegend({ items, ui, total }) {
 // Owns its own fetch state for categories / suppliers / budgets. Approval
 // settings live on settings.store (so they're loaded with the rest of store
 // config) and persisted via the parent's saveSetting().
+// ─── Returns Settings Panel ──────────────────────────────────────────────────
+// Module scope so typing in any input doesn't trigger AdminDash re-renders.
+// All 7 spec sections store into `settings.store.returns.*` so they ship in
+// the same payload as the rest of store config. Updates persist via the
+// parent's saveSetting('store', next). Reasons CRUD reuses the existing
+// /api/return-reasons endpoints; we just expose add/rename/toggle here.
+function ReturnsSettingsPanel({ ui, mob, isSuper, storeCfg, setStoreCfg, saveSetting, reasons, onReasonsChanged }) {
+  const ret = storeCfg.returns || {};
+  // Defaults — applied on first read when the key is absent so the UI shows
+  // sensible values even before the admin has touched the form.
+  const cfg = {
+    window_days:            Number.isFinite(ret.window_days) ? ret.window_days : 14,
+    allow_refund:           ret.allow_refund !== false,                    // default ON
+    allow_exchange:         ret.allow_exchange !== false,                  // default ON
+    allow_store_credit:     ret.allow_store_credit !== false,              // default ON
+    non_returnable_ids:     Array.isArray(ret.non_returnable_ids) ? ret.non_returnable_ids : [],
+    shipping_policy:        ret.shipping_policy || 'store',                // store | customer | by_reason
+    store_credit_bonus_pct: Number.isFinite(ret.store_credit_bonus_pct) ? ret.store_credit_bonus_pct : 5,
+    approver:               ret.approver || 'super_only',                  // super_only | orders_admin
+  };
+  const [busy, setBusy] = useState(false);
+  const [msg,  setMsg]  = useState("");
+  const [reasonDraft, setReasonDraft] = useState("");
+  const [products, setProducts] = useState([]);
+
+  useEffect(() => {
+    // Load products once for the non-returnable multi-select.
+    fetch("/api/products").then(r => r.ok ? r.json() : []).then(d => setProducts(Array.isArray(d) ? d : [])).catch(() => {});
+  }, []);
+
+  const flash = (t) => { setMsg(t); setTimeout(() => setMsg(""), 2000); };
+  const saveCfg = async (patch) => {
+    if (!isSuper) return;
+    const next = { ...storeCfg, returns: { ...cfg, ...patch } };
+    setStoreCfg(next);
+    setBusy(true);
+    try { await saveSetting("store", next); flash("تم الحفظ"); } catch {}
+    setBusy(false);
+  };
+
+  const addReason = async () => {
+    const name = reasonDraft.trim();
+    if (!name) return;
+    setBusy(true);
+    try {
+      await fetch("/api/return-reasons", {
+        method:"POST", headers:{"Content-Type":"application/json"},
+        body: JSON.stringify({ name_ar: name }),
+      });
+      setReasonDraft(""); flash("تمت الإضافة"); onReasonsChanged && onReasonsChanged();
+    } catch {} finally { setBusy(false); }
+  };
+  const renameReason = async (id, name_ar) => {
+    try { await fetch(`/api/return-reasons/${id}`, { method:"PATCH", headers:{"Content-Type":"application/json"}, body: JSON.stringify({ name_ar }) }); onReasonsChanged && onReasonsChanged(); } catch {}
+  };
+  const toggleReason = async (r) => {
+    try { await fetch(`/api/return-reasons/${r.id}`, { method:"PATCH", headers:{"Content-Type":"application/json"}, body: JSON.stringify({ active: !r.active }) }); onReasonsChanged && onReasonsChanged(); } catch {}
+  };
+  const deleteReason = async (r) => {
+    if (r.is_default) { window.alert("الأسباب الافتراضية غير قابلة للحذف — يمكن إيقافها بدلاً من ذلك."); return; }
+    if (!window.confirm(`حذف سبب "${r.name_ar}"؟`)) return;
+    try { await fetch(`/api/return-reasons/${r.id}`, { method:"DELETE" }); onReasonsChanged && onReasonsChanged(); } catch {}
+  };
+
+  const card = { background:ui.cardBg, border:ui.border, borderRadius:ui.radius, padding: mob?"14px":"18px", marginBottom:12 };
+  const cardTitle = { fontSize:13, fontWeight:600, color:ui.text, fontFamily:ui.fontBody, marginBottom:12, paddingBottom:8, borderBottom:"0.5px solid #EEE" };
+  const inputStyle = { width:"100%", padding:"8px 11px", border:ui.border, borderRadius:6, background:ui.cardBg, fontFamily:ui.fontBody, fontSize:13, color:ui.text, outline:"none", direction:"rtl", boxSizing:"border-box" };
+  const switchBtn = (val, onClick) => (
+    <button onClick={onClick} disabled={!isSuper}
+      style={{width:38,height:22,borderRadius:11,border:"none",background: val ? "#16A34A" : "#D4D4D4",position:"relative",cursor: isSuper ? "pointer" : "not-allowed",opacity: isSuper ? 1 : 0.6}}>
+      <span style={{position:"absolute",top:2,[val?"left":"right"]:2,width:18,height:18,background:"#fff",borderRadius:"50%",boxShadow:"0 1px 2px rgba(0,0,0,.2)"}}/>
+    </button>
+  );
+
+  return (
+    <div>
+      {msg && (
+        <div style={{padding:"8px 14px",borderRadius:6,marginBottom:10,background:"#DCFCE7",color:"#15803D",fontSize:12.5,fontFamily:ui.fontBody,border:"0.5px solid #86EFAC"}}>{msg}</div>
+      )}
+      {!isSuper && (
+        <div style={{padding:"8px 14px",borderRadius:6,marginBottom:10,background:"#FFFBEB",color:"#92400E",fontSize:12.5,fontFamily:ui.fontBody,border:"0.5px solid #FDE68A"}}>
+          🔒 إعدادات المرتجعات تتطلب صلاحية Super Admin
+        </div>
+      )}
+
+      {/* A. Return window */}
+      <div style={card}>
+        <div style={cardTitle}>مدة الإرجاع المسموح بها</div>
+        <div style={{display:"flex",gap:8,alignItems:"center",flexWrap:"wrap"}}>
+          <input type="text" inputMode="numeric" defaultValue={cfg.window_days}
+            disabled={!isSuper}
+            onBlur={e => { const v = Math.max(1, Math.min(365, parseInt(e.target.value, 10) || 14)); saveCfg({ window_days: v }); }}
+            style={{...inputStyle, maxWidth:120, direction:"ltr", textAlign:"left"}}/>
+          <span style={{fontSize:12.5,color:ui.textSub,fontFamily:ui.fontBody}}>يوم من تاريخ التسليم (الافتراضي 14)</span>
+        </div>
+      </div>
+
+      {/* B. Allowed return types */}
+      <div style={card}>
+        <div style={cardTitle}>أنواع الإرجاع المسموح بها</div>
+        {[
+          ["allow_refund",       "استرداد كامل (نقدي / تحويل / محفظة)"],
+          ["allow_exchange",     "استبدال بمنتج آخر"],
+          ["allow_store_credit", "رصيد للمتجر (Store Credit)"],
+        ].map(([k, l]) => (
+          <div key={k} style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"8px 0",borderBottom:"0.5px solid #EEE"}}>
+            <span style={{fontSize:13,color:ui.text,fontFamily:ui.fontBody}}>{l}</span>
+            {switchBtn(cfg[k], () => saveCfg({ [k]: !cfg[k] }))}
+          </div>
+        ))}
+      </div>
+
+      {/* C. Non-returnable products */}
+      <div style={card}>
+        <div style={cardTitle}>منتجات غير قابلة للإرجاع</div>
+        <div style={{fontSize:12,color:ui.textSub,fontFamily:ui.fontBody,marginBottom:8}}>اختر المنتجات التي لا يمكن إرجاعها (مثل منتجات النظافة الشخصية)</div>
+        <select multiple value={cfg.non_returnable_ids.map(String)} disabled={!isSuper}
+          onChange={e => {
+            const sel = Array.from(e.target.selectedOptions).map(o => o.value);
+            saveCfg({ non_returnable_ids: sel });
+          }}
+          style={{...inputStyle, minHeight:150, padding:"8px 10px"}}>
+          {products.map(p => (
+            <option key={p.id} value={p.id}>{p.name || (p.name_i18n && p.name_i18n.ar) || p.id}</option>
+          ))}
+        </select>
+        <div style={{fontSize:11,color:ui.textSub,fontFamily:ui.fontBody,marginTop:6}}>
+          استخدم Ctrl/Cmd للاختيار المتعدد · {cfg.non_returnable_ids.length} منتج محدد
+        </div>
+      </div>
+
+      {/* D. Return reasons CRUD */}
+      <div style={card}>
+        <div style={cardTitle}>أسباب الإرجاع المتاحة ({(reasons || []).length})</div>
+        <div style={{display:"flex",flexDirection:"column",gap:8}}>
+          {(reasons || []).map(r => (
+            <div key={r.id} style={{display:"flex",alignItems:"center",gap:8,padding:"6px 10px",border:"0.5px solid #EEE",borderRadius:6,background:"#FAFAFA"}}>
+              <input defaultValue={r.name_ar}
+                onBlur={e => { if (e.target.value !== r.name_ar) renameReason(r.id, e.target.value); }}
+                disabled={!isSuper}
+                style={{...inputStyle, padding:"5px 9px", flex:1, fontSize:12.5}}/>
+              {switchBtn(!!r.active, () => toggleReason(r))}
+              {!r.is_default ? (
+                <button onClick={() => deleteReason(r)} disabled={!isSuper}
+                  style={{background:"transparent",border:"none",color:"#DC2626",cursor:isSuper?"pointer":"not-allowed",fontSize:15,padding:"0 4px"}}>×</button>
+              ) : <span style={{fontSize:10,color:ui.textSub,fontFamily:ui.fontBody,paddingLeft:6}}>افتراضي</span>}
+            </div>
+          ))}
+          <div style={{display:"flex",gap:8,marginTop:4}}>
+            <input value={reasonDraft} onChange={e => setReasonDraft(e.target.value)}
+              placeholder="+ إضافة سبب جديد..." disabled={!isSuper}
+              style={{...inputStyle, flex:1}}/>
+            <button onClick={addReason} disabled={!isSuper || busy || !reasonDraft.trim()}
+              style={{padding:"6px 14px",background:(!isSuper||busy||!reasonDraft.trim())?"#9CA3AF":ui.text,color:"#fff",border:"none",borderRadius:5,fontSize:12.5,cursor:(!isSuper||busy||!reasonDraft.trim())?"not-allowed":"pointer",fontFamily:ui.fontBody}}>إضافة</button>
+          </div>
+        </div>
+      </div>
+
+      {/* E. Shipping policy */}
+      <div style={card}>
+        <div style={cardTitle}>سياسة الشحن المرتجع</div>
+        <div style={{fontSize:12,color:ui.textSub,fontFamily:ui.fontBody,marginBottom:8}}>من يتحمل تكلفة الشحن المرتجع؟</div>
+        <select value={cfg.shipping_policy} disabled={!isSuper}
+          onChange={e => saveCfg({ shipping_policy: e.target.value })}
+          style={{...inputStyle, maxWidth:300}}>
+          <option value="store">المتجر يتحمل التكلفة</option>
+          <option value="customer">العميل يتحمل التكلفة</option>
+          <option value="by_reason">حسب سبب الإرجاع (تالف → المتجر، غير ذلك → العميل)</option>
+        </select>
+      </div>
+
+      {/* F. Store credit bonus */}
+      <div style={card}>
+        <div style={cardTitle}>مكافأة رصيد المتجر</div>
+        <div style={{fontSize:12,color:ui.textSub,fontFamily:ui.fontBody,marginBottom:8}}>
+          نسبة إضافية تُمنح للعميل عند اختياره رصيد المتجر بدلاً من الاسترداد النقدي
+        </div>
+        <div style={{display:"flex",gap:8,alignItems:"center"}}>
+          <input type="text" inputMode="numeric" defaultValue={cfg.store_credit_bonus_pct}
+            disabled={!isSuper}
+            onBlur={e => { const v = Math.max(0, Math.min(100, parseFloat(e.target.value) || 0)); saveCfg({ store_credit_bonus_pct: v }); }}
+            style={{...inputStyle, maxWidth:120, direction:"ltr", textAlign:"left"}}/>
+          <span style={{fontSize:12.5,color:ui.textSub,fontFamily:ui.fontBody}}>% (الافتراضي 5%، اضبط 0 لتعطيل المكافأة)</span>
+        </div>
+      </div>
+
+      {/* G. Approver permission */}
+      <div style={card}>
+        <div style={cardTitle}>الموافقة المطلوبة</div>
+        <div style={{fontSize:12,color:ui.textSub,fontFamily:ui.fontBody,marginBottom:8}}>من يستطيع الموافقة على طلبات الإرجاع؟</div>
+        <select value={cfg.approver} disabled={!isSuper}
+          onChange={e => saveCfg({ approver: e.target.value })}
+          style={{...inputStyle, maxWidth:360}}>
+          <option value="super_only">Super Admin فقط</option>
+          <option value="orders_admin">مشرف الطلبات + Super Admin</option>
+        </select>
+      </div>
+    </div>
+  );
+}
+
 function ExpenseSettingsPanel({ ui, mob, isSuper, storeCfg, setStoreCfg, saveSetting, onAnyChange }) {
   const [cats,      setCats]      = useState([]);
   const [sups,      setSups]      = useState([]);
@@ -8720,12 +8931,20 @@ function CustomerDetailsPage({ email, ui, mob, C, isSuper, canManageOrders, onBa
               component lives at module scope and has no closure access. */}
           <section style={card}>
             <div style={cardTitle}>ملخص الإنفاق</div>
-            <div style={{display:"grid",gridTemplateColumns: mob?"1fr 1fr":"repeat(4,1fr)",gap:10}}>
+            <div style={{display:"grid",gridTemplateColumns: mob?"1fr 1fr":"repeat(4,1fr)",gap:10,marginBottom:10}}>
               <MetricCardBase ui={ui} mob={mob} label="إجمالي الإنفاق"   value={(u.totalSpent||0).toLocaleString()} suffix="ج" />
               <MetricCardBase ui={ui} mob={mob} label="عدد الطلبات"      value={u.totalOrders||0} />
               <MetricCardBase ui={ui} mob={mob} label="متوسط قيمة الطلب" value={aov.toLocaleString()} suffix="ج" />
               <MetricCardBase ui={ui} mob={mob} label="عدد المرتجعات"   value={returnsCount} hint={u.totalOrders ? `${Math.round((returnsCount/u.totalOrders)*100)}%` : "—"} />
             </div>
+            {(Number(u.store_credit_balance) || 0) > 0 && (
+              <div style={{padding:"10px 14px",background:"#F0FDF4",border:"0.5px solid #86EFAC",borderRadius:6,display:"flex",alignItems:"center",justifyContent:"space-between",gap:10,fontFamily:ui.fontBody}}>
+                <span style={{fontSize:12.5,color:"#15803D",fontWeight:500}}>💳 رصيد المتجر المتاح</span>
+                <span style={{fontSize:15,color:"#15803D",fontWeight:700}}>
+                  {Number(u.store_credit_balance).toLocaleString()} <span style={{fontSize:11,fontWeight:400}}>ج</span>
+                </span>
+              </div>
+            )}
           </section>
 
           {/* Orders */}
@@ -9923,6 +10142,134 @@ function ProductForm({
 // product thumbnails, price breakdown, customer notes, activity timeline,
 // action buttons (WhatsApp, email invoice, PDF, print, copy), sticky bottom
 // status bar, and a separate Cancel button with confirmation modal.
+// ─── Print a return slip via the browser's window.print() ─────────────────────
+// Opens a new popup window with a styled, self-contained HTML page, gives the
+// browser a beat to render, then triggers print. No new deps — works offline.
+// The "barcode" is a CSS-only striped block (good enough to scan visually).
+function printReturnSlip(ret) {
+  if (!ret || !ret.return_number) return;
+  const esc = (s) => String(s == null ? "" : s)
+    .replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;")
+    .replace(/"/g,"&quot;").replace(/'/g,"&#39;");
+  const itemsHtml = (ret.items || []).length === 0
+    ? `<tr><td colspan="4" style="padding:14px;text-align:center;color:#666;">${esc(ret.product || "—")}</td></tr>`
+    : ret.items.map(it => `
+        <tr>
+          <td style="padding:8px 10px;border-bottom:1px solid #eee;">${esc(it.product_name || "—")}${it.sku ? `<br><span style="font-size:10px;color:#666;font-family:monospace;">SKU: ${esc(it.sku)}</span>` : ""}</td>
+          <td style="padding:8px 10px;border-bottom:1px solid #eee;text-align:center;">${esc(it.quantity)}</td>
+          <td style="padding:8px 10px;border-bottom:1px solid #eee;text-align:left;">${(Number(it.unit_price)||0).toLocaleString()} ج</td>
+          <td style="padding:8px 10px;border-bottom:1px solid #eee;text-align:left;font-weight:600;">${(Number(it.refund_amount)||0).toLocaleString()} ج</td>
+        </tr>
+      `).join("");
+  // Pure-CSS striped "barcode" — alternating black bars derived from the
+  // return number's char codes so the same RET-XXXX always renders the same.
+  const code = ret.return_number;
+  const bars = Array.from(code).map((c) => {
+    const w = ((c.charCodeAt(0) % 4) + 1) * 2;
+    return `<span style="display:inline-block;width:${w}px;height:38px;background:#000;margin-right:2px;"></span>`;
+  }).join("");
+
+  const html = `<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="UTF-8"/>
+<title>بوليصة إرجاع ${esc(ret.return_number)}</title>
+<style>
+  * { box-sizing: border-box; }
+  body { margin:0; padding:24px; font-family: 'Segoe UI', Tahoma, Arial, sans-serif; color:#1A1A1A; background:#fff; direction:rtl; }
+  .slip { max-width:680px; margin:0 auto; border:1px solid #ccc; padding:28px 26px; }
+  .header { display:flex; justify-content:space-between; align-items:flex-start; padding-bottom:18px; border-bottom:2px solid #000; margin-bottom:20px; }
+  .brand { font-size:30px; font-weight:400; letter-spacing:0.12em; color:#c9a96e; font-family:'Times New Roman', serif; }
+  .brand-sub { font-size:9px; letter-spacing:0.3em; color:#666; margin-top:4px; }
+  .slip-title { font-size:18px; font-weight:600; margin-bottom:4px; }
+  .slip-num { font-size:12px; color:#666; font-family:monospace; }
+  .meta { display:grid; grid-template-columns: 1fr 1fr; gap:10px 18px; font-size:12.5px; margin-bottom:18px; }
+  .meta label { color:#666; font-size:11px; display:block; margin-bottom:2px; }
+  .meta b { color:#1A1A1A; font-weight:500; }
+  table { width:100%; border-collapse:collapse; margin-bottom:18px; }
+  th { background:#f5f5f5; padding:8px 10px; text-align:right; font-size:11px; color:#666; border-bottom:2px solid #000; font-weight:600; }
+  .total-row { background:#f9f9f9; }
+  .total-row td { padding:11px 10px; font-size:14px; font-weight:700; border-top:2px solid #000; }
+  .notes { font-size:12px; color:#444; padding:12px 14px; background:#FFFBEA; border:1px dashed #FDE68A; border-radius:6px; margin-bottom:18px; }
+  .footer { display:flex; align-items:center; justify-content:space-between; padding-top:18px; border-top:1px dashed #ccc; }
+  .barcode-block { text-align:center; }
+  .barcode-bars { display:inline-block; padding:6px 10px; background:#fff; border:1px solid #eee; line-height:0; }
+  .barcode-text { display:block; margin-top:5px; font-family:monospace; font-size:13px; letter-spacing:0.15em; color:#000; }
+  .instructions { font-size:11px; color:#444; line-height:1.7; max-width:340px; }
+  @media print {
+    body { padding:0; }
+    .slip { border:none; max-width:none; padding:0; }
+    .no-print { display:none; }
+  }
+</style>
+</head>
+<body>
+  <div class="slip">
+    <div class="header">
+      <div>
+        <div class="brand">نوّرَة</div>
+        <div class="brand-sub">SKINCARE&nbsp;E-SHOP</div>
+      </div>
+      <div style="text-align:left;">
+        <div class="slip-title">بوليصة إرجاع</div>
+        <div class="slip-num">${esc(ret.return_number)}</div>
+        <div style="font-size:10.5px;color:#666;margin-top:3px;">${esc(String(ret.requested_at || ret.created_at || "").slice(0, 16))}</div>
+      </div>
+    </div>
+
+    <div class="meta">
+      <div><label>العميل</label><b>${esc(ret.customer || (ret.customer && ret.customer.name) || "—")}</b></div>
+      <div><label>الطلب الأصلي</label><b>#${esc(ret.order_id || "—")}</b></div>
+      <div><label>الهاتف</label><b>${esc(ret.customer && ret.customer.phone || "—")}</b></div>
+      <div><label>السبب</label><b>${esc(ret.reason_label || ret.reason || "—")}</b></div>
+    </div>
+
+    <table>
+      <thead>
+        <tr>
+          <th>المنتج</th>
+          <th style="text-align:center;width:60px;">الكمية</th>
+          <th style="text-align:left;width:90px;">السعر</th>
+          <th style="text-align:left;width:90px;">الاسترداد</th>
+        </tr>
+      </thead>
+      <tbody>
+        ${itemsHtml}
+        <tr class="total-row">
+          <td colspan="3">الإجمالي المسترد</td>
+          <td style="text-align:left;">${(Number(ret.amount)||0).toLocaleString()} ج</td>
+        </tr>
+      </tbody>
+    </table>
+
+    ${ret.customer_notes ? `<div class="notes"><b>ملاحظات العميل:</b><br>${esc(ret.customer_notes)}</div>` : ""}
+
+    <div class="footer">
+      <div class="instructions">
+        <b>تعليمات:</b><br>
+        1. ضع هذه البوليصة داخل العبوة مع المنتج المُرجع.<br>
+        2. تأكد من أن المنتج بحالته الأصلية.<br>
+        3. سيتم معالجة الاسترداد خلال 3 أيام عمل من الاستلام.<br>
+        4. للاستفسار: <a href="https://wa.me/2010" target="_blank">واتساب نوّرَة</a>
+      </div>
+      <div class="barcode-block">
+        <div class="barcode-bars">${bars}</div>
+        <span class="barcode-text">${esc(code)}</span>
+      </div>
+    </div>
+  </div>
+  <script>
+    // Give the browser one tick to layout + load fonts, then print.
+    window.addEventListener('load', function() { setTimeout(function() { window.print(); }, 250); });
+  </script>
+</body>
+</html>`;
+
+  const win = window.open("", "nawra-return-slip", "width=820,height=900");
+  if (!win) { window.alert("تم منع النافذة المنبثقة. فعّل النوافذ المنبثقة من إعدادات المتصفح."); return; }
+  win.document.open(); win.document.write(html); win.document.close();
+}
+
 // ─── ReturnDetailsView — module-scope so input focus is preserved on every keystroke ───
 // Renders the full return-details page (2-col layout) for a single hydrated
 // `ret` object from /api/returns/:returnNumber. The parent owns the data
@@ -10087,8 +10434,8 @@ function ReturnDetailsView({ ret, retKey, ui, mob, isSuper, authUser, onBack, on
           </h2>
         </div>
         <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
-          <button disabled title="سيتم تفعيل طباعة البوليصة في المرحلة الثانية"
-            style={{padding:"7px 12px",background:ui.cardBg,color:ui.textSub,border:ui.border,borderRadius:6,fontSize:12,cursor:"not-allowed",fontFamily:ui.fontBody,opacity:0.7}}>
+          <button onClick={() => printReturnSlip(ret)}
+            style={{padding:"7px 12px",background:ui.cardBg,color:ui.text,border:ui.border,borderRadius:6,fontSize:12,cursor:"pointer",fontFamily:ui.fontBody}}>
             🖨️ طباعة بوليصة الإرجاع
           </button>
           {ret.customer && ret.customer.phone && (
@@ -10337,6 +10684,12 @@ function ReturnDetailsView({ ret, retKey, ui, mob, isSuper, authUser, onBack, on
                   <div>طلبات سابقة: <b style={{color:ui.text}}>{ret.customer.totalOrders || 0}</b></div>
                   <div>مرتجعات سابقة: <b style={{color: (ret.customer.total_returns || 0) >= 3 ? "#B91C1C" : ui.text}}>{ret.customer.total_returns || 0}</b></div>
                 </div>
+                {(Number(ret.customer.store_credit_balance) || 0) > 0 && (
+                  <div style={{marginTop:8,padding:"6px 10px",background:"#F0FDF4",border:"0.5px solid #86EFAC",borderRadius:5,fontSize:11.5,color:"#15803D",fontFamily:ui.fontBody,display:"flex",justifyContent:"space-between"}}>
+                    <span>رصيد متجر</span>
+                    <b>{Number(ret.customer.store_credit_balance).toLocaleString()} ج</b>
+                  </div>
+                )}
                 <a href={`#admin/customers/${encodeURIComponent(ret.customer.email)}`}
                   style={{display:"inline-block",marginTop:10,fontSize:11.5,color:"#1D4ED8",textDecoration:"none",fontFamily:ui.fontBody}}>
                   عرض ملف العميل الكامل ←
@@ -11295,8 +11648,39 @@ function MyOrders({ go }) {
   const px = mob ? "16px" : "56px";
   const [orders, setOrders] = useState([]);
   const [ordersLoading, setOrdersLoading] = useState(true);
+  // Return request state — see ReturnRequestModal below.
+  const [myReturns, setMyReturns]   = useState([]);   // returns the user has already submitted
+  const [reasons, setReasons]       = useState([]);   // dropdown options from /api/return-reasons
+  const [returnsCfg, setReturnsCfg] = useState({ window_days: 14, allow_refund: true, allow_exchange: true, allow_store_credit: true });
+  const [returnFor, setReturnFor]   = useState(null); // the order being returned (object, not just id)
 
   // ─ ALL hooks run unconditionally before any conditional return ─────────────
+  // Fetch the user's existing returns so we can show their status next to
+  // each order — we use a simple ?q={email} on the new returns endpoint.
+  const userEmail = user && user.email;
+  const loadMyReturns = useCallback(async () => {
+    if (!userEmail) return;
+    try {
+      const r = await fetch(`/api/returns?q=${encodeURIComponent(userEmail)}&perPage=200`);
+      if (r.ok) { const d = await r.json(); setMyReturns(Array.isArray(d.rows) ? d.rows : []); }
+    } catch {}
+  }, [userEmail]);
+  useEffect(() => { loadMyReturns(); }, [loadMyReturns]);
+  // One-time fetch for the form: reasons + return-window config from settings.store.
+  useEffect(() => {
+    fetch("/api/return-reasons").then(r => r.ok ? r.json() : []).then(d => setReasons(Array.isArray(d) ? d : [])).catch(() => {});
+    fetch("/api/settings/store").then(r => r.ok ? r.json() : {}).then(d => {
+      const r = (d && d.returns) || {};
+      setReturnsCfg({
+        window_days: Number.isFinite(r.window_days) ? r.window_days : 14,
+        allow_refund: r.allow_refund !== false,
+        allow_exchange: r.allow_exchange !== false,
+        allow_store_credit: r.allow_store_credit !== false,
+        non_returnable_ids: Array.isArray(r.non_returnable_ids) ? r.non_returnable_ids : [],
+      });
+    }).catch(() => {});
+  }, []);
+
   useEffect(() => {
     if (!user?.email) { go("#login"); return; }
     let cancelled = false;
@@ -11358,6 +11742,13 @@ function MyOrders({ go }) {
           </div>
         ) : orders.map(o => {
           const sc = statusColor(o.status);
+          // Compute return eligibility: order must be مكتمل + within window
+          // + not have a non-cancelled return already attached.
+          const orderTs = o.created_at ? new Date(String(o.created_at).replace(" ","T") + "Z").getTime() : null;
+          const daysSince = orderTs ? Math.floor((Date.now() - orderTs) / 86400000) : null;
+          const inWindow = daysSince != null ? daysSince <= returnsCfg.window_days : true;
+          const existingReturn = myReturns.find(r => String(r.order_id) === String(o.id) && r.status !== "cancelled" && r.status !== "rejected");
+          const canRequestReturn = o.status === "مكتمل" && inWindow && !existingReturn;
           return (
             <div key={o.id} style={{ background: C.wh, padding: mob ? "16px" : "22px 24px", marginBottom: 14, border: "1px solid rgba(196,149,106,.13)", boxShadow: "0 2px 12px rgba(196,149,106,.07)" }}>
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", flexWrap: "wrap", gap: 8 }}>
@@ -11382,9 +11773,207 @@ function MyOrders({ go }) {
                   </div>
                 ))}
               </div>
+
+              {/* Return request CTA + status — visible on every مكتمل order */}
+              <div style={{ borderTop: "1px solid rgba(196,149,106,.1)", paddingTop: 12, marginTop: 12, display:"flex", alignItems:"center", justifyContent:"space-between", gap:8, flexWrap:"wrap" }}>
+                {existingReturn ? (
+                  <div style={{ fontSize:12.5, color:C.dk, fontFamily:C.fb }}>
+                    تم تقديم طلب إرجاع <b style={{fontFamily:"monospace"}}>{existingReturn.return_number}</b> ·
+                    <span style={{
+                      marginInlineStart:6, padding:"2px 8px", borderRadius:10, fontSize:11,
+                      background: existingReturn.status === "refunded" ? "#D1FAE5" : existingReturn.status === "approved" ? "#DBEAFE" : "#FEF3C7",
+                      color:      existingReturn.status === "refunded" ? "#065F46" : existingReturn.status === "approved" ? "#1D4ED8" : "#92400E",
+                    }}>
+                      {existingReturn.status === "pending"  ? "في الانتظار" :
+                       existingReturn.status === "approved" ? "موافق عليه" :
+                       existingReturn.status === "refunded" ? "تم الاسترداد" :
+                       existingReturn.status === "rejected" ? "مرفوض" : existingReturn.status}
+                    </span>
+                  </div>
+                ) : (
+                  <div style={{ fontSize:11.5, color:C.mu, fontFamily:C.fb }}>
+                    {o.status === "مكتمل"
+                      ? (inWindow ? `يمكنك طلب إرجاع خلال ${returnsCfg.window_days - (daysSince||0)} يوم` : "انتهت مدة الإرجاع المسموح بها")
+                      : `سيمكن طلب الإرجاع بعد تسليم الطلب`}
+                  </div>
+                )}
+                {canRequestReturn && (
+                  <button onClick={() => setReturnFor(o)}
+                    style={{ padding:"7px 16px", background:C.dk, color:C.cr, border:"none", borderRadius:5, fontSize:12, fontFamily:C.fb, cursor:"pointer", fontWeight:500 }}>
+                    طلب إرجاع 📦
+                  </button>
+                )}
+              </div>
             </div>
           );
         })}
+      </div>
+
+      {/* Return request modal */}
+      {returnFor && (
+        <ReturnRequestModal
+          order={returnFor}
+          user={user}
+          reasons={reasons}
+          cfg={returnsCfg}
+          onClose={() => setReturnFor(null)}
+          onSubmitted={() => { setReturnFor(null); loadMyReturns(); }}
+        />
+      )}
+    </div>
+  );
+}
+
+// ─── Customer-side Return Request Modal ──────────────────────────────────────
+// Renders a form letting the customer pick line items + quantities, choose a
+// reason, optionally add notes + photos, pick a preferred refund method, then
+// POST /api/returns. Server allocates RET-XXXX + notifies admins via inbox.
+function ReturnRequestModal({ order, user, reasons, cfg, onClose, onSubmitted }) {
+  const mob = useMob();
+  // Per-line state: how many of each ordered unit the customer wants to return.
+  // Initialized to 0 for every line; customer must explicitly raise a quantity
+  // so they don't accidentally return everything.
+  const orderItems = Array.isArray(order.items) ? order.items : (() => { try { return JSON.parse(order.items || "[]"); } catch { return []; } })();
+  const [qtyByIdx, setQtyByIdx] = useState(() => orderItems.map(() => 0));
+  const [reasonId, setReasonId] = useState("");
+  const [notes, setNotes]       = useState("");
+  const [refundMethod, setRefundMethod] = useState(cfg.allow_refund ? "cash" : (cfg.allow_store_credit ? "store_credit" : "exchange"));
+  const [busy, setBusy]   = useState(false);
+  const [error, setError] = useState("");
+  // Block lines whose product_id is in the non_returnable_ids list.
+  const blockedIdx = new Set();
+  orderItems.forEach((it, i) => { if ((cfg.non_returnable_ids || []).includes(String(it.id))) blockedIdx.add(i); });
+
+  // Refund total = sum of (line.price × qty selected)
+  const refundTotal = orderItems.reduce((s, it, i) => s + ((Number(it.price)||0) * (qtyByIdx[i] || 0)), 0);
+  const totalQty = qtyByIdx.reduce((s, q) => s + (Number(q) || 0), 0);
+  const canSubmit = totalQty > 0 && !!reasonId && !!refundMethod && !busy;
+
+  const submit = async () => {
+    setError(""); setBusy(true);
+    try {
+      const items = orderItems
+        .map((it, i) => ({ idx: i, qty: qtyByIdx[i] || 0, it }))
+        .filter(x => x.qty > 0)
+        .map(x => ({
+          order_item_idx: x.idx,
+          product_id:   x.it.id || null,
+          product_name: x.it.name || null,
+          product_image:x.it.img || null,
+          unit_price:   Number(x.it.price) || 0,
+          quantity:     x.qty,
+          refund_amount:(Number(x.it.price) || 0) * x.qty,
+        }));
+      const body = {
+        order_id: order.id,
+        customer: user.name || user.email,
+        customer_id: user.email,
+        customer_email: user.email,
+        reason_id: reasonId,
+        customer_notes: notes.trim() || null,
+        items,
+        refund_method: refundMethod,
+        actor_id: user.email, actor_name: user.name || user.email,
+      };
+      const r = await fetch("/api/returns", { method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify(body) });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`);
+      onSubmitted && onSubmitted();
+    } catch (e) {
+      setError(e.message || "تعذّر إرسال الطلب، حاول مرة أخرى");
+    } finally { setBusy(false); }
+  };
+
+  return (
+    <div onClick={onClose}
+      style={{position:"fixed",inset:0,background:"rgba(0,0,0,.6)",zIndex:900,display:"flex",alignItems:"center",justifyContent:"center",padding:mob?12:24,direction:"rtl"}}>
+      <div onClick={e => e.stopPropagation()}
+        style={{background:C.wh,maxWidth:680,width:"100%",maxHeight:"92vh",overflowY:"auto",borderRadius:8,boxShadow:"0 12px 48px rgba(0,0,0,.3)"}}>
+        <div style={{padding:"18px 22px",borderBottom:"1px solid rgba(196,149,106,.15)",display:"flex",alignItems:"center",justifyContent:"space-between"}}>
+          <div>
+            <div style={{fontSize:16,color:C.dk,fontFamily:C.fa,fontWeight:600}}>طلب إرجاع</div>
+            <div style={{fontSize:11.5,color:C.mu,fontFamily:C.fb,marginTop:2}}>طلب #{order.id} · {order.date}</div>
+          </div>
+          <button onClick={onClose} style={{background:"none",border:"none",fontSize:22,color:C.mu,cursor:"pointer",padding:4}}>✕</button>
+        </div>
+
+        <div style={{padding:"18px 22px"}}>
+          {/* 1. Items + quantities */}
+          <div style={{marginBottom:14}}>
+            <div style={{fontSize:12,color:C.wa,fontFamily:C.fb,marginBottom:8,fontWeight:600}}>اختر المنتجات والكميات</div>
+            <div style={{display:"flex",flexDirection:"column",gap:8}}>
+              {orderItems.map((it, i) => {
+                const blocked = blockedIdx.has(i);
+                return (
+                  <div key={i} style={{display:"flex",alignItems:"center",gap:10,padding:"8px 10px",border:"1px solid rgba(196,149,106,.15)",borderRadius:6,opacity:blocked?0.55:1}}>
+                    <div style={{flex:1}}>
+                      <div style={{fontSize:13,color:C.dk,fontFamily:C.fb}}>{it.name}</div>
+                      <div style={{fontSize:11,color:C.mu,fontFamily:C.fb,marginTop:2}}>سعر الوحدة: {it.price} ج · الكمية الأصلية: {it.qty}</div>
+                      {blocked && <div style={{fontSize:11,color:"#B45309",fontFamily:C.fb,marginTop:3}}>⚠ هذا المنتج غير قابل للإرجاع</div>}
+                    </div>
+                    <div style={{display:"flex",alignItems:"center",gap:5}}>
+                      <button onClick={() => { const v = Math.max(0, (qtyByIdx[i] || 0) - 1); const next = [...qtyByIdx]; next[i] = v; setQtyByIdx(next); }}
+                        disabled={blocked || (qtyByIdx[i] || 0) <= 0}
+                        style={{width:28,height:28,border:"1px solid rgba(196,149,106,.2)",background:C.cr,borderRadius:5,cursor:"pointer",fontSize:14,color:C.dk}}>−</button>
+                      <span style={{minWidth:24,textAlign:"center",fontSize:13,fontFamily:C.fb,color:C.dk}}>{qtyByIdx[i] || 0}</span>
+                      <button onClick={() => { const max = Number(it.qty) || 1; const v = Math.min(max, (qtyByIdx[i] || 0) + 1); const next = [...qtyByIdx]; next[i] = v; setQtyByIdx(next); }}
+                        disabled={blocked || (qtyByIdx[i] || 0) >= (Number(it.qty) || 1)}
+                        style={{width:28,height:28,border:"1px solid rgba(196,149,106,.2)",background:C.cr,borderRadius:5,cursor:"pointer",fontSize:14,color:C.dk}}>+</button>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+
+          {/* 2. Reason */}
+          <div style={{marginBottom:14}}>
+            <label style={{fontSize:12,color:C.wa,fontFamily:C.fb,fontWeight:600,display:"block",marginBottom:5}}>سبب الإرجاع</label>
+            <select value={reasonId} onChange={e => setReasonId(e.target.value)}
+              style={{width:"100%",padding:"9px 11px",border:"1px solid rgba(196,149,106,.25)",borderRadius:6,background:C.wh,fontSize:13,fontFamily:C.fb,color:C.dk,outline:"none",direction:"rtl"}}>
+              <option value="">— اختر السبب —</option>
+              {(reasons || []).filter(r => r.active).map(r => <option key={r.id} value={r.id}>{r.name_ar}</option>)}
+            </select>
+          </div>
+
+          {/* 3. Notes */}
+          <div style={{marginBottom:14}}>
+            <label style={{fontSize:12,color:C.wa,fontFamily:C.fb,fontWeight:600,display:"block",marginBottom:5}}>ملاحظات (اختياري)</label>
+            <textarea rows={3} value={notes} onChange={e => setNotes(e.target.value)}
+              placeholder="اكتب أي تفاصيل إضافية تساعدنا في معالجة طلبك..."
+              style={{width:"100%",padding:"9px 11px",border:"1px solid rgba(196,149,106,.25)",borderRadius:6,background:C.wh,fontSize:13,fontFamily:C.fb,color:C.dk,outline:"none",direction:"rtl",resize:"vertical",boxSizing:"border-box"}}/>
+          </div>
+
+          {/* 4. Refund method preference */}
+          <div style={{marginBottom:14}}>
+            <label style={{fontSize:12,color:C.wa,fontFamily:C.fb,fontWeight:600,display:"block",marginBottom:5}}>طريقة الاسترداد المفضلة</label>
+            <select value={refundMethod} onChange={e => setRefundMethod(e.target.value)}
+              style={{width:"100%",padding:"9px 11px",border:"1px solid rgba(196,149,106,.25)",borderRadius:6,background:C.wh,fontSize:13,fontFamily:C.fb,color:C.dk,outline:"none",direction:"rtl"}}>
+              {cfg.allow_refund && <option value="cash">كاش (عند استلام المرتجع)</option>}
+              {cfg.allow_refund && <option value="transfer">تحويل بنكي</option>}
+              {cfg.allow_refund && <option value="wallet">محفظة إلكترونية</option>}
+              {cfg.allow_store_credit && <option value="store_credit">رصيد للمتجر (+مكافأة)</option>}
+              {cfg.allow_exchange && <option value="exchange">استبدال بمنتج آخر</option>}
+            </select>
+          </div>
+
+          {/* Total + footer */}
+          <div style={{padding:"12px 14px",background:C.cr2,borderRadius:6,display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:14}}>
+            <span style={{fontSize:13,color:C.dk,fontFamily:C.fb,fontWeight:600}}>إجمالي المسترد المتوقع</span>
+            <span style={{fontSize:18,color:C.dk,fontFamily:C.fa,fontWeight:600}}>{refundTotal.toLocaleString()} <span style={{fontSize:11,color:C.mu,fontFamily:C.fb}}>ج</span></span>
+          </div>
+
+          {error && <div style={{padding:"8px 12px",background:"#FEE2E2",color:"#B91C1C",border:"1px solid #FCA5A5",borderRadius:5,fontSize:12,fontFamily:C.fb,marginBottom:10}}>{error}</div>}
+
+          <div style={{display:"flex",gap:8,justifyContent:"flex-end"}}>
+            <button onClick={onClose} disabled={busy}
+              style={{padding:"10px 18px",background:"transparent",border:"1px solid rgba(196,149,106,.25)",borderRadius:6,fontSize:13,color:C.mu,fontFamily:C.fb,cursor:"pointer"}}>إلغاء</button>
+            <button onClick={submit} disabled={!canSubmit}
+              style={{padding:"10px 22px",background: canSubmit ? C.dk : "#aaa",color:C.cr,border:"none",borderRadius:6,fontSize:13,fontFamily:C.fb,cursor: canSubmit ? "pointer" : "not-allowed",fontWeight:600}}>
+              {busy ? "جاري الإرسال..." : "إرسال طلب الإرجاع"}
+            </button>
+          </div>
+        </div>
       </div>
     </div>
   );
