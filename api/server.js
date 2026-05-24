@@ -665,8 +665,26 @@ const TEST_MARKER = '__NAWRA_TEST__';
     { table: 'users',              field: 'email' },
     { table: 'customer_notes',     field: 'note' },
     { table: 'messages',           field: 'subject' },
+    { table: 'returns',            field: 'customer' },
   ];
   let total = 0;
+  // Cascade-aware purge for returns — collect ids first, then delete child
+  // rows before the parent so we never leave orphaned items/attachments/
+  // activity_log entries pointing at a vanished return.
+  try {
+    const orphanIds = db.prepare("SELECT id FROM returns WHERE customer LIKE ?").all(`%${TEST_MARKER}%`).map(r => r.id);
+    if (orphanIds.length) {
+      ['return_items', 'return_attachments', 'return_activity_log'].forEach(t => {
+        try {
+          const info = db.prepare(`DELETE FROM ${t} WHERE return_id IN (${orphanIds.map(()=>'?').join(',')})`).run(...orphanIds);
+          if (info.changes > 0) {
+            console.log(`[nawra-api] test-data purge cascade: ${t} → removed ${info.changes}`);
+            total += info.changes;
+          }
+        } catch {}
+      });
+    }
+  } catch {}
   targets.forEach(({ table, field }) => {
     try {
       const info = db.prepare(`DELETE FROM ${table} WHERE ${field} LIKE ?`).run(`%${TEST_MARKER}%`);
@@ -678,6 +696,12 @@ const TEST_MARKER = '__NAWRA_TEST__';
       console.warn(`[nawra-api] test-data purge skipped for ${table}: ${err.message}`);
     }
   });
+  // Also sweep return_items by product_name (covers any smoke that inserted
+  // marker-tagged items but didn't tag the parent's customer field).
+  try {
+    const info = db.prepare("DELETE FROM return_items WHERE product_name LIKE ?").run(`%${TEST_MARKER}%`);
+    if (info.changes > 0) { console.log(`[nawra-api] test-data purge: return_items.product_name → removed ${info.changes}`); total += info.changes; }
+  } catch {}
   if (total === 0) console.log('[nawra-api] test-data purge: nothing to remove');
 })();
 
