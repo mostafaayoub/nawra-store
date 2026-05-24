@@ -1547,6 +1547,10 @@ function AdminDash({ go }) {
           notes: expDraft.notes.trim() || null,
           type: expDraft.type || "variable",
           supplier_id: expDraft.supplier_id || null,
+          // Free-text beneficiary name (server auto-creates a supplier row
+          // when this is set and supplier_id isn't).
+          beneficiary_name: expDraft._supplierTyped || null,
+          beneficiary_type: expDraft.beneficiary_type || "supplier",
           payment_method: expDraft.payment_method || "cash",
           receipt_path: expDraft.receipt_path || null,
           is_recurring: !!expDraft.is_recurring,
@@ -1569,9 +1573,12 @@ function AdminDash({ go }) {
           type:"variable", supplier_id:"", payment_method:"cash",
           receipt_path:"", is_recurring:false, notes:"",
           category_key: expCatTab === "all" ? "" : expCatTab,
+          beneficiary_type: "supplier",
         });
         refreshExpenses();
         refreshExpTrend();
+        refreshExpSuppliers(); // pick up any newly-auto-created supplier
+        refreshMessages();      // if it went pending, the inbox needs an update
       }
     } catch {}
   };
@@ -1580,15 +1587,23 @@ function AdminDash({ go }) {
     const qty  = Number(expEditDraft.quantity)   || 0;
     const unit = Number(expEditDraft.unit_price) || 0;
     try {
-      await fetch(`/api/expenses/${expEditingId}`, {
+      const r = await fetch(`/api/expenses/${expEditingId}`, {
         method: "PUT", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          ...expEditDraft, quantity: qty, unit_price: unit, amount: qty * unit
+          ...expEditDraft,
+          quantity: qty, unit_price: unit, amount: qty * unit,
+          // Forward beneficiary so the server can find-or-create the supplier
+          beneficiary_name: expEditDraft._beneficiaryTyped || null,
+          beneficiary_type: expEditDraft.beneficiary_type || null,
         })
       });
-      setExpEditingId(null); setExpEditDraft(null);
-      refreshExpenses();
-      refreshExpTrend();
+      if (r.ok) {
+        setExpEditingId(null); setExpEditDraft(null);
+        setSavedToast("تم حفظ التعديلات"); setTimeout(()=>setSavedToast(""), 1800);
+        refreshExpenses();
+        refreshExpTrend();
+        refreshExpSuppliers();
+      }
     } catch {}
   };
   const deleteExpense = async (id) => {
@@ -1615,6 +1630,43 @@ function AdminDash({ go }) {
       refreshExpenses(); refreshExpTrend();
       setSavedToast("تم رفض المصروف"); setTimeout(()=>setSavedToast(""), 1800);
     } catch {}
+  };
+  // Approve / reject expense FROM the inbox bell — applies the same
+  // optimistic-fade-then-confirm pattern as actionMessage so the message
+  // visually disappears immediately and the bell badge decrements.
+  const approveExpenseFromInbox = async (msgId, expenseId) => {
+    setRemovedMsgIds(prev => ({ ...prev, [msgId]: 'fading' }));
+    fetch(`/api/messages/${msgId}/read`, { method:"PATCH" }).catch(()=>{});
+    setTimeout(() => setRemovedMsgIds(prev => ({ ...prev, [msgId]: 'gone' })), 200);
+    try {
+      const r = await fetch(`/api/expenses/${expenseId}/approve`, {
+        method:"POST", headers:{"Content-Type":"application/json"},
+        body: JSON.stringify({ actor: (authUser && authUser.email) || null }),
+      });
+      if (!r.ok) throw new Error('approve failed');
+      refreshExpenses(); refreshExpTrend(); refreshMessages();
+      setSavedToast("تمت الموافقة على المصروف"); setTimeout(()=>setSavedToast(""), 1800);
+    } catch {
+      setRemovedMsgIds(prev => { const n = { ...prev }; delete n[msgId]; return n; });
+      window.alert('فشل تنفيذ الإجراء — تم إعادة الرسالة للصندوق');
+    }
+  };
+  const rejectExpenseFromInbox = async (msgId, expenseId, reason) => {
+    setRemovedMsgIds(prev => ({ ...prev, [msgId]: 'fading' }));
+    fetch(`/api/messages/${msgId}/read`, { method:"PATCH" }).catch(()=>{});
+    setTimeout(() => setRemovedMsgIds(prev => ({ ...prev, [msgId]: 'gone' })), 200);
+    try {
+      const r = await fetch(`/api/expenses/${expenseId}/reject`, {
+        method:"POST", headers:{"Content-Type":"application/json"},
+        body: JSON.stringify({ actor: (authUser && authUser.email) || null, reason }),
+      });
+      if (!r.ok) throw new Error('reject failed');
+      refreshExpenses(); refreshExpTrend(); refreshMessages();
+      setSavedToast("تم رفض المصروف"); setTimeout(()=>setSavedToast(""), 1800);
+    } catch {
+      setRemovedMsgIds(prev => { const n = { ...prev }; delete n[msgId]; return n; });
+      window.alert('فشل تنفيذ الإجراء — تم إعادة الرسالة للصندوق');
+    }
   };
   const uploadExpenseReceipt = async (file) => {
     if (!file) return null;
@@ -2985,10 +3037,14 @@ function AdminDash({ go }) {
                     const isApp = m.type === 'approval';
                     const isRej = m.type === 'rejection';
                     const accent = isReq ? "#F59E0B" : isApp ? "#16A34A" : isRej ? "#DC2626" : ui.textSub;
-                    // Actioned messages skip the "needs action" UI even if
-                    // they still have requires_action in their metadata.
                     const actioned   = removedMsgIds[m.id] === 'fading';
-                    const needsAction = !actioned && isReq && m.metadata && m.metadata.requires_action && m.metadata.approval_id && isSuper;
+                    // Two flavours of "needs admin action": the legacy
+                    // approvals table (product_delete / stock_*) carries an
+                    // approval_id, AND the expense-approval flow carries an
+                    // expense_id under metadata.kind === 'expense_approval'.
+                    const isExpenseAppr  = !!(m.metadata && m.metadata.kind === 'expense_approval' && m.metadata.expense_id);
+                    const isLegacyAppr   = !!(m.metadata && m.metadata.approval_id);
+                    const needsAction    = !actioned && isReq && m.metadata && m.metadata.requires_action && isSuper && (isExpenseAppr || isLegacyAppr);
                     return (
                       <article key={m.id}
                         onClick={()=>!m.read_at && !actioned && markMessageRead(m.id)}
@@ -3028,14 +3084,22 @@ function AdminDash({ go }) {
                           <div style={{display:"flex",gap:6,marginTop:10}}>
                             <button onClick={(e)=>{
                               e.stopPropagation();
-                              actionMessage(m.id, m.metadata.approval_id, "approved");
+                              if (isExpenseAppr) {
+                                approveExpenseFromInbox(m.id, m.metadata.expense_id);
+                              } else {
+                                actionMessage(m.id, m.metadata.approval_id, "approved");
+                              }
                             }}
                               style={{background:"#DCFCE7",border:"0.5px solid #86EFAC",padding:"5px 12px",cursor:"pointer",fontSize:11.5,fontFamily:ui.fontBody,color:"#15803D",borderRadius:5}}>
                               ✓ موافقة
                             </button>
                             <button onClick={(e)=>{
                               e.stopPropagation();
-                              setRejectionFor({ msgId: m.id, approvalId: m.metadata.approval_id, label: m.subject, note: "" });
+                              if (isExpenseAppr) {
+                                setRejectionFor({ msgId: m.id, expenseId: m.metadata.expense_id, label: m.subject, note: "", kind: "expense" });
+                              } else {
+                                setRejectionFor({ msgId: m.id, approvalId: m.metadata.approval_id, label: m.subject, note: "" });
+                              }
                             }}
                               style={{background:"#FEE2E2",border:"0.5px solid #FCA5A5",padding:"5px 12px",cursor:"pointer",fontSize:11.5,fontFamily:ui.fontBody,color:"#B91C1C",borderRadius:5}}>
                               ✗ رفض
@@ -3076,8 +3140,14 @@ function AdminDash({ go }) {
                   <button
                     disabled={(rejectionFor.note || "").trim().length < 3}
                     onClick={() => {
-                      // Optimistic remove with rollback — same as موافقة flow
-                      actionMessage(rejectionFor.msgId, rejectionFor.approvalId, "rejected", rejectionFor.note.trim());
+                      const note = rejectionFor.note.trim();
+                      // Two routing paths: expense rejection hits the expense
+                      // endpoint, legacy approvals hit /api/approvals.
+                      if (rejectionFor.kind === "expense") {
+                        rejectExpenseFromInbox(rejectionFor.msgId, rejectionFor.expenseId, note);
+                      } else {
+                        actionMessage(rejectionFor.msgId, rejectionFor.approvalId, "rejected", note);
+                      }
                       setRejectionFor(null);
                     }}
                     style={{padding:"8px 18px",background: (rejectionFor.note||"").trim().length >= 3 ? "#DC2626" : "#9CA3AF",color:"#fff",border:"none",borderRadius:6,fontSize:12.5,fontFamily:ui.fontBody,cursor:(rejectionFor.note||"").trim().length >= 3 ? "pointer" : "not-allowed"}}>
@@ -4800,8 +4870,8 @@ function AdminDash({ go }) {
               if (minA != null && Number(e.amount||0) < minA) return false;
               if (maxA != null && Number(e.amount||0) > maxA) return false;
               if (q) {
-                const supplierName = (expSuppliers.find(s => s.id === e.supplier_id) || {}).name || "";
-                const hay = `${e.description||""} ${e.notes||""} ${supplierName}`.toLowerCase();
+                const benName = e.supplier_name || (expSuppliers.find(s => s.id === e.supplier_id) || {}).name || "";
+                const hay = `${e.description||""} ${e.notes||""} ${benName}`.toLowerCase();
                 if (!hay.includes(q)) return false;
               }
               return true;
@@ -4814,7 +4884,20 @@ function AdminDash({ go }) {
             const activeCat = expCatTab === "all" ? null : (catByKey[expCatTab] || null);
             const draftCatKey = expCatTab === "all" ? expDraft.category_key : expCatTab;
 
-            const supplierName = (id) => (expSuppliers.find(s => s.id === id) || {}).name || "—";
+            // Resolve beneficiary display name: prefer the server-joined
+            // value (e.supplier_name) which is always fresh; fall back to the
+            // suppliers cache for legacy callers; finally "—" if truly empty.
+            const beneficiaryName = (e) => {
+              if (e && e.supplier_name) return e.supplier_name;
+              if (e && e.supplier_id) {
+                const hit = expSuppliers.find(s => s.id === e.supplier_id);
+                if (hit) return hit.name;
+              }
+              return "—";
+            };
+            const benTypeLabel = (t) => ({
+              supplier:"مورد", employee:"موظف", platform:"منصة تسويق", government:"جهة حكومية", other:"أخرى"
+            })[t || "supplier"] || "مورد";
             const pmLabel = (m) => ({cash:"كاش",transfer:"تحويل",card:"فيزا",wallet:"محفظة"})[m] || m;
             const pmColor = (m) => ({cash:"#F0FDF4",transfer:"#EFF6FF",card:"#FEF3C7",wallet:"#F5F3FF"})[m] || "#F3F4F6";
             const pmFg    = (m) => ({cash:"#15803D",transfer:"#1D4ED8",card:"#92400E",wallet:"#6D28D9"})[m] || "#374151";
@@ -4825,13 +4908,13 @@ function AdminDash({ go }) {
             };
 
             const exportCsv = () => {
-              const head = ["الفئة","الوصف","النوع","الكمية","سعر الوحدة","الإجمالي","المورد","طريقة الدفع","التاريخ","الحالة","ملاحظات"];
+              const head = ["الفئة","الوصف","النوع","الكمية","سعر الوحدة","الإجمالي","الجهة المستفيدة","طريقة الدفع","التاريخ","الحالة","ملاحظات"];
               const esc = (v) => { const s = v == null ? "" : String(v); return /[",\n]/.test(s) ? `"${s.replace(/"/g,'""')}"` : s; };
               const lines = [head.join(",")];
               sorted.forEach(e => lines.push([
                 catLabel(e.category), e.description, e.type==="fixed"?"ثابت":"متغير",
                 e.quantity, e.unit_price, e.amount,
-                supplierName(e.supplier_id), pmLabel(e.payment_method || "cash"),
+                beneficiaryName(e), pmLabel(e.payment_method || "cash"),
                 e.date, statusBadge(e.status).t, e.notes
               ].map(esc).join(",")));
               const blob = new Blob(["﻿" + lines.join("\n")], { type:"text/csv;charset=utf-8;" });
@@ -4842,17 +4925,39 @@ function AdminDash({ go }) {
               URL.revokeObjectURL(url);
             };
 
-            // Budget vs actual rows
-            const budgetRows = expBudgets
-              .filter(b => Number(b.monthly_budget) > 0)
-              .map(b => {
-                const cat = catById[b.category_id] || effCategories.find(c => c.key === b.key) || { l: b.name_ar || "—", color: b.color || "#6B7280", key: b.key };
-                const spent = totals[cat.key] || 0;
-                const budget = Number(b.monthly_budget) || 0;
-                const pct = budget > 0 ? Math.min(100, Math.round((spent / budget) * 100)) : 0;
-                const tone = spent > budget ? "#DC2626" : pct >= 80 ? "#D97706" : "#16A34A";
-                return { cat, spent, budget, pct, tone, over: Math.max(0, spent - budget), remaining: Math.max(0, budget - spent) };
-              });
+            // Budget vs actual rows. Phase 2 polish: include rows that
+            // don't have a budget set (state="none") for visibility, and
+            // sort: over (red) → approaching (amber) → under (green) →
+            // no-budget (gray) at the bottom.
+            const budgetState = (spent, budget) => {
+              if (!budget || budget <= 0) return "none";
+              const pct = (spent / budget) * 100;
+              if (spent > budget) return "over";
+              if (pct >= 80)     return "approaching";
+              return "under";
+            };
+            const stateRank = { over:0, approaching:1, under:2, none:3 };
+            const stateTone = { over:"#DC2626", approaching:"#D97706", under:"#16A34A", none:"#9CA3AF" };
+            const budgetRows = effCategories.filter(c => c.active !== false).map(c => {
+              const budgetRow = expBudgets.find(b => (b.category_id && b.category_id === c.id) || b.key === c.key);
+              const budget = Number(budgetRow && budgetRow.monthly_budget) || 0;
+              const spent  = totals[c.key] || 0;
+              const state  = budgetState(spent, budget);
+              const pct    = budget > 0 ? Math.min(100, Math.round((spent / budget) * 100)) : 0;
+              const realPct = budget > 0 ? Math.round((spent / budget) * 100) : 0;
+              const over   = Math.max(0, spent - budget);
+              const remaining = Math.max(0, budget - spent);
+              return { cat: c, spent, budget, pct, realPct, tone: stateTone[state], state, over, remaining };
+            })
+            // Only show rows where there's either a budget set OR some
+            // spending happened — keeps the section meaningful instead of
+            // listing every category with "لم يتم تحديد ميزانية".
+            .filter(r => r.budget > 0 || r.spent > 0)
+            .sort((a, b) => {
+              const r = stateRank[a.state] - stateRank[b.state];
+              if (r !== 0) return r;
+              return b.spent - a.spent; // tiebreaker: higher spend first
+            });
 
             return (
               <div>
@@ -5013,8 +5118,8 @@ function AdminDash({ go }) {
                     <thead>
                       <tr style={{background:ui.sideBg,borderBottom:"0.5px solid #E5E5E5"}}>
                         {(expCatTab === "all"
-                          ? ["الوصف","الفئة","النوع","الكمية","سعر الوحدة","الإجمالي","المورد","الدفع","التاريخ","الحالة","ملاحظات",""]
-                          : ["الوصف","النوع","الكمية","سعر الوحدة","الإجمالي","المورد","الدفع","التاريخ","الحالة","ملاحظات",""]
+                          ? ["الوصف","الفئة","النوع","الكمية","سعر الوحدة","الإجمالي","الجهة المستفيدة","الدفع","التاريخ","الحالة","ملاحظات",""]
+                          : ["الوصف","النوع","الكمية","سعر الوحدة","الإجمالي","الجهة المستفيدة","الدفع","التاريخ","الحالة","ملاحظات",""]
                         ).map(h => (
                           <th key={h} style={{padding:"11px 12px",textAlign:"right",fontSize:11.5,color:ui.textSub,fontWeight:500,whiteSpace:"nowrap"}}>{h}</th>
                         ))}
@@ -5030,52 +5135,147 @@ function AdminDash({ go }) {
                       ) : sorted.map(e => {
                         const editing = expEditingId === e.id;
                         const stat    = statusBadge(e.status);
+                        // Display values for the edit row default to the
+                        // existing record so dropdowns / checkboxes show
+                        // the current selection. The "_beneficiaryTyped"
+                        // capture works the same way as the add row.
+                        const editVal = editing ? expEditDraft : null;
                         return (
-                          <tr key={e.id} style={{borderTop:"0.5px solid #EEE", background: e.status === "pending" ? "#FFFBEB" : e.status === "rejected" ? "#FEF2F2" : "transparent"}}>
+                          <tr key={e.id} style={{borderTop:"0.5px solid #EEE", background: editing ? "#F0F9FF" : e.status === "pending" ? "#FFFBEB" : e.status === "rejected" ? "#FEF2F2" : "transparent"}}>
+                            {/* Description */}
                             <td style={tdCell}>
                               {editing
-                                ? <input style={{...inputSm, width:"100%"}} value={expEditDraft.description||""} onChange={ev=>setExpEditDraft({...expEditDraft, description:ev.target.value})}/>
+                                ? <input style={{...inputSm, width:"100%"}} value={editVal.description||""} onChange={ev=>setExpEditDraft({...editVal, description:ev.target.value})}/>
                                 : (e.description || "—")}
                             </td>
+                            {/* Category (editable on الكل tab only) */}
                             {expCatTab === "all" && (
                               <td style={tdCell}>
-                                <span style={{fontSize:11,padding:"3px 9px",borderRadius:20,background:catColor(e.category) + "22",color:catColor(e.category),fontWeight:600,whiteSpace:"nowrap"}}>
-                                  {catLabel(e.category)}
-                                </span>
+                                {editing ? (
+                                  <select value={editVal.category} onChange={ev=>setExpEditDraft({...editVal, category:ev.target.value, category_id: (catByKey[ev.target.value] || {}).id || null})}
+                                    style={{...inputSm,padding:"6px 8px"}}>
+                                    {effCategories.map(c => <option key={c.key} value={c.key}>{c.l}</option>)}
+                                  </select>
+                                ) : (
+                                  <span style={{fontSize:11,padding:"3px 9px",borderRadius:20,background:catColor(e.category) + "22",color:catColor(e.category),fontWeight:600,whiteSpace:"nowrap"}}>
+                                    {catLabel(e.category)}
+                                  </span>
+                                )}
                               </td>
                             )}
+                            {/* Type */}
                             <td style={tdCell}>
-                              <span style={{fontSize:11,padding:"3px 9px",borderRadius:20, background: e.type === "fixed" ? "#EFF6FF" : "#F3F4F6", color: e.type === "fixed" ? "#1D4ED8" : ui.textSub}}>
-                                {e.type === "fixed" ? "ثابت" : "متغير"}
-                              </span>
+                              {editing ? (
+                                <select value={editVal.type || "variable"} onChange={ev=>setExpEditDraft({...editVal, type:ev.target.value})}
+                                  style={{...inputSm,padding:"6px 8px"}}>
+                                  <option value="variable">متغير</option>
+                                  <option value="fixed">ثابت</option>
+                                </select>
+                              ) : (
+                                <span style={{fontSize:11,padding:"3px 9px",borderRadius:20, background: e.type === "fixed" ? "#EFF6FF" : "#F3F4F6", color: e.type === "fixed" ? "#1D4ED8" : ui.textSub}}>
+                                  {e.type === "fixed" ? "ثابت" : "متغير"}
+                                </span>
+                              )}
                             </td>
+                            {/* Quantity */}
                             <td style={tdCell}>{editing
-                              ? <input type="text" inputMode="numeric" style={{...inputSm, width:70, direction:"ltr", textAlign:"left"}} value={expEditDraft.quantity} onChange={ev=>setExpEditDraft({...expEditDraft, quantity:ev.target.value.replace(/[^0-9.]/g,'')})}/>
+                              ? <input type="text" inputMode="numeric" style={{...inputSm, width:70, direction:"ltr", textAlign:"left"}} value={editVal.quantity} onChange={ev=>setExpEditDraft({...editVal, quantity:ev.target.value.replace(/[^0-9.]/g,'')})}/>
                               : (Number(e.quantity)||0).toLocaleString()}</td>
+                            {/* Unit price */}
                             <td style={tdCell}>{editing
-                              ? <input type="text" inputMode="decimal" style={{...inputSm, width:90, direction:"ltr", textAlign:"left"}} value={expEditDraft.unit_price} onChange={ev=>setExpEditDraft({...expEditDraft, unit_price:ev.target.value.replace(/[^0-9.]/g,'')})}/>
+                              ? <input type="text" inputMode="decimal" style={{...inputSm, width:90, direction:"ltr", textAlign:"left"}} value={editVal.unit_price} onChange={ev=>setExpEditDraft({...editVal, unit_price:ev.target.value.replace(/[^0-9.]/g,'')})}/>
                               : (Number(e.unit_price)||0).toLocaleString() + " ج"}</td>
+                            {/* Total (auto, always read-only) */}
                             <td style={{...tdCell, fontWeight:500, background:"#FAFAFA"}}>
                               {editing
-                                ? ((Number(expEditDraft.quantity)||0) * (Number(expEditDraft.unit_price)||0)).toLocaleString() + " ج"
+                                ? ((Number(editVal.quantity)||0) * (Number(editVal.unit_price)||0)).toLocaleString() + " ج"
                                 : (Number(e.amount)||0).toLocaleString() + " ج"}
                             </td>
-                            <td style={tdCell}>{supplierName(e.supplier_id)}</td>
+                            {/* Beneficiary */}
                             <td style={tdCell}>
-                              <span style={{fontSize:11,padding:"3px 9px",borderRadius:20,background: pmColor(e.payment_method||"cash"),color: pmFg(e.payment_method||"cash"),whiteSpace:"nowrap"}}>
-                                {pmLabel(e.payment_method||"cash")}
-                              </span>
+                              {editing ? (
+                                <div style={{display:"flex",gap:4,alignItems:"center"}}>
+                                  <input list={`exp-edit-ben-list-${e.id}`} style={{...inputSm,padding:"6px 8px",minWidth:140}}
+                                    value={editVal._beneficiaryTyped !== undefined
+                                      ? editVal._beneficiaryTyped
+                                      : ((expSuppliers.find(s => s.id === editVal.supplier_id) || {}).name || e.supplier_name || "")}
+                                    onChange={ev => {
+                                      const val = ev.target.value;
+                                      const hit = expSuppliers.find(s => s.name === val);
+                                      setExpEditDraft({...editVal, supplier_id: hit ? hit.id : null, _beneficiaryTyped: hit ? "" : val});
+                                    }}/>
+                                  <datalist id={`exp-edit-ben-list-${e.id}`}>
+                                    {expSuppliers.map(s => <option key={s.id} value={s.name}/>)}
+                                  </datalist>
+                                  <select value={editVal.beneficiary_type || "supplier"} onChange={ev=>setExpEditDraft({...editVal, beneficiary_type:ev.target.value})}
+                                    style={{...inputSm,padding:"6px 6px",fontSize:11}}>
+                                    <option value="supplier">مورد</option>
+                                    <option value="employee">موظف</option>
+                                    <option value="platform">منصة</option>
+                                    <option value="government">حكومية</option>
+                                    <option value="other">أخرى</option>
+                                  </select>
+                                </div>
+                              ) : (
+                                <div>
+                                  <div style={{fontSize:12.5,color:ui.text}}>{beneficiaryName(e)}</div>
+                                  {e.beneficiary_type && e.beneficiary_type !== "supplier" && beneficiaryName(e) !== "—" && (
+                                    <div style={{fontSize:10,color:ui.textSub,fontFamily:ui.fontBody}}>{benTypeLabel(e.beneficiary_type)}</div>
+                                  )}
+                                </div>
+                              )}
                             </td>
-                            <td style={{...tdCell,whiteSpace:"nowrap",color:ui.textSub,fontSize:11.5}}>{e.date || "—"}</td>
+                            {/* Payment method */}
+                            <td style={tdCell}>
+                              {editing ? (
+                                <select value={editVal.payment_method || "cash"} onChange={ev=>setExpEditDraft({...editVal, payment_method:ev.target.value})}
+                                  style={{...inputSm,padding:"6px 8px"}}>
+                                  <option value="cash">كاش</option>
+                                  <option value="transfer">تحويل</option>
+                                  <option value="card">فيزا</option>
+                                  <option value="wallet">محفظة</option>
+                                </select>
+                              ) : (
+                                <span style={{fontSize:11,padding:"3px 9px",borderRadius:20,background: pmColor(e.payment_method||"cash"),color: pmFg(e.payment_method||"cash"),whiteSpace:"nowrap"}}>
+                                  {pmLabel(e.payment_method||"cash")}
+                                </span>
+                              )}
+                            </td>
+                            {/* Date */}
+                            <td style={{...tdCell,whiteSpace:"nowrap",color:ui.textSub,fontSize:11.5}}>
+                              {editing
+                                ? <input type="date" style={{...inputSm,padding:"5px 9px"}} value={editVal.date || ""} onChange={ev=>setExpEditDraft({...editVal, date:ev.target.value})}/>
+                                : (e.date || "—")}
+                            </td>
+                            {/* Status badge (always read-only) */}
                             <td style={tdCell}>
                               <span style={{fontSize:10.5,padding:"3px 9px",borderRadius:20,background:stat.bg,color:stat.fg,whiteSpace:"nowrap"}} title={e.rejection_reason || ""}>{stat.t}</span>
                             </td>
-                            <td style={{...tdCell, color:ui.textSub, fontSize:11.5, maxWidth:160, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap"}} title={e.notes || ""}>
-                              {e.receipt_path && (
-                                <a href={e.receipt_path} target="_blank" rel="noreferrer" title="عرض الإيصال" style={{color:"#1D4ED8",textDecoration:"none",marginInlineEnd:6}}>📎</a>
+                            {/* Notes + receipt + recurring */}
+                            <td style={{...tdCell, color:ui.textSub, fontSize:11.5, maxWidth:200, whiteSpace:"nowrap"}} title={e.notes || ""}>
+                              {editing ? (
+                                <div style={{display:"flex",alignItems:"center",gap:6}}>
+                                  <input style={{...inputSm,padding:"5px 9px",flex:1,minWidth:120}} value={editVal.notes || ""} onChange={ev=>setExpEditDraft({...editVal, notes:ev.target.value})} placeholder="ملاحظات"/>
+                                  <label style={{cursor: expUploading?"wait":"pointer",padding:"3px 7px",border:ui.border,borderRadius:4,fontSize:10.5,color:ui.textSub}} title={editVal.receipt_path ? "استبدال الإيصال" : "إضافة إيصال"}>
+                                    {expUploading ? "..." : editVal.receipt_path ? "✓📎" : "📎"}
+                                    <input type="file" accept="image/jpeg,image/png,image/webp,application/pdf" style={{display:"none"}}
+                                      onChange={async (ev) => { const url = await uploadExpenseReceipt(ev.target.files && ev.target.files[0]); if (url) setExpEditDraft({...editVal, receipt_path:url}); ev.target.value=""; }}/>
+                                  </label>
+                                  <label title="متكرر شهرياً" style={{display:"flex",alignItems:"center",fontSize:10.5,color:ui.textSub,cursor:"pointer"}}>
+                                    <input type="checkbox" checked={!!editVal.is_recurring} onChange={ev=>setExpEditDraft({...editVal, is_recurring:ev.target.checked})} style={{accentColor:ui.text,cursor:"pointer"}}/>↻
+                                  </label>
+                                </div>
+                              ) : (
+                                <>
+                                  {e.receipt_path && (
+                                    <a href={e.receipt_path} target="_blank" rel="noreferrer" title="عرض الإيصال" style={{color:"#1D4ED8",textDecoration:"none",marginInlineEnd:6}}>📎</a>
+                                  )}
+                                  {e.is_recurring && <span title="متكرر شهرياً" style={{color:"#92400E",marginInlineEnd:4}}>↻</span>}
+                                  <span style={{overflow:"hidden",textOverflow:"ellipsis",display:"inline-block",maxWidth:120,verticalAlign:"middle"}}>{e.notes || "—"}</span>
+                                </>
                               )}
-                              {e.notes || "—"}
                             </td>
+                            {/* Action buttons */}
                             <td style={{...tdCell, textAlign:"left",whiteSpace:"nowrap"}}>
                               {editing ? (
                                 <div style={{display:"flex",gap:4}}>
@@ -5090,7 +5290,20 @@ function AdminDash({ go }) {
                                       <button title="رفض" onClick={()=>rejectExpense(e.id)} style={{background:"#FEE2E2",color:"#B91C1C",border:"none",padding:"4px 8px",borderRadius:4,fontSize:11,cursor:"pointer",fontFamily:ui.fontBody}}>✗</button>
                                     </>
                                   )}
-                                  <button title="تعديل" onClick={()=>{ setExpEditingId(e.id); setExpEditDraft({...e, quantity:String(e.quantity), unit_price:String(e.unit_price)}); }}
+                                  <button title="تعديل" onClick={()=>{
+                                    setExpEditingId(e.id);
+                                    setExpEditDraft({
+                                      ...e,
+                                      quantity: String(e.quantity ?? ""),
+                                      unit_price: String(e.unit_price ?? ""),
+                                      type: e.type || "variable",
+                                      payment_method: e.payment_method || "cash",
+                                      beneficiary_type: e.beneficiary_type || "supplier",
+                                      is_recurring: !!e.is_recurring,
+                                      receipt_path: e.receipt_path || "",
+                                      // _beneficiaryTyped left undefined → falls back to current name from cache
+                                    });
+                                  }}
                                     style={{background:"transparent",border:"none",cursor:"pointer",padding:4,color:ui.textSub,display:"flex"}}>
                                     <AdmIcon name="pencil" size={14}/>
                                   </button>
@@ -5140,17 +5353,31 @@ function AdminDash({ go }) {
                           {((Number(expDraft.quantity)||0) * (Number(expDraft.unit_price)||0)).toLocaleString()} ج
                         </td>
                         <td style={{padding:"9px 12px"}}>
-                          <input list="exp-supplier-list" style={{...inputSm, width:"100%"}}
-                            value={(expSuppliers.find(s => s.id === expDraft.supplier_id) || {}).name || expDraft._supplierTyped || ""}
-                            onChange={e => {
-                              const val = e.target.value;
-                              const hit = expSuppliers.find(s => s.name === val);
-                              setExpDraft({...expDraft, supplier_id: hit ? hit.id : "", _supplierTyped: hit ? "" : val});
-                            }}
-                            placeholder="اسم المورد"/>
-                          <datalist id="exp-supplier-list">
-                            {expSuppliers.map(s => <option key={s.id} value={s.name}/>)}
-                          </datalist>
+                          {/* Beneficiary text + type. The "type" pill helps
+                              segment expenses across employees / suppliers /
+                              platforms for better reporting. */}
+                          <div style={{display:"flex",gap:4,alignItems:"center"}}>
+                            <input list="exp-beneficiary-list" style={{...inputSm, flex:1, minWidth:100}}
+                              value={(expSuppliers.find(s => s.id === expDraft.supplier_id) || {}).name || expDraft._supplierTyped || ""}
+                              onChange={e => {
+                                const val = e.target.value;
+                                const hit = expSuppliers.find(s => s.name === val);
+                                setExpDraft({...expDraft, supplier_id: hit ? hit.id : "", _supplierTyped: hit ? "" : val});
+                              }}
+                              placeholder="اسم الجهة المستفيدة"/>
+                            <datalist id="exp-beneficiary-list">
+                              {expSuppliers.map(s => <option key={s.id} value={s.name}/>)}
+                            </datalist>
+                            <select value={expDraft.beneficiary_type || "supplier"} onChange={e=>setExpDraft({...expDraft, beneficiary_type:e.target.value})}
+                              title="نوع الجهة"
+                              style={{...inputSm,padding:"6px 6px",fontSize:11,width:74}}>
+                              <option value="supplier">مورد</option>
+                              <option value="employee">موظف</option>
+                              <option value="platform">منصة</option>
+                              <option value="government">حكومية</option>
+                              <option value="other">أخرى</option>
+                            </select>
+                          </div>
                         </td>
                         <td style={{padding:"9px 12px"}}>
                           <select value={expDraft.payment_method} onChange={e=>setExpDraft({...expDraft, payment_method:e.target.value})}
@@ -5213,15 +5440,23 @@ function AdminDash({ go }) {
                       <div style={{padding:"0 14px 14px"}}>
                         {budgetRows.map(b => (
                           <div key={b.cat.key} style={{padding:"10px 0",borderTop:"0.5px solid #EEE"}}>
-                            <div style={{display:"flex",justifyContent:"space-between",fontFamily:ui.fontBody,fontSize:12.5,color:ui.text,marginBottom:5}}>
+                            <div style={{display:"flex",justifyContent:"space-between",fontFamily:ui.fontBody,fontSize:12.5,color:ui.text,marginBottom:5,gap:8,flexWrap:"wrap"}}>
                               <span style={{display:"flex",alignItems:"center",gap:6}}>
-                                <span style={{width:8,height:8,background:b.cat.color,borderRadius:2}}/>{b.cat.l}
+                                <span style={{width:18,height:18,borderRadius:3,background:b.cat.color + "22",color:b.cat.color,display:"inline-flex",alignItems:"center",justifyContent:"center",fontSize:12}}>{b.cat.icon || "•"}</span>
+                                {b.cat.l}
                               </span>
-                              <span style={{color:ui.textSub}}>
-                                {b.spent.toLocaleString()} / {b.budget.toLocaleString()} ج
-                                {b.over > 0 ? <span style={{color:"#DC2626",marginInlineStart:8}}> · زيادة {b.over.toLocaleString()} ج</span>
-                                            : <span style={{color:ui.textSub,marginInlineStart:8}}> · متبقي {b.remaining.toLocaleString()} ج</span>}
-                              </span>
+                              {b.state === "none" ? (
+                                <span style={{color:"#9CA3AF",fontSize:11.5}}>لم يتم تحديد ميزانية · أُنفِق {b.spent.toLocaleString()} ج</span>
+                              ) : b.state === "over" ? (
+                                <span style={{color:ui.textSub}}>
+                                  {b.spent.toLocaleString()} / {b.budget.toLocaleString()} ج
+                                  <span style={{color:"#DC2626",fontWeight:700,marginInlineStart:8}}>زيادة {b.over.toLocaleString()} ج (+{b.realPct - 100}%)</span>
+                                </span>
+                              ) : (
+                                <span style={{color:ui.textSub}}>
+                                  {b.spent.toLocaleString()} / {b.budget.toLocaleString()} ج · متبقي {b.remaining.toLocaleString()} ج
+                                </span>
+                              )}
                             </div>
                             <div style={{height:6,background:"#F3F4F6",borderRadius:3,overflow:"hidden"}}>
                               <div style={{width: `${b.pct}%`, height:"100%", background:b.tone, transition:"width .3s"}}/>

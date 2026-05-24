@@ -408,6 +408,7 @@ ensureColumn('expenses', 'rejection_reason', 'TEXT');
 ensureColumn('expenses', 'created_by',       'TEXT');                            // admin email/id who added the row
 ensureColumn('expenses', 'category_id',      'TEXT');                            // optional FK → expense_categories.id
 ensureColumn('expenses', 'source_ref',       'TEXT');                            // e.g. "return:<id>" when auto-generated
+ensureColumn('expenses', 'beneficiary_type', "TEXT DEFAULT 'supplier'");        // supplier | employee | platform | government | other
 
 db.exec(`
   CREATE TABLE IF NOT EXISTS expense_categories (
@@ -2369,26 +2370,34 @@ function expenseRowOut(r) {
 app.get('/api/expenses', (req, res) => {
   try {
     const { month, year, category, category_id, from, to, status, type, payment_method, supplier_id, q } = req.query;
-    let sql = 'SELECT * FROM expenses WHERE 1=1';
+    // LEFT JOIN suppliers so each row carries the resolved name without the
+    // frontend needing a side-fetch — fixes "—" showing when the suppliers
+    // cache isn't loaded yet OR when the row was created by another admin
+    // before this client's session.
+    let sql = `
+      SELECT e.*, s.name AS supplier_name
+      FROM expenses e
+      LEFT JOIN suppliers s ON s.id = e.supplier_id
+      WHERE 1=1`;
     const params = [];
-    if (category)        { sql += ' AND category = ?';        params.push(category); }
-    if (category_id)     { sql += ' AND category_id = ?';     params.push(category_id); }
-    if (status)          { sql += ' AND status = ?';          params.push(status); }
-    if (type)            { sql += ' AND type = ?';            params.push(type); }
-    if (payment_method)  { sql += ' AND payment_method = ?';  params.push(payment_method); }
-    if (supplier_id)     { sql += ' AND supplier_id = ?';     params.push(supplier_id); }
-    if (q)               { sql += ' AND (description LIKE ? OR notes LIKE ?)'; const like = `%${q}%`; params.push(like, like); }
-    if (from) { sql += ' AND date >= ?'; params.push(from); }
-    if (to)   { sql += ' AND date <= ?'; params.push(to); }
+    if (category)        { sql += ' AND e.category = ?';        params.push(category); }
+    if (category_id)     { sql += ' AND e.category_id = ?';     params.push(category_id); }
+    if (status)          { sql += ' AND e.status = ?';          params.push(status); }
+    if (type)            { sql += ' AND e.type = ?';            params.push(type); }
+    if (payment_method)  { sql += ' AND e.payment_method = ?';  params.push(payment_method); }
+    if (supplier_id)     { sql += ' AND e.supplier_id = ?';     params.push(supplier_id); }
+    if (q)               { sql += ' AND (e.description LIKE ? OR e.notes LIKE ? OR s.name LIKE ?)'; const like = `%${q}%`; params.push(like, like, like); }
+    if (from) { sql += ' AND e.date >= ?'; params.push(from); }
+    if (to)   { sql += ' AND e.date <= ?'; params.push(to); }
     if (month && year) {
       const mm = String(month).padStart(2, '0');
-      sql += ' AND date >= ? AND date <= ?';
+      sql += ' AND e.date >= ? AND e.date <= ?';
       params.push(`${year}-${mm}-01`, `${year}-${mm}-31`);
     } else if (year) {
-      sql += ' AND date >= ? AND date <= ?';
+      sql += ' AND e.date >= ? AND e.date <= ?';
       params.push(`${year}-01-01`, `${year}-12-31`);
     }
-    sql += ' ORDER BY date DESC, created_at DESC';
+    sql += ' ORDER BY e.date DESC, e.created_at DESC';
     const rows = db.prepare(sql).all(...params).map(expenseRowOut);
     res.json(rows);
   } catch (e) { res.status(500).json({ error: e.message }); }
@@ -2416,6 +2425,29 @@ function resolveCategory({ category, category_id }) {
   return { id: null, key: null };
 }
 
+// Resolve a beneficiary: use supplier_id if given, else find-or-create by
+// beneficiary_name. Returns the (possibly new) supplier id, or null when no
+// beneficiary was specified at all.
+function resolveBeneficiary({ supplier_id, beneficiary_name, beneficiary_type }) {
+  if (supplier_id) {
+    const row = db.prepare('SELECT id FROM suppliers WHERE id = ?').get(supplier_id);
+    if (row) return row.id;
+  }
+  const name = String(beneficiary_name || '').trim();
+  if (!name) return null;
+  // Find existing by name (case-insensitive match would need COLLATE; SQLite is
+  // case-insensitive by default for ASCII, but Arabic compares as-typed which
+  // is what we want for human-entered names anyway).
+  const existing = db.prepare('SELECT id FROM suppliers WHERE name = ?').get(name);
+  if (existing) return existing.id;
+  const newId = `sup_${Date.now().toString(36)}_${Math.random().toString(36).slice(2,5)}`;
+  try {
+    db.prepare('INSERT INTO suppliers (id, name, notes, active) VALUES (?, ?, ?, 1)')
+      .run(newId, name, beneficiary_type ? `auto-created (${beneficiary_type})` : 'auto-created from expense entry');
+    return newId;
+  } catch { return null; }
+}
+
 app.post('/api/expenses', (req, res) => {
   try {
     const e = req.body || {};
@@ -2429,6 +2461,12 @@ app.post('/api/expenses', (req, res) => {
     const date = e.date || new Date().toISOString().slice(0,10);
     const type = EXPENSE_TYPES.has(e.type) ? e.type : 'variable';
     const pm   = EXPENSE_PAYMENT_METHODS.has(e.payment_method) ? e.payment_method : 'cash';
+    const benType = e.beneficiary_type || 'supplier';
+    const beneficiaryId = resolveBeneficiary({
+      supplier_id: e.supplier_id,
+      beneficiary_name: e.beneficiary_name,
+      beneficiary_type: benType,
+    });
 
     // Approval workflow — if enabled and the expense crosses the threshold AND
     // the caller is not the super admin, mark as pending.
@@ -2443,12 +2481,12 @@ app.post('/api/expenses', (req, res) => {
     db.prepare(`
       INSERT INTO expenses (
         id, category, category_id, description, quantity, unit_price, amount, date, notes,
-        type, supplier_id, payment_method, receipt_path, is_recurring,
+        type, supplier_id, beneficiary_type, payment_method, receipt_path, is_recurring,
         status, approved_by, approved_at, rejection_reason, created_by, source_ref
-      ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+      ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
     `).run(
       id, cat.key, cat.id, e.description||null, qty, unit, amt, date, e.notes||null,
-      type, e.supplier_id || null, pm, e.receipt_path || null, e.is_recurring ? 1 : 0,
+      type, beneficiaryId, benType, pm, e.receipt_path || null, e.is_recurring ? 1 : 0,
       status,
       status === 'approved' ? (e.created_by || SUPER_ADMIN_FALLBACK) : null,
       status === 'approved' ? new Date().toISOString() : null,
@@ -2457,20 +2495,24 @@ app.post('/api/expenses', (req, res) => {
       e.source_ref || null,
     );
 
-    // If pending → notify super admin via inbox.
+    // If pending → notify super admin via inbox. We emit BOTH metadata keys
+    // (`expense_id` for backend approve/reject + `requires_action` so the
+    // shared inbox UI shows the action buttons). The frontend then routes
+    // expense-kind messages to /api/expenses/:id/approve|reject.
     if (status === 'pending') {
+      const requesterName = e.created_by_name || e.created_by || 'الإدارة';
       sendMessage({
         from_user_id: e.created_by || null,
-        from_user_name: e.created_by_name || 'الإدارة',
+        from_user_name: requesterName,
         to_user_id: SUPER_ADMIN_FALLBACK,
         type: 'request',
-        subject: `مصروف بانتظار الموافقة: ${(e.description||'').slice(0,60) || '—'}`,
-        body: `${cat.key} · ${amt.toLocaleString()} ج`,
+        subject: `طلب موافقة على مصروف`,
+        body: `${requesterName} طلب إضافة مصروف بقيمة ${amt.toLocaleString()} ج في فئة ${cat.key}\n— ${(e.description || '').slice(0, 120) || '—'}`,
         metadata: { kind: 'expense_approval', expense_id: id, amount: amt, category: cat.key, requires_action: true },
       });
     }
 
-    res.json({ ok: true, id, amount: amt, status });
+    res.json({ ok: true, id, amount: amt, status, supplier_id: beneficiaryId });
   } catch (err) { console.error('POST /api/expenses error:', err); res.status(500).json({ error: err.message }); }
 });
 
@@ -2495,30 +2537,54 @@ app.put('/api/expenses/:id', (req, res) => {
     const type = e.type != null && EXPENSE_TYPES.has(e.type) ? e.type : cur.type;
     const pm   = e.payment_method != null && EXPENSE_PAYMENT_METHODS.has(e.payment_method) ? e.payment_method : cur.payment_method;
 
+    // Resolve beneficiary the same way as POST so an edit can change the
+    // beneficiary name (auto-creates if new) or clear it entirely.
+    let supplierId = cur.supplier_id;
+    let benType    = cur.beneficiary_type;
+    if (e.supplier_id !== undefined || e.beneficiary_name !== undefined || e.beneficiary_type !== undefined) {
+      benType = e.beneficiary_type || cur.beneficiary_type || 'supplier';
+      if (e.supplier_id === null || e.beneficiary_name === '') {
+        supplierId = null;
+      } else {
+        supplierId = resolveBeneficiary({
+          supplier_id: e.supplier_id ?? cur.supplier_id,
+          beneficiary_name: e.beneficiary_name,
+          beneficiary_type: benType,
+        });
+      }
+    }
+
     db.prepare(`
       UPDATE expenses SET
-        category        = ?,
-        category_id     = ?,
-        description     = COALESCE(?, description),
-        quantity        = ?, unit_price = ?, amount = ?,
-        date            = COALESCE(?, date),
-        notes           = COALESCE(?, notes),
-        type            = ?,
-        supplier_id     = COALESCE(?, supplier_id),
-        payment_method  = ?,
-        receipt_path    = COALESCE(?, receipt_path),
-        is_recurring    = COALESCE(?, is_recurring),
-        updated_at      = datetime('now')
+        category         = ?,
+        category_id      = ?,
+        description      = COALESCE(?, description),
+        quantity         = ?, unit_price = ?, amount = ?,
+        date             = COALESCE(?, date),
+        notes            = COALESCE(?, notes),
+        type             = ?,
+        supplier_id      = ?,
+        beneficiary_type = ?,
+        payment_method   = ?,
+        receipt_path     = COALESCE(?, receipt_path),
+        is_recurring     = COALESCE(?, is_recurring),
+        updated_at       = datetime('now')
       WHERE id = ?
     `).run(
       catKey, catId,
       e.description ?? null, qty, unit, amt,
       e.date ?? null, e.notes ?? null,
-      type, e.supplier_id ?? null, pm, e.receipt_path ?? null,
+      type, supplierId, benType, pm, e.receipt_path ?? null,
       e.is_recurring === undefined ? null : (e.is_recurring ? 1 : 0),
       req.params.id
     );
-    res.json(expenseRowOut(db.prepare('SELECT * FROM expenses WHERE id = ?').get(req.params.id)));
+    // Re-fetch with the same JOIN as GET so the response includes supplier_name.
+    const fresh = db.prepare(`
+      SELECT e.*, s.name AS supplier_name FROM expenses e
+      LEFT JOIN suppliers s ON s.id = e.supplier_id
+      WHERE e.id = ?
+    `).get(req.params.id);
+    res.json(expenseRowOut(fresh));
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
