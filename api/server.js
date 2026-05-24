@@ -401,7 +401,7 @@ ensureColumn('expenses', 'supplier_id',      'TEXT');                           
 ensureColumn('expenses', 'payment_method',   "TEXT DEFAULT 'cash'");            // cash | transfer | card | wallet
 ensureColumn('expenses', 'receipt_path',     'TEXT');                            // /uploads/receipts/...
 ensureColumn('expenses', 'is_recurring',     'INTEGER DEFAULT 0');               // 1 → suggested next month
-ensureColumn('expenses', 'status',           "TEXT DEFAULT 'approved'");        // approved | pending | rejected
+ensureColumn('expenses', 'status',           "TEXT DEFAULT 'approved'");        // approved | pending | rejected | pending_budget_approval
 ensureColumn('expenses', 'approved_by',      'TEXT');                            // admin email/id
 ensureColumn('expenses', 'approved_at',      'DATETIME');
 ensureColumn('expenses', 'rejection_reason', 'TEXT');
@@ -409,6 +409,18 @@ ensureColumn('expenses', 'created_by',       'TEXT');                           
 ensureColumn('expenses', 'category_id',      'TEXT');                            // optional FK → expense_categories.id
 ensureColumn('expenses', 'source_ref',       'TEXT');                            // e.g. "return:<id>" when auto-generated
 ensureColumn('expenses', 'beneficiary_type', "TEXT DEFAULT 'supplier'");        // supplier | employee | platform | government | other
+ensureColumn('expenses', 'budget_override_reason', 'TEXT');                      // populated when a pending_budget_approval expense is approved
+
+// One-shot per (category, year-month) log used to suppress duplicate 80% budget warnings.
+db.exec(`
+  CREATE TABLE IF NOT EXISTS budget_warning_log (
+    id          TEXT PRIMARY KEY,
+    category_id TEXT NOT NULL,
+    year_month  CHAR(7) NOT NULL,                  -- e.g. '2026-05'
+    sent_at     DATETIME DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(category_id, year_month)
+  )
+`);
 
 db.exec(`
   CREATE TABLE IF NOT EXISTS expense_categories (
@@ -2358,6 +2370,80 @@ function getExpenseApprovalConfig() {
   } catch { return { enabled: false, threshold: 0 }; }
 }
 
+// Budget overrun / warning alert config. Stored alongside the per-expense
+// approval keys on settings.store. Defaults: enabled=true, threshold=80.
+function getBudgetAlertConfig() {
+  try {
+    const row = db.prepare('SELECT value FROM settings WHERE key = ?').get('store');
+    const store = row ? JSON.parse(row.value || '{}') : {};
+    const enabled = store.budget_alerts_enabled === undefined ? true : !!store.budget_alerts_enabled;
+    let threshold = Number(store.budget_warning_threshold);
+    if (!Number.isFinite(threshold) || threshold <= 0 || threshold >= 100) threshold = 80;
+    return { enabled, threshold };
+  } catch { return { enabled: true, threshold: 80 }; }
+}
+
+// Evaluate where the category will sit AFTER adding `additionalAmount` to its
+// current-month approved spend. `dateRef` is the new/edited expense's date —
+// determines which month's budget window we measure against.
+//   - `excludeExpenseId` is excluded from the "current spent" sum (so the
+//     edit flow doesn't double-count the row being changed).
+// Returns null when the category has no budget set (caller skips alert logic).
+function evaluateBudget({ category_id, additionalAmount, dateRef, excludeExpenseId }) {
+  if (!category_id) return null;
+  const budgetRow = db.prepare('SELECT monthly_budget FROM category_budgets WHERE category_id = ?').get(category_id);
+  const budget = Number(budgetRow && budgetRow.monthly_budget) || 0;
+  if (budget <= 0) return null;
+
+  const d = (dateRef && /^\d{4}-\d{2}-\d{2}/.test(dateRef)) ? dateRef.slice(0,10) : new Date().toISOString().slice(0,10);
+  const ym = d.slice(0,7);                            // '2026-05'
+  const monthStart = `${ym}-01`;
+  const monthEnd   = `${ym}-31`;
+
+  const sumRow = db.prepare(`
+    SELECT COALESCE(SUM(amount), 0) AS s FROM expenses
+    WHERE category_id = ? AND status = 'approved'
+      AND date >= ? AND date <= ?
+      AND (? IS NULL OR id <> ?)
+  `).get(category_id, monthStart, monthEnd, excludeExpenseId || null, excludeExpenseId || null);
+  const currentSpent = Number(sumRow.s) || 0;
+
+  const cfg = getBudgetAlertConfig();
+  const addAmt = Number(additionalAmount) || 0;
+  const newTotal = currentSpent + addAmt;
+  const currentPct = (currentSpent / budget) * 100;
+  const newPct     = (newTotal / budget) * 100;
+
+  let state = 'safe';
+  if (newPct >= 100)            state = 'overrun';
+  else if (newPct >= cfg.threshold) state = 'warning';
+
+  return { budget, currentSpent, addAmt, newTotal, currentPct, newPct, state,
+           year_month: ym, threshold: cfg.threshold, alertsEnabled: cfg.enabled,
+           remaining: Math.max(0, budget - newTotal) };
+}
+
+// Try to log a one-shot warning for (category, year-month). Returns true when
+// the INSERT actually fired (i.e. this is the first warning of the month).
+function tryLogBudgetWarning(category_id, year_month) {
+  try {
+    const id = `bwl_${Date.now().toString(36)}_${Math.random().toString(36).slice(2,5)}`;
+    const info = db.prepare(`
+      INSERT OR IGNORE INTO budget_warning_log (id, category_id, year_month)
+      VALUES (?, ?, ?)
+    `).run(id, category_id, year_month);
+    return info.changes > 0;
+  } catch { return false; }
+}
+
+function categoryDisplayName(category_id, fallbackKey) {
+  if (category_id) {
+    const row = db.prepare('SELECT name_ar FROM expense_categories WHERE id = ?').get(category_id);
+    if (row && row.name_ar) return row.name_ar;
+  }
+  return fallbackKey || 'الفئة';
+}
+
 function expenseRowOut(r) {
   if (!r) return null;
   // Cast booleans + numbers for the frontend
@@ -2479,10 +2565,20 @@ app.post('/api/expenses', (req, res) => {
     const cfg = getExpenseApprovalConfig();
     const isSuper = e.created_by === SUPER_ADMIN_FALLBACK || e.actor_role === 'super_admin';
     let status = 'approved';
+    let perExpensePending = false;
     if (cfg.enabled && cfg.threshold > 0 && amt >= cfg.threshold && !isSuper) {
       status = 'pending';
+      perExpensePending = true;
     }
     if (e.status === 'pending' || e.status === 'rejected' || e.status === 'approved') status = e.status;
+
+    // Budget overrun check — applies to EVERYONE (including super admin) so a
+    // single click doesn't accidentally bust a monthly budget. Runs even when
+    // the per-expense approval already marked the row pending — overrun wins
+    // and the inbox message merges both reasons.
+    const budgetEval = evaluateBudget({ category_id: cat.id, additionalAmount: amt, dateRef: date });
+    const budgetOverrun = !!(budgetEval && budgetEval.alertsEnabled && budgetEval.state === 'overrun');
+    if (budgetOverrun) status = 'pending_budget_approval';
 
     db.prepare(`
       INSERT INTO expenses (
@@ -2501,12 +2597,34 @@ app.post('/api/expenses', (req, res) => {
       e.source_ref || null,
     );
 
-    // If pending → notify super admin via inbox. We emit BOTH metadata keys
-    // (`expense_id` for backend approve/reject + `requires_action` so the
-    // shared inbox UI shows the action buttons). The frontend then routes
-    // expense-kind messages to /api/expenses/:id/approve|reject.
-    if (status === 'pending') {
-      const requesterName = e.created_by_name || e.created_by || 'الإدارة';
+    // Inbox routing — three mutually exclusive paths:
+    //   1. budget overrun (highest precedence) → actionable inbox kind=expense_budget_overrun
+    //   2. per-expense pending (no overrun)    → actionable inbox kind=expense_approval
+    //   3. approved but crossed warning %      → info-only one-shot warning
+    const requesterName = e.created_by_name || e.created_by || 'الإدارة';
+    const catName = categoryDisplayName(cat.id, cat.key);
+    if (budgetOverrun) {
+      const overByPct = Math.round(budgetEval.newPct - 100);
+      const extraReason = perExpensePending
+        ? `\n(يتجاوز أيضاً حد الموافقة الفردية ${cfg.threshold.toLocaleString()} ج)`
+        : '';
+      sendMessage({
+        from_user_id: e.created_by || null,
+        from_user_name: requesterName,
+        to_user_id: SUPER_ADMIN_FALLBACK,
+        type: 'request',
+        subject: `طلب موافقة — تجاوز ميزانية ${catName}`,
+        body: `${requesterName} يطلب إضافة "${(e.description||'مصروف').slice(0,80)}" بقيمة ${amt.toLocaleString()} ج.\n`
+            + `ميزانية الفئة ${budgetEval.budget.toLocaleString()} ج · المصروف الحالي ${Math.round(budgetEval.currentSpent).toLocaleString()} ج.\n`
+            + `الإضافة ستجعل الإجمالي ${Math.round(budgetEval.newTotal).toLocaleString()} ج (+${overByPct}% فوق الميزانية).${extraReason}`,
+        metadata: {
+          kind: 'expense_budget_overrun', expense_id: id, amount: amt, category: cat.key, category_id: cat.id,
+          requires_action: true,
+          budget: budgetEval.budget, new_total: budgetEval.newTotal, current_spent: budgetEval.currentSpent,
+          per_expense_pending: perExpensePending,
+        },
+      });
+    } else if (status === 'pending') {
       sendMessage({
         from_user_id: e.created_by || null,
         from_user_name: requesterName,
@@ -2516,9 +2634,26 @@ app.post('/api/expenses', (req, res) => {
         body: `${requesterName} طلب إضافة مصروف بقيمة ${amt.toLocaleString()} ج في فئة ${cat.key}\n— ${(e.description || '').slice(0, 120) || '—'}`,
         metadata: { kind: 'expense_approval', expense_id: id, amount: amt, category: cat.key, requires_action: true },
       });
+    } else if (budgetEval && budgetEval.alertsEnabled && budgetEval.state === 'warning' && budgetEval.currentPct < budgetEval.threshold) {
+      // One-shot warning per (category, month) — table unique constraint handles
+      // dedup atomically even if two writers race.
+      const firstThisMonth = tryLogBudgetWarning(cat.id, budgetEval.year_month);
+      if (firstThisMonth) {
+        const pct = Math.round(budgetEval.newPct);
+        sendMessage({
+          from_user_id: null,
+          from_user_name: 'نظام الميزانية',
+          to_user_id: SUPER_ADMIN_FALLBACK,
+          type: 'info',
+          subject: `تحذير — فئة ${catName} قاربت على الميزانية`,
+          body: `وصلت الفئة إلى ${pct}% من ميزانية الشهر (${Math.round(budgetEval.newTotal).toLocaleString()} من ${budgetEval.budget.toLocaleString()} ج).\nتبقى ${Math.round(budgetEval.remaining).toLocaleString()} ج فقط.`,
+          metadata: { kind: 'budget_warning_info', category: cat.key, category_id: cat.id, year_month: budgetEval.year_month, pct, requires_action: false },
+        });
+      }
     }
 
-    res.json({ ok: true, id, amount: amt, status, supplier_id: beneficiaryId });
+    res.json({ ok: true, id, amount: amt, status, supplier_id: beneficiaryId,
+               budget_state: budgetEval ? budgetEval.state : null });
   } catch (err) { console.error('POST /api/expenses error:', err); res.status(500).json({ error: err.message }); }
 });
 
@@ -2584,6 +2719,58 @@ app.put('/api/expenses/:id', (req, res) => {
       e.is_recurring === undefined ? null : (e.is_recurring ? 1 : 0),
       req.params.id
     );
+
+    // Re-evaluate budget after the edit. Only applies when the row is currently
+    // 'approved' — pending/rejected/already-pending_budget_approval rows aren't
+    // counted yet so the edit can't push the visible total over. The amount or
+    // category may have changed, so re-run the same check the POST does.
+    // We exclude THIS row from currentSpent and pass its new amount as the
+    // delta so the result tells us whether keeping this row approved would
+    // bust the budget.
+    if (cur.status === 'approved') {
+      const reEval = evaluateBudget({
+        category_id: catId, additionalAmount: amt, dateRef: (e.date || cur.date),
+        excludeExpenseId: req.params.id,
+      });
+      if (reEval && reEval.alertsEnabled) {
+        if (reEval.state === 'overrun') {
+          // Flip back to pending_budget_approval until a super admin re-approves.
+          db.prepare("UPDATE expenses SET status = 'pending_budget_approval', approved_by = NULL, approved_at = NULL WHERE id = ?").run(req.params.id);
+          const catName = categoryDisplayName(catId, catKey);
+          const overByPct = Math.round(reEval.newPct - 100);
+          const requesterName = e.actor_name || cur.created_by || 'الإدارة';
+          sendMessage({
+            from_user_id: e.actor || cur.created_by || null,
+            from_user_name: requesterName,
+            to_user_id: SUPER_ADMIN_FALLBACK,
+            type: 'request',
+            subject: `طلب موافقة — تجاوز ميزانية ${catName} (تعديل)`,
+            body: `تم تعديل مصروف "${(e.description||cur.description||'').slice(0,80)}" إلى ${amt.toLocaleString()} ج.\n`
+                + `ميزانية الفئة ${reEval.budget.toLocaleString()} ج · المصروف الحالي ${Math.round(reEval.currentSpent).toLocaleString()} ج.\n`
+                + `بعد التعديل سيصبح الإجمالي ${Math.round(reEval.newTotal).toLocaleString()} ج (+${overByPct}% فوق الميزانية).`,
+            metadata: {
+              kind: 'expense_budget_overrun', expense_id: req.params.id, amount: amt, category: catKey, category_id: catId,
+              requires_action: true, edit: true,
+              budget: reEval.budget, new_total: reEval.newTotal, current_spent: reEval.currentSpent,
+            },
+          });
+        } else if (reEval.state === 'warning' && reEval.currentPct < reEval.threshold) {
+          const firstThisMonth = tryLogBudgetWarning(catId, reEval.year_month);
+          if (firstThisMonth) {
+            const catName = categoryDisplayName(catId, catKey);
+            const pct = Math.round(reEval.newPct);
+            sendMessage({
+              from_user_id: null, from_user_name: 'نظام الميزانية',
+              to_user_id: SUPER_ADMIN_FALLBACK, type: 'info',
+              subject: `تحذير — فئة ${catName} قاربت على الميزانية`,
+              body: `وصلت الفئة إلى ${pct}% من ميزانية الشهر (${Math.round(reEval.newTotal).toLocaleString()} من ${reEval.budget.toLocaleString()} ج).\nتبقى ${Math.round(reEval.remaining).toLocaleString()} ج فقط.`,
+              metadata: { kind: 'budget_warning_info', category: catKey, category_id: catId, year_month: reEval.year_month, pct, requires_action: false },
+            });
+          }
+        }
+      }
+    }
+
     // Re-fetch with the same JOIN as GET so the response includes supplier_name.
     const fresh = db.prepare(`
       SELECT e.*, s.name AS supplier_name FROM expenses e
@@ -2608,20 +2795,29 @@ app.post('/api/expenses/:id/approve', (req, res) => {
     const cur = db.prepare('SELECT * FROM expenses WHERE id = ?').get(req.params.id);
     if (!cur) return res.status(404).json({ error: 'not found' });
     const actor = (req.body && req.body.actor) || SUPER_ADMIN_FALLBACK;
+    // Budget-overrun approvals require an audit-trail reason (min 5 chars).
+    const wasOverrun = cur.status === 'pending_budget_approval';
+    const overrideReason = (req.body && (req.body.override_reason || req.body.budget_override_reason) || '').trim();
+    if (wasOverrun && overrideReason.length < 5) {
+      return res.status(400).json({ error: 'override_reason required (min 5 chars) for budget overrun approval' });
+    }
     db.prepare(`
-      UPDATE expenses SET status = 'approved', approved_by = ?, approved_at = datetime('now'), rejection_reason = NULL
+      UPDATE expenses SET status = 'approved', approved_by = ?, approved_at = datetime('now'),
+                          rejection_reason = NULL,
+                          budget_override_reason = COALESCE(?, budget_override_reason)
       WHERE id = ?
-    `).run(actor, req.params.id);
+    `).run(actor, overrideReason || null, req.params.id);
     if (cur.created_by) {
       sendMessage({
         from_user_id: actor, from_user_name: 'Super Admin',
         to_user_id: cur.created_by, type: 'approval',
-        subject: 'تمت الموافقة على مصروف',
-        body: `${cur.description || '—'} · ${(cur.amount||0).toLocaleString()} ج`,
-        metadata: { kind: 'expense_approved', expense_id: cur.id },
+        subject: wasOverrun ? 'تم الموافقة استثنائياً على المصروف' : 'تمت الموافقة على مصروف',
+        body: `${cur.description || '—'} · ${(cur.amount||0).toLocaleString()} ج`
+            + (wasOverrun ? `\nسبب الاستثناء: ${overrideReason}` : ''),
+        metadata: { kind: wasOverrun ? 'expense_budget_overrun_approved' : 'expense_approved', expense_id: cur.id, override_reason: wasOverrun ? overrideReason : undefined },
       });
     }
-    res.json({ ok: true });
+    res.json({ ok: true, override_reason: wasOverrun ? overrideReason : null });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
@@ -2863,7 +3059,11 @@ function inRangeISO(dateLike, fromISO, toISO) {
 function aggregateFinance(fromISO, toISO) {
   const orders   = db.prepare('SELECT * FROM orders').all();
   const products = db.prepare('SELECT name, cost FROM products').all();
-  const expenses = db.prepare('SELECT * FROM expenses WHERE 1=1'
+  // Finance reporting only counts settled (approved) expenses. Pending,
+  // rejected, and pending_budget_approval rows are excluded from KPIs/charts
+  // until a super admin actions them.
+  const expenses = db.prepare(
+    "SELECT * FROM expenses WHERE (status = 'approved' OR status IS NULL)"
     + (fromISO ? ' AND date >= ?' : '')
     + (toISO   ? ' AND date <= ?' : '')).all(...[fromISO, toISO].filter(Boolean));
   const returnsRows = db.prepare('SELECT * FROM returns WHERE status = ?').all('refunded');

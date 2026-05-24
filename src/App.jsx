@@ -1317,6 +1317,10 @@ function AdminDash({ go }) {
   const [removedMsgIds, setRemovedMsgIds] = useState({}); // { [id]: 'fading' | 'gone' }
   const [inboxOpen, setInboxOpen] = useState(false);
   const [rejectionFor, setRejectionFor] = useState(null); // { msgId, approvalId, label, note }
+  // Budget-overrun "exception reason" modal — opened from the inbox when a
+  // super admin chooses to approve an expense that busts its category's
+  // monthly budget. Requires a >=5 char audit-trail reason.
+  const [budgetOverrideFor, setBudgetOverrideFor] = useState(null); // { msgId, expenseId, label, note }
   const myInboxAddr = (authUser && authUser.email) || activeRole;
 
   // Visible inbox = server messages minus anything we've optimistically removed.
@@ -1634,18 +1638,22 @@ function AdminDash({ go }) {
   // Approve / reject expense FROM the inbox bell — applies the same
   // optimistic-fade-then-confirm pattern as actionMessage so the message
   // visually disappears immediately and the bell badge decrements.
-  const approveExpenseFromInbox = async (msgId, expenseId) => {
+  // overrideReason is required when the row is in pending_budget_approval —
+  // the backend rejects the approval with 400 if it's missing or too short.
+  const approveExpenseFromInbox = async (msgId, expenseId, overrideReason) => {
     setRemovedMsgIds(prev => ({ ...prev, [msgId]: 'fading' }));
     fetch(`/api/messages/${msgId}/read`, { method:"PATCH" }).catch(()=>{});
     setTimeout(() => setRemovedMsgIds(prev => ({ ...prev, [msgId]: 'gone' })), 200);
     try {
+      const body = { actor: (authUser && authUser.email) || null };
+      if (overrideReason) body.override_reason = overrideReason;
       const r = await fetch(`/api/expenses/${expenseId}/approve`, {
         method:"POST", headers:{"Content-Type":"application/json"},
-        body: JSON.stringify({ actor: (authUser && authUser.email) || null }),
+        body: JSON.stringify(body),
       });
       if (!r.ok) throw new Error('approve failed');
       refreshExpenses(); refreshExpTrend(); refreshMessages();
-      setSavedToast("تمت الموافقة على المصروف"); setTimeout(()=>setSavedToast(""), 1800);
+      setSavedToast(overrideReason ? "تمت الموافقة الاستثنائية" : "تمت الموافقة على المصروف"); setTimeout(()=>setSavedToast(""), 1800);
     } catch {
       setRemovedMsgIds(prev => { const n = { ...prev }; delete n[msgId]; return n; });
       window.alert('فشل تنفيذ الإجراء — تم إعادة الرسالة للصندوق');
@@ -3043,8 +3051,9 @@ function AdminDash({ go }) {
                     // approval_id, AND the expense-approval flow carries an
                     // expense_id under metadata.kind === 'expense_approval'.
                     const isExpenseAppr  = !!(m.metadata && m.metadata.kind === 'expense_approval' && m.metadata.expense_id);
+                    const isBudgetOverrun = !!(m.metadata && m.metadata.kind === 'expense_budget_overrun' && m.metadata.expense_id);
                     const isLegacyAppr   = !!(m.metadata && m.metadata.approval_id);
-                    const needsAction    = !actioned && isReq && m.metadata && m.metadata.requires_action && isSuper && (isExpenseAppr || isLegacyAppr);
+                    const needsAction    = !actioned && isReq && m.metadata && m.metadata.requires_action && isSuper && (isExpenseAppr || isBudgetOverrun || isLegacyAppr);
                     return (
                       <article key={m.id}
                         onClick={()=>!m.read_at && !actioned && markMessageRead(m.id)}
@@ -3082,20 +3091,22 @@ function AdminDash({ go }) {
                         )}
                         {needsAction && (
                           <div style={{display:"flex",gap:6,marginTop:10}}>
-                            <button onClick={(e)=>{
-                              e.stopPropagation();
-                              if (isExpenseAppr) {
+                            <button onClick={(ev)=>{
+                              ev.stopPropagation();
+                              if (isBudgetOverrun) {
+                                setBudgetOverrideFor({ msgId: m.id, expenseId: m.metadata.expense_id, label: m.subject, note: "" });
+                              } else if (isExpenseAppr) {
                                 approveExpenseFromInbox(m.id, m.metadata.expense_id);
                               } else {
                                 actionMessage(m.id, m.metadata.approval_id, "approved");
                               }
                             }}
-                              style={{background:"#DCFCE7",border:"0.5px solid #86EFAC",padding:"5px 12px",cursor:"pointer",fontSize:11.5,fontFamily:ui.fontBody,color:"#15803D",borderRadius:5}}>
-                              ✓ موافقة
+                              style={{background: isBudgetOverrun ? "#FED7AA" : "#DCFCE7",border:`0.5px solid ${isBudgetOverrun ? "#FB923C" : "#86EFAC"}`,padding:"5px 12px",cursor:"pointer",fontSize:11.5,fontFamily:ui.fontBody,color: isBudgetOverrun ? "#9A3412" : "#15803D",borderRadius:5}}>
+                              {isBudgetOverrun ? "✓ موافقة استثنائية" : "✓ موافقة"}
                             </button>
-                            <button onClick={(e)=>{
-                              e.stopPropagation();
-                              if (isExpenseAppr) {
+                            <button onClick={(ev)=>{
+                              ev.stopPropagation();
+                              if (isExpenseAppr || isBudgetOverrun) {
                                 setRejectionFor({ msgId: m.id, expenseId: m.metadata.expense_id, label: m.subject, note: "", kind: "expense" });
                               } else {
                                 setRejectionFor({ msgId: m.id, approvalId: m.metadata.approval_id, label: m.subject, note: "" });
@@ -3152,6 +3163,46 @@ function AdminDash({ go }) {
                     }}
                     style={{padding:"8px 18px",background: (rejectionFor.note||"").trim().length >= 3 ? "#DC2626" : "#9CA3AF",color:"#fff",border:"none",borderRadius:6,fontSize:12.5,fontFamily:ui.fontBody,cursor:(rejectionFor.note||"").trim().length >= 3 ? "pointer" : "not-allowed"}}>
                     إرسال الرفض
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* Budget-overrun exception modal — Super Admin approves a row that
+              busts the category's monthly budget. Reason (>=5 chars) is
+              stored on expenses.budget_override_reason for audit. */}
+          {budgetOverrideFor && (
+            <div onClick={()=>setBudgetOverrideFor(null)}
+              style={{position:"fixed",inset:0,background:"rgba(0,0,0,.55)",zIndex:700,display:"flex",alignItems:"center",justifyContent:"center",padding:16,direction:"rtl"}}>
+              <div onClick={ev=>ev.stopPropagation()}
+                style={{background:ui.cardBg,maxWidth:460,width:"100%",padding:22,borderRadius:8,boxShadow:"0 12px 48px rgba(0,0,0,.25)"}}>
+                <h3 style={{fontSize:15,fontWeight:600,color:ui.text,fontFamily:ui.fontBody,margin:"0 0 4px"}}>
+                  موافقة استثنائية على تجاوز الميزانية
+                </h3>
+                <div style={{fontSize:12.5,color:ui.textSub,fontFamily:ui.fontBody,marginBottom:14}}>
+                  {budgetOverrideFor.label || "—"}
+                </div>
+                <label style={{display:"block",fontSize:12,color:ui.text,marginBottom:5,fontFamily:ui.fontBody,fontWeight:500}}>
+                  سبب الاستثناء (5 أحرف على الأقل — يُحفظ في السجل)
+                </label>
+                <textarea rows={3} autoFocus
+                  value={budgetOverrideFor.note}
+                  onChange={ev=>setBudgetOverrideFor({...budgetOverrideFor, note:ev.target.value})}
+                  placeholder="مثال: حملة تسويقية طارئة معتمدة من الإدارة..."
+                  style={{padding:"8px 12px",border:`1px solid #FB923C`,borderRadius:6,background:"#FFF7ED",fontFamily:ui.fontBody,fontSize:13,color:ui.text,outline:"none",width:"100%",direction:"rtl",resize:"vertical",minHeight:80,boxSizing:"border-box"}}/>
+                <div style={{display:"flex",gap:8,justifyContent:"flex-end",marginTop:12}}>
+                  <button onClick={()=>setBudgetOverrideFor(null)}
+                    style={{padding:"8px 16px",background:"transparent",border:ui.border,borderRadius:6,fontSize:12.5,color:ui.textSub,fontFamily:ui.fontBody,cursor:"pointer"}}>إلغاء</button>
+                  <button
+                    disabled={(budgetOverrideFor.note || "").trim().length < 5}
+                    onClick={() => {
+                      const reason = budgetOverrideFor.note.trim();
+                      approveExpenseFromInbox(budgetOverrideFor.msgId, budgetOverrideFor.expenseId, reason);
+                      setBudgetOverrideFor(null);
+                    }}
+                    style={{padding:"8px 18px",background: (budgetOverrideFor.note||"").trim().length >= 5 ? "#EA580C" : "#9CA3AF",color:"#fff",border:"none",borderRadius:6,fontSize:12.5,fontFamily:ui.fontBody,cursor:(budgetOverrideFor.note||"").trim().length >= 5 ? "pointer" : "not-allowed"}}>
+                    تأكيد الموافقة الاستثنائية
                   </button>
                 </div>
               </div>
@@ -4902,9 +4953,10 @@ function AdminDash({ go }) {
             const pmColor = (m) => ({cash:"#F0FDF4",transfer:"#EFF6FF",card:"#FEF3C7",wallet:"#F5F3FF"})[m] || "#F3F4F6";
             const pmFg    = (m) => ({cash:"#15803D",transfer:"#1D4ED8",card:"#92400E",wallet:"#6D28D9"})[m] || "#374151";
             const statusBadge = (s) => {
-              if (s === "pending")   return { bg:"#FEF3C7", fg:"#92400E", t:"بانتظار الموافقة" };
-              if (s === "rejected")  return { bg:"#FEE2E2", fg:"#B91C1C", t:"مرفوض" };
-              return { bg:"#DCFCE7", fg:"#15803D", t:"موافق" };
+              if (s === "pending")                  return { bg:"#FEF3C7", fg:"#92400E", t:"بانتظار الموافقة", tip:"" };
+              if (s === "pending_budget_approval")  return { bg:"#FED7AA", fg:"#9A3412", t:"بانتظار موافقة ميزانية", tip:"هذا المصروف سيتجاوز ميزانية الفئة الشهرية" };
+              if (s === "rejected")                 return { bg:"#FEE2E2", fg:"#B91C1C", t:"مرفوض", tip:"" };
+              return { bg:"#DCFCE7", fg:"#15803D", t:"موافق", tip:"" };
             };
 
             const exportCsv = () => {
@@ -5141,7 +5193,7 @@ function AdminDash({ go }) {
                         // capture works the same way as the add row.
                         const editVal = editing ? expEditDraft : null;
                         return (
-                          <tr key={e.id} style={{borderTop:"0.5px solid #EEE", background: editing ? "#F0F9FF" : e.status === "pending" ? "#FFFBEB" : e.status === "rejected" ? "#FEF2F2" : "transparent"}}>
+                          <tr key={e.id} style={{borderTop:"0.5px solid #EEE", background: editing ? "#F0F9FF" : e.status === "pending" ? "#FFFBEB" : e.status === "pending_budget_approval" ? "#FFF7ED" : e.status === "rejected" ? "#FEF2F2" : "transparent"}}>
                             {/* Description */}
                             <td style={tdCell}>
                               {editing
@@ -5278,7 +5330,8 @@ function AdminDash({ go }) {
                             </td>
                             {/* Status badge (always read-only) */}
                             <td style={tdCell}>
-                              <span style={{fontSize:10.5,padding:"3px 9px",borderRadius:20,background:stat.bg,color:stat.fg,whiteSpace:"nowrap"}} title={e.rejection_reason || ""}>{stat.t}</span>
+                              <span style={{fontSize:10.5,padding:"3px 9px",borderRadius:20,background:stat.bg,color:stat.fg,whiteSpace:"nowrap"}}
+                                title={stat.tip || e.rejection_reason || e.budget_override_reason || ""}>{stat.t}</span>
                             </td>
                             {/* Notes + receipt + recurring */}
                             <td style={{...tdCell, color:ui.textSub, fontSize:11.5, maxWidth:200, whiteSpace:"nowrap"}} title={e.notes || ""}>
@@ -5467,12 +5520,25 @@ function AdminDash({ go }) {
                     </button>
                     {expBudgetsOpen && (
                       <div style={{padding:"0 14px 14px"}}>
-                        {budgetRows.map(b => (
+                        {budgetRows.map(b => {
+                          // Per-state icon next to the bar — green check (safe),
+                          // amber alert-triangle (warning ≥ 80%), red alert-octagon
+                          // (overrun ≥ 100%). Stays out of the layout when there
+                          // is no budget configured for the row.
+                          const stateIcon = b.state === "over" ? "⛔" : b.state === "approaching" ? "⚠️" : b.state === "under" ? "✓" : "";
+                          const stateAria = b.state === "over" ? "تجاوز الميزانية" : b.state === "approaching" ? "اقتراب من حد الميزانية" : b.state === "under" ? "ضمن الميزانية" : "";
+                          return (
                           <div key={b.cat.key} style={{padding:"10px 0",borderTop:"0.5px solid #EEE"}}>
                             <div style={{display:"flex",justifyContent:"space-between",fontFamily:ui.fontBody,fontSize:12.5,color:ui.text,marginBottom:5,gap:8,flexWrap:"wrap"}}>
                               <span style={{display:"flex",alignItems:"center",gap:6}}>
                                 <span style={{width:18,height:18,borderRadius:3,background:b.cat.color + "22",color:b.cat.color,display:"inline-flex",alignItems:"center",justifyContent:"center",fontSize:12}}>{b.cat.icon || "•"}</span>
                                 {b.cat.l}
+                                {stateIcon && (
+                                  <span title={stateAria} aria-label={stateAria}
+                                    style={{fontSize:13,color:b.tone,lineHeight:1,display:"inline-flex",alignItems:"center"}}>
+                                    {stateIcon}
+                                  </span>
+                                )}
                               </span>
                               {b.state === "none" ? (
                                 <span style={{color:"#9CA3AF",fontSize:11.5}}>لم يتم تحديد ميزانية · أُنفِق {b.spent.toLocaleString()} ج</span>
@@ -5491,7 +5557,8 @@ function AdminDash({ go }) {
                               <div style={{width: `${b.pct}%`, height:"100%", background:b.tone, transition:"width .3s"}}/>
                             </div>
                           </div>
-                        ))}
+                          );
+                        })}
                         <div style={{textAlign:"left",marginTop:8}}>
                           <button onClick={()=>{ setTab("settings"); setSettingsTab("expenses"); }}
                             style={{background:"transparent",border:"none",color:"#1D4ED8",fontFamily:ui.fontBody,fontSize:12,cursor:"pointer",padding:0}}>
@@ -7913,6 +7980,19 @@ function ExpenseSettingsPanel({ ui, mob, isSuper, storeCfg, setStoreCfg, saveSet
     setStoreCfg(next);
     try { await saveSetting("store", next); flash("تم حفظ إعدادات الموافقة"); } catch {}
   };
+  // ── Budget alerts (also in settings.store) ──
+  // Default ON when the key isn't set yet — matches the spec.
+  const budgetAlertsEnabled = storeCfg.budget_alerts_enabled === undefined ? true : !!storeCfg.budget_alerts_enabled;
+  const budgetWarningThreshold = (() => {
+    const v = Number(storeCfg.budget_warning_threshold);
+    if (!Number.isFinite(v) || v <= 0 || v >= 100) return 80;
+    return v;
+  })();
+  const saveBudgetAlerts = async (patch) => {
+    const next = { ...storeCfg, ...patch };
+    setStoreCfg(next);
+    try { await saveSetting("store", next); flash("تم حفظ إعدادات التنبيهات"); } catch {}
+  };
 
   const card = { background:ui.cardBg, border:ui.border, borderRadius:ui.radius, padding: mob?"14px":"18px", marginBottom:12 };
   const cardTitle = { fontSize:13, fontWeight:600, color:ui.text, fontFamily:ui.fontBody, marginBottom:12, paddingBottom:8, borderBottom:"0.5px solid #EEE" };
@@ -8034,6 +8114,50 @@ function ExpenseSettingsPanel({ ui, mob, isSuper, storeCfg, setStoreCfg, saveSet
         {!isSuper && (
           <div style={{marginTop:8,fontSize:11.5,color:"#92400E",fontFamily:ui.fontBody,background:"#FFFBEB",padding:"7px 10px",borderRadius:5}}>
             🔒 إعدادات الموافقة تتطلب صلاحية Super Admin
+          </div>
+        )}
+      </div>
+
+      {/* BUDGET ALERTS ────────────────────────────────────────────────────── */}
+      {/* Separate from the per-expense approval system above. Monitors total
+          spend per category against monthly_budget and fires inbox messages
+          at the warning threshold (info) and at 100% (actionable). */}
+      <div style={card}>
+        <div style={cardTitle}>تنبيهات الميزانية</div>
+        <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"6px 0"}}>
+          <div>
+            <div style={{fontSize:13,color:ui.text,fontFamily:ui.fontBody}}>تفعيل نظام تنبيهات تجاوز الميزانية</div>
+            <div style={{fontSize:11.5,color:ui.textSub,fontFamily:ui.fontBody,marginTop:2}}>
+              يراقب إجمالي مصروفات كل فئة مقابل ميزانيتها الشهرية ويرسل تنبيهات للـ Super Admin
+            </div>
+          </div>
+          <button onClick={()=>isSuper && saveBudgetAlerts({ budget_alerts_enabled: !budgetAlertsEnabled })} disabled={!isSuper}
+            style={{width:38,height:22,borderRadius:11,border:"none",background: budgetAlertsEnabled?"#16A34A":"#D4D4D4",position:"relative",cursor: isSuper?"pointer":"not-allowed",opacity: isSuper?1:0.6}}>
+            <span style={{position:"absolute",top:2,[budgetAlertsEnabled?"left":"right"]:2,width:18,height:18,background:"#fff",borderRadius:"50%",boxShadow:"0 1px 2px rgba(0,0,0,.2)"}}/>
+          </button>
+        </div>
+        {budgetAlertsEnabled && (
+          <div style={{marginTop:10,paddingTop:10,borderTop:"0.5px solid #EEE"}}>
+            <label style={{display:"block",fontSize:12,color:ui.text,fontFamily:ui.fontBody,marginBottom:5}}>
+              إرسال تحذير عند الوصول إلى ___% من الميزانية
+            </label>
+            <input type="text" inputMode="numeric" defaultValue={budgetWarningThreshold}
+              onBlur={ev => {
+                const raw = Number(ev.target.value.replace(/[^0-9.]/g,'')) || 0;
+                const clamped = Math.max(1, Math.min(99, raw));
+                saveBudgetAlerts({ budget_warning_threshold: clamped });
+              }}
+              disabled={!isSuper}
+              style={{...inputStyle,maxWidth:160,direction:"ltr",textAlign:"left"}}/>
+            <span style={{fontSize:11.5,color:ui.textSub,fontFamily:ui.fontBody,marginInlineStart:6}}>% (بين 1 و 99)</span>
+            <div style={{fontSize:11.5,color:"#9A3412",fontFamily:ui.fontBody,marginTop:8,background:"#FFF7ED",padding:"7px 10px",borderRadius:5,border:"0.5px solid #FED7AA"}}>
+              عند تجاوز 100% من الميزانية، يتطلب المصروف موافقة استثنائية من Super Admin مع تسجيل سبب الاستثناء.
+            </div>
+          </div>
+        )}
+        {!isSuper && (
+          <div style={{marginTop:8,fontSize:11.5,color:"#92400E",fontFamily:ui.fontBody,background:"#FFFBEB",padding:"7px 10px",borderRadius:5}}>
+            🔒 إعدادات التنبيهات تتطلب صلاحية Super Admin
           </div>
         )}
       </div>
