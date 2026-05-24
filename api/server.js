@@ -314,6 +314,125 @@ ensureColumn('returns',   'stock_settled',     'INTEGER DEFAULT 0'); // 1 once a
 ensureColumn('approvals', 'requester_id',  'TEXT');  // email of the requester
 ensureColumn('approvals', 'requester_name','TEXT');
 
+// ── Returns Phase 1: multi-item + audit trail ───────────────────────────────
+// Extends the legacy returns row with the columns the new admin pages need.
+// All additive; legacy POST shape still works (product/customer/reason on
+// the row itself). New POSTs may also write return_items rows for the
+// per-line refund breakdown.
+ensureColumn('returns', 'return_number',     'TEXT');                          // RET-0001 (unique, backfilled below)
+ensureColumn('returns', 'customer_id',       'TEXT');                          // FK → users.email (preferred over customer_email)
+ensureColumn('returns', 'reason_id',         'TEXT');                          // FK → return_reasons.id (legacy `reason` kept as fallback)
+ensureColumn('returns', 'customer_notes',    'TEXT');                          // free-text from customer
+ensureColumn('returns', 'refund_method',     'TEXT');                          // cash | transfer | wallet | store_credit | exchange
+ensureColumn('returns', 'refund_reference',  'TEXT');                          // txn/transfer id once processed
+ensureColumn('returns', 'refund_shipping',   'INTEGER DEFAULT 0');             // 1 = also refund shipping cost
+ensureColumn('returns', 'shipping_refund',   'REAL DEFAULT 0');                // computed amount
+ensureColumn('returns', 'discount_refund',   'REAL DEFAULT 0');                // proportional coupon refund
+ensureColumn('returns', 'requested_at',      'DATETIME');                      // when customer requested (defaults to created_at)
+ensureColumn('returns', 'reviewed_at',       'DATETIME');                      // when admin first actioned approve/reject
+ensureColumn('returns', 'reviewed_by',       'TEXT');                          // admin email
+ensureColumn('returns', 'processed_at',      'DATETIME');                      // when refund actually paid
+ensureColumn('returns', 'processed_by',      'TEXT');                          // admin email
+ensureColumn('returns', 'internal_notes',    'TEXT');                          // admin-only, not shown to customer
+ensureColumn('returns', 'pickup_method',     "TEXT DEFAULT 'customer_ships'"); // home_pickup | customer_ships
+ensureColumn('returns', 'pickup_address',    'TEXT');                          // when pickup_method=home_pickup
+ensureColumn('returns', 'return_tracking',   'TEXT');                          // waybill from courier when customer ships
+ensureColumn('returns', 'rejection_reason',  'TEXT');                          // when status=rejected
+
+// Per-item refund breakdown — one return can contain many lines (this is
+// the spec's "Products Card" data source). Legacy single-product returns
+// continue to work with zero rows in this table (UI falls back to the
+// `product` column on the parent row).
+db.exec(`
+  CREATE TABLE IF NOT EXISTS return_items (
+    id              TEXT PRIMARY KEY,
+    return_id       TEXT NOT NULL,
+    order_item_idx  INTEGER,                      -- index into orders.items[] JSON
+    product_id      TEXT,
+    product_name    TEXT,
+    product_image   TEXT,
+    sku             TEXT,
+    unit_price      REAL DEFAULT 0,
+    quantity        INTEGER DEFAULT 1,
+    refund_amount   REAL DEFAULT 0,
+    condition       TEXT DEFAULT 'pending',       -- pending | good | partial_damage | full_damage
+    restock_action  TEXT DEFAULT 'pending',       -- pending | restock_available | move_to_damaged | write_off
+    created_at      DATETIME DEFAULT CURRENT_TIMESTAMP
+  )
+`);
+try { db.exec('CREATE INDEX IF NOT EXISTS idx_return_items_return ON return_items(return_id)'); } catch {}
+
+db.exec(`
+  CREATE TABLE IF NOT EXISTS return_reasons (
+    id         TEXT PRIMARY KEY,
+    name_ar    TEXT NOT NULL,
+    name_en    TEXT,
+    active     INTEGER DEFAULT 1,
+    sort_order INTEGER DEFAULT 0,
+    is_default INTEGER DEFAULT 0,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+  )
+`);
+// Seed the default reasons from the spec. Defaults are protected from
+// hard-delete by the CRUD endpoints (renaming + hiding allowed instead).
+(() => {
+  const seeds = [
+    { key: 'damaged_arrival', name_ar: 'وصل تالف',                     name_en: 'Arrived damaged' },
+    { key: 'not_as_described',name_ar: 'المنتج مختلف عن الوصف',         name_en: 'Not as described' },
+    { key: 'allergy',         name_ar: 'حساسية / تفاعل سلبي',            name_en: 'Allergy / adverse reaction' },
+    { key: 'changed_mind',    name_ar: 'تغيير رأي',                      name_en: 'Changed mind' },
+    { key: 'wrong_item',      name_ar: 'استلمت منتج خطأ',                name_en: 'Wrong item received' },
+    { key: 'other',           name_ar: 'آخر',                            name_en: 'Other' },
+  ];
+  const ins = db.prepare(`
+    INSERT INTO return_reasons (id, name_ar, name_en, active, sort_order, is_default)
+    VALUES (?, ?, ?, 1, ?, 1)
+    ON CONFLICT(id) DO NOTHING
+  `);
+  seeds.forEach((s, i) => ins.run(`rr_def_${s.key}`, s.name_ar, s.name_en, i + 1));
+})();
+
+db.exec(`
+  CREATE TABLE IF NOT EXISTS return_attachments (
+    id          TEXT PRIMARY KEY,
+    return_id   TEXT NOT NULL,
+    file_path   TEXT NOT NULL,                    -- /uploads/returns/...
+    kind        TEXT DEFAULT 'photo',             -- photo | document
+    uploaded_at DATETIME DEFAULT CURRENT_TIMESTAMP
+  )
+`);
+try { db.exec('CREATE INDEX IF NOT EXISTS idx_return_attachments_return ON return_attachments(return_id)'); } catch {}
+
+db.exec(`
+  CREATE TABLE IF NOT EXISTS return_activity_log (
+    id           TEXT PRIMARY KEY,
+    return_id    TEXT NOT NULL,
+    event_type   TEXT NOT NULL,                   -- submitted | reviewed | approved | rejected | inspected | refund_processed | note_added | cancelled
+    event_data   TEXT DEFAULT '{}',
+    actor_id     TEXT,
+    actor_name   TEXT,
+    created_at   DATETIME DEFAULT CURRENT_TIMESTAMP
+  )
+`);
+try { db.exec('CREATE INDEX IF NOT EXISTS idx_return_activity_return ON return_activity_log(return_id, created_at)'); } catch {}
+
+// Unique index on return_number — partial so legacy rows with NULL don't
+// collide. Backfills below populate the column for any pre-existing rows.
+try { db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_returns_number ON returns(return_number) WHERE return_number IS NOT NULL'); } catch {}
+(() => {
+  try {
+    const max = db.prepare("SELECT COALESCE(MAX(CAST(SUBSTR(return_number, 5) AS INTEGER)), 0) AS m FROM returns WHERE return_number LIKE 'RET-%'").get().m || 0;
+    const missing = db.prepare('SELECT id FROM returns WHERE return_number IS NULL ORDER BY created_at ASC').all();
+    if (!missing.length) return;
+    const upd = db.prepare('UPDATE returns SET return_number = ? WHERE id = ?');
+    let n = max;
+    db.transaction(() => { missing.forEach(r => { n += 1; upd.run(`RET-${String(n).padStart(4,'0')}`, r.id); }); })();
+    console.log(`[nawra-api] backfilled return_number for ${missing.length} legacy returns`);
+  } catch (e) { console.warn('[nawra-api] return_number backfill skipped:', e.message); }
+})();
+// Backfill requested_at from created_at for legacy rows missing it.
+try { db.prepare('UPDATE returns SET requested_at = created_at WHERE requested_at IS NULL').run(); } catch {}
+
 // ── Product migrations (bilingual + slug + size + variants + best-seller) ────
 // Each *_i18n column stores { ar: '...', en: '...' } as JSON. The legacy
 // single-language columns (name, description, ingredients, seo_title,
@@ -1918,41 +2037,298 @@ app.post('/api/coupons/validate', (req, res) => {
 });
 
 // ── RETURNS ───────────────────────────────────────────────────────────────────
-// statuses: pending | approved | rejected | refunded
+// statuses: pending | approved | rejected | refunded | cancelled
+// Phase 1 reshapes the row + adds per-item child rows. Legacy single-product
+// POST is kept working — the UI just renders fewer details when items[] is
+// empty. Status flow:
+//   pending → approved → refunded   (happy path)
+//   pending → rejected               (declined)
+//
+// Allocator — wrapped in a tiny txn so two simultaneous POSTs can't pick the
+// same RET-XXXX. Starts at 0001 in a fresh DB; sequential thereafter.
+const allocateReturnNumber = db.transaction(() => {
+  const row = db.prepare("SELECT COALESCE(MAX(CAST(SUBSTR(return_number, 5) AS INTEGER)), 0) AS m FROM returns WHERE return_number LIKE 'RET-%'").get();
+  const n = (row.m || 0) + 1;
+  return `RET-${String(n).padStart(4,'0')}`;
+});
+
+function logReturnActivity({ return_id, event_type, event_data = {}, actor_id, actor_name }) {
+  try {
+    const id = `ral_${Date.now().toString(36)}_${Math.random().toString(36).slice(2,5)}`;
+    db.prepare(`
+      INSERT INTO return_activity_log (id, return_id, event_type, event_data, actor_id, actor_name)
+      VALUES (?,?,?,?,?,?)
+    `).run(id, return_id, event_type, JSON.stringify(event_data || {}), actor_id || null, actor_name || null);
+  } catch (e) { console.warn('[nawra-api] return activity log skipped:', e.message); }
+}
+
+function hydrateReturn(r) {
+  if (!r) return null;
+  const items = db.prepare('SELECT * FROM return_items WHERE return_id = ? ORDER BY created_at').all(r.id);
+  const attachments = db.prepare('SELECT * FROM return_attachments WHERE return_id = ? ORDER BY uploaded_at').all(r.id);
+  const activity = db.prepare('SELECT * FROM return_activity_log WHERE return_id = ? ORDER BY created_at').all(r.id).map(a => {
+    try { a.event_data = JSON.parse(a.event_data || '{}'); } catch { a.event_data = {}; }
+    return a;
+  });
+  // Best-effort join: reason label, original order summary, customer card.
+  let reason_label = r.reason || null;
+  if (r.reason_id) {
+    const rr = db.prepare('SELECT name_ar FROM return_reasons WHERE id = ?').get(r.reason_id);
+    if (rr) reason_label = rr.name_ar;
+  }
+  let order = null;
+  if (r.order_id) {
+    const o = db.prepare('SELECT id, order_number, date, created_at, total, subtotal, shipping_cost, discount_amount, status, items AS items_json FROM orders WHERE id = ?').get(r.order_id);
+    if (o) {
+      try { o.items = JSON.parse(o.items_json || '[]'); } catch { o.items = []; }
+      delete o.items_json;
+      order = o;
+    }
+  }
+  let customer = null;
+  const email = r.customer_id || r.customer_email;
+  if (email) {
+    customer = db.prepare('SELECT email, name, phone, category, totalOrders, totalSpent FROM users WHERE LOWER(email) = LOWER(?)').get(email) || null;
+    if (customer) {
+      const retCount = db.prepare('SELECT COUNT(*) AS c FROM returns WHERE LOWER(COALESCE(customer_id, customer_email)) = LOWER(?)').get(email).c;
+      customer.total_returns = retCount;
+    }
+  }
+  return { ...r, items, attachments, activity, reason_label, order, customer };
+}
+
+// LIST — filters + simple pagination. KPI numbers come from a separate
+// /aggregates endpoint so the list query stays cheap.
 app.get('/api/returns', (req, res) => {
   try {
-    const { status } = req.query;
-    const rows = status
-      ? db.prepare('SELECT * FROM returns WHERE status=? ORDER BY created_at DESC').all(status)
-      : db.prepare('SELECT * FROM returns ORDER BY created_at DESC').all();
-    res.json(rows);
+    const { status, q, from, to, reason_id, refund_method, sort, page = '1', perPage = '25' } = req.query;
+    let sql = 'SELECT * FROM returns WHERE 1=1';
+    const params = [];
+    if (status && status !== 'all') { sql += ' AND status = ?'; params.push(status); }
+    if (reason_id)     { sql += ' AND reason_id = ?'; params.push(reason_id); }
+    if (refund_method) { sql += ' AND refund_method = ?'; params.push(refund_method); }
+    if (from) { sql += " AND DATE(COALESCE(requested_at, created_at)) >= ?"; params.push(from); }
+    if (to)   { sql += " AND DATE(COALESCE(requested_at, created_at)) <= ?"; params.push(to); }
+    if (q) {
+      const like = `%${q}%`;
+      sql += ` AND (return_number LIKE ? OR order_id LIKE ? OR customer LIKE ?
+                OR customer_email LIKE ? OR customer_id LIKE ?)`;
+      params.push(like, like, like, like, like);
+    }
+    if (sort === 'oldest')      sql += " ORDER BY COALESCE(requested_at, created_at) ASC";
+    else if (sort === 'amount_desc') sql += ' ORDER BY amount DESC';
+    else if (sort === 'amount_asc')  sql += ' ORDER BY amount ASC';
+    else                         sql += " ORDER BY COALESCE(requested_at, created_at) DESC";
+
+    const total = db.prepare(`SELECT COUNT(*) AS c FROM (${sql})`).get(...params).c;
+    const lim = Math.max(1, Math.min(200, parseInt(perPage, 10) || 25));
+    const off = (Math.max(1, parseInt(page, 10) || 1) - 1) * lim;
+    sql += ' LIMIT ? OFFSET ?'; params.push(lim, off);
+
+    const rows = db.prepare(sql).all(...params);
+    // Lightweight hydration — only include the first-2 item thumbs + count
+    // so the table can render small images without a per-row roundtrip.
+    const enriched = rows.map(r => {
+      const items = db.prepare('SELECT product_image, product_name FROM return_items WHERE return_id = ? LIMIT 5').all(r.id);
+      return { ...r, items_preview: items, items_count: items.length };
+    });
+    res.json({ rows: enriched, total, page: Number(page), perPage: lim });
+  } catch (e) { console.error('GET /api/returns', e); res.status(500).json({ error: e.message }); }
+});
+
+// AGGREGATES — KPI cards + insight cards. One round-trip for the list page.
+app.get('/api/returns/aggregates', (_req, res) => {
+  try {
+    const all = db.prepare('SELECT * FROM returns').all();
+    const byStatus = (s) => all.filter(r => r.status === s);
+    const counts = {
+      total:     all.length,
+      pending:   byStatus('pending').length,
+      approved:  byStatus('approved').length,
+      rejected:  byStatus('rejected').length,
+      refunded:  byStatus('refunded').length,
+    };
+    const refunded_total = byStatus('refunded').reduce((s, r) => s + (Number(r.amount) || 0), 0);
+    const orderCount = db.prepare('SELECT COUNT(*) AS c FROM orders').get().c || 0;
+    const return_rate_pct = orderCount ? Math.round((all.length / orderCount) * 1000) / 10 : 0;
+
+    // avg processing days = mean( (processed_at - requested_at) for refunded rows )
+    let avg_processing_days = null;
+    const refunded = byStatus('refunded').filter(r => r.processed_at && (r.requested_at || r.created_at));
+    if (refunded.length) {
+      const totalMs = refunded.reduce((s, r) => {
+        const a = new Date((r.requested_at || r.created_at).replace(' ', 'T') + 'Z').getTime();
+        const b = new Date(r.processed_at.replace(' ', 'T') + 'Z').getTime();
+        return s + Math.max(0, b - a);
+      }, 0);
+      avg_processing_days = Math.round((totalMs / refunded.length / 86400000) * 10) / 10;
+    }
+
+    // Insight: top returned product (by aggregate quantity in return_items;
+    // falls back to the legacy `product` text column if items table is empty).
+    const itemAgg = db.prepare(`
+      SELECT product_name AS name, SUM(quantity) AS qty
+      FROM return_items GROUP BY product_name ORDER BY qty DESC LIMIT 1
+    `).get();
+    let topProductName = itemAgg && itemAgg.name;
+    let topProductQty  = itemAgg ? Number(itemAgg.qty) || 0 : 0;
+    if (!topProductName) {
+      const legacy = db.prepare("SELECT product, COUNT(*) AS c FROM returns WHERE product IS NOT NULL AND product <> '' GROUP BY product ORDER BY c DESC LIMIT 1").get();
+      if (legacy) { topProductName = legacy.product; topProductQty = legacy.c; }
+    }
+    // Sales count of that product across all orders (rough — sums qty from
+    // orders.items[] JSON where item.name matches).
+    let topProductSales = 0;
+    if (topProductName) {
+      const orders = db.prepare('SELECT items FROM orders').all();
+      orders.forEach(o => {
+        try { (JSON.parse(o.items || '[]') || []).forEach(it => { if ((it.name || '') === topProductName) topProductSales += Number(it.qty) || 0; }); }
+        catch {}
+      });
+    }
+    const top_product = topProductName ? {
+      name: topProductName, return_count: topProductQty, sales_count: topProductSales,
+      return_pct: topProductSales > 0 ? Math.round((topProductQty / topProductSales) * 1000) / 10 : null,
+    } : null;
+
+    // Insight: top reason
+    let topReason = null;
+    const reasonAgg = db.prepare(`
+      SELECT COALESCE(reason_id, '') AS rid, reason, COUNT(*) AS c
+      FROM returns WHERE (reason_id IS NOT NULL OR reason IS NOT NULL)
+      GROUP BY rid, reason ORDER BY c DESC LIMIT 1
+    `).get();
+    if (reasonAgg) {
+      let label = reasonAgg.reason || '—';
+      if (reasonAgg.rid) {
+        const rr = db.prepare('SELECT name_ar FROM return_reasons WHERE id = ?').get(reasonAgg.rid);
+        if (rr) label = rr.name_ar;
+      }
+      const pct = all.length ? Math.round((reasonAgg.c / all.length) * 1000) / 10 : 0;
+      topReason = { label, count: reasonAgg.c, pct };
+    }
+
+    res.json({ counts, refunded_total, return_rate_pct, avg_processing_days, top_product, top_reason: topReason });
+  } catch (e) { console.error('GET /api/returns/aggregates', e); res.status(500).json({ error: e.message }); }
+});
+
+// SINGLE (by id OR return_number RET-XXXX)
+app.get('/api/returns/:key', (req, res) => {
+  try {
+    const k = req.params.key;
+    const row = (k.startsWith('RET-')
+      ? db.prepare('SELECT * FROM returns WHERE return_number = ?').get(k)
+      : db.prepare('SELECT * FROM returns WHERE id = ?').get(k));
+    if (!row) return res.status(404).json({ error: 'not found' });
+    res.json(hydrateReturn(row));
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+// CREATE — accepts BOTH the legacy single-product shape AND the new shape
+// with `items: [{ order_item_idx, product_id, product_name, product_image,
+// sku, unit_price, quantity, refund_amount }, ...]`. Auto-allocates RET-XXXX.
 app.post('/api/returns', (req, res) => {
   try {
     const r = req.body || {};
-    if (!r.order_id || !r.customer) return res.status(400).json({ error: 'order_id and customer required' });
+    if (!r.order_id) return res.status(400).json({ error: 'order_id required' });
     const id = r.id || `rt_${Date.now().toString(36)}_${Math.random().toString(36).slice(2,5)}`;
-    db.prepare(`
-      INSERT INTO returns (id, order_id, customer, customer_email, product, reason, amount, status, admin_note)
-      VALUES (?,?,?,?,?,?,?,?,?)
-    `).run(id, r.order_id, r.customer, r.customer_email||null, r.product||null,
-           r.reason||null, Number(r.amount)||0, r.status||'pending', r.admin_note||null);
-    res.json({ ok: true, id });
-  } catch (e) { res.status(500).json({ error: e.message }); }
+    const retNum = allocateReturnNumber();
+    const itemsIn = Array.isArray(r.items) ? r.items : [];
+    // Sum amount from items if not explicitly given.
+    const computedAmount = itemsIn.length
+      ? itemsIn.reduce((s, it) => s + (Number(it.refund_amount) || ((Number(it.unit_price)||0) * (Number(it.quantity)||1))), 0)
+      : (Number(r.amount) || 0);
+    const requestedAt = r.requested_at || new Date().toISOString().slice(0, 19).replace('T', ' ');
+    const customer = r.customer || (r.customer_id ? r.customer_id.split('@')[0] : null);
+
+    db.transaction(() => {
+      db.prepare(`
+        INSERT INTO returns (id, return_number, order_id, customer, customer_email, customer_id,
+                             product, reason, reason_id, customer_notes, amount, status,
+                             refund_method, refund_shipping, shipping_refund, discount_refund,
+                             pickup_method, pickup_address, requested_at)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+      `).run(
+        id, retNum, r.order_id, customer, r.customer_email || r.customer_id || null,
+        r.customer_id || r.customer_email || null,
+        r.product || (itemsIn[0] && itemsIn[0].product_name) || null,
+        r.reason || null, r.reason_id || null, r.customer_notes || null,
+        computedAmount, r.status || 'pending',
+        r.refund_method || null,
+        r.refund_shipping ? 1 : 0, Number(r.shipping_refund) || 0, Number(r.discount_refund) || 0,
+        r.pickup_method || 'customer_ships', r.pickup_address || null, requestedAt,
+      );
+      const insItem = db.prepare(`
+        INSERT INTO return_items (id, return_id, order_item_idx, product_id, product_name,
+                                  product_image, sku, unit_price, quantity, refund_amount,
+                                  condition, restock_action)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+      `);
+      itemsIn.forEach((it, i) => {
+        const itemId = `ri_${Date.now().toString(36)}_${Math.random().toString(36).slice(2,5)}_${i}`;
+        const qty = Number(it.quantity) || 1;
+        insItem.run(
+          itemId, id,
+          it.order_item_idx === undefined ? null : Number(it.order_item_idx),
+          it.product_id || null, it.product_name || null, it.product_image || null, it.sku || null,
+          Number(it.unit_price) || 0, qty,
+          Number(it.refund_amount) || ((Number(it.unit_price) || 0) * qty),
+          'pending', 'pending',
+        );
+      });
+    })();
+    logReturnActivity({
+      return_id: id, event_type: 'submitted',
+      event_data: { amount: computedAmount, item_count: itemsIn.length, source: r.created_by_admin ? 'admin' : 'customer' },
+      actor_id: r.actor_id || r.customer_id || null, actor_name: r.actor_name || r.customer || null,
+    });
+    // Notify super admin via inbox so the new request shows up in the bell.
+    sendMessage({
+      from_user_id: r.actor_id || r.customer_id || null,
+      from_user_name: customer || 'العميل',
+      to_user_id: SUPER_ADMIN_FALLBACK,
+      type: 'request',
+      subject: `طلب إرجاع جديد ${retNum}`,
+      body: `${customer || 'عميل'} طلب إرجاع طلب #${r.order_id} بقيمة ${(Number(computedAmount)||0).toLocaleString()} ج`,
+      metadata: { kind: 'return_request', return_id: id, return_number: retNum, order_id: r.order_id, requires_action: false },
+    });
+    res.json({ ok: true, id, return_number: retNum, amount: computedAmount });
+  } catch (e) { console.error('POST /api/returns', e); res.status(500).json({ error: e.message }); }
 });
 
 app.patch('/api/returns/:id', (req, res) => {
   try {
     const r = req.body || {};
-    const cur = db.prepare('SELECT * FROM returns WHERE id = ?').get(req.params.id);
+    // Accept either internal id or RET-XXXX in the URL so the new admin
+    // page can patch using whichever it has.
+    const key = req.params.id;
+    const cur = (key.startsWith('RET-')
+      ? db.prepare('SELECT * FROM returns WHERE return_number = ?').get(key)
+      : db.prepare('SELECT * FROM returns WHERE id = ?').get(key));
     if (!cur) return res.status(404).json({ error: 'not found' });
 
     const sets = []; const vals = [];
-    ['status','admin_note','amount','reason'].forEach(k => {
-      if (Object.prototype.hasOwnProperty.call(r, k)) { sets.push(`${k} = ?`); vals.push(r[k]); }
+    ['status','admin_note','amount','reason','reason_id','customer_notes',
+     'refund_method','refund_reference','refund_shipping','shipping_refund',
+     'discount_refund','internal_notes','pickup_method','pickup_address',
+     'return_tracking','rejection_reason'].forEach(k => {
+      if (Object.prototype.hasOwnProperty.call(r, k)) {
+        if (k === 'refund_shipping') { sets.push('refund_shipping = ?'); vals.push(r[k] ? 1 : 0); }
+        else { sets.push(`${k} = ?`); vals.push(r[k]); }
+      }
     });
+    // Stamp review / process audit trail when the status transitions.
+    const newStatus = r.status;
+    const actor = r.actor_id || null;
+    const actorName = r.actor_name || null;
+    if (newStatus && newStatus !== cur.status) {
+      if ((newStatus === 'approved' || newStatus === 'rejected') && !cur.reviewed_at) {
+        sets.push("reviewed_at = datetime('now')"); sets.push('reviewed_by = ?'); vals.push(actor);
+      }
+      if (newStatus === 'refunded' && !cur.processed_at) {
+        sets.push("processed_at = datetime('now')"); sets.push('processed_by = ?'); vals.push(actor);
+      }
+    }
     // Inspection: 'good' returns units to stock_available; 'damaged' adds
     // to stock_damaged AND creates a "damaged" expense for the cost.
     let inspectionApplied = false;
@@ -2005,11 +2381,119 @@ app.patch('/api/returns/:id', (req, res) => {
 
     if (!sets.length) return res.json({ ok: true, noop: true });
     sets.push("updated_at = datetime('now')");
-    vals.push(req.params.id);
+    vals.push(cur.id);
     db.prepare(`UPDATE returns SET ${sets.join(', ')} WHERE id = ?`).run(...vals);
-    const fresh = db.prepare('SELECT * FROM returns WHERE id=?').get(req.params.id);
-    res.json({ ...fresh, inspectionApplied });
+
+    // Activity log for the meaningful transitions. Inspection event is
+    // logged above (inspectionApplied=true) — handled here for completeness.
+    if (newStatus && newStatus !== cur.status) {
+      logReturnActivity({
+        return_id: cur.id, event_type: newStatus,
+        event_data: { from: cur.status, to: newStatus, reason: r.rejection_reason || null, refund_method: r.refund_method || null },
+        actor_id: actor, actor_name: actorName,
+      });
+    }
+    if (inspectionApplied) {
+      logReturnActivity({
+        return_id: cur.id, event_type: 'inspected',
+        event_data: { inspection_status: r.inspection_status },
+        actor_id: actor, actor_name: actorName,
+      });
+    }
+
+    const fresh = db.prepare('SELECT * FROM returns WHERE id=?').get(cur.id);
+    res.json({ ...hydrateReturn(fresh), inspectionApplied });
   } catch (e) { console.error('PATCH /api/returns', e); res.status(500).json({ error: e.message }); }
+});
+
+// PATCH a single return_item — admin sets condition + restock decision
+// during inspection. Phase 1 stores the choice; the inventory-write side
+// effects ship in Phase 2 alongside the refund-as-expense integration.
+app.patch('/api/return-items/:id', (req, res) => {
+  try {
+    const r = req.body || {};
+    const cur = db.prepare('SELECT * FROM return_items WHERE id = ?').get(req.params.id);
+    if (!cur) return res.status(404).json({ error: 'not found' });
+    const sets = []; const vals = [];
+    ['condition','restock_action','refund_amount','quantity'].forEach(k => {
+      if (Object.prototype.hasOwnProperty.call(r, k)) { sets.push(`${k} = ?`); vals.push(r[k]); }
+    });
+    if (!sets.length) return res.json({ ok: true, noop: true });
+    vals.push(req.params.id);
+    db.prepare(`UPDATE return_items SET ${sets.join(', ')} WHERE id = ?`).run(...vals);
+    res.json(db.prepare('SELECT * FROM return_items WHERE id = ?').get(req.params.id));
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// Return reasons — CRUD used by both the admin filter dropdown and the
+// (Phase 2) customer-facing return form.
+app.get('/api/return-reasons', (req, res) => {
+  try {
+    const all = req.query.all === '1';
+    const sql = all
+      ? 'SELECT * FROM return_reasons ORDER BY sort_order, name_ar'
+      : 'SELECT * FROM return_reasons WHERE active = 1 ORDER BY sort_order, name_ar';
+    res.json(db.prepare(sql).all());
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+app.post('/api/return-reasons', (req, res) => {
+  try {
+    const r = req.body || {};
+    if (!r.name_ar) return res.status(400).json({ error: 'name_ar required' });
+    const id = r.id || `rr_${Date.now().toString(36)}_${Math.random().toString(36).slice(2,5)}`;
+    const maxOrder = db.prepare('SELECT COALESCE(MAX(sort_order),0) AS m FROM return_reasons').get().m;
+    db.prepare(`
+      INSERT INTO return_reasons (id, name_ar, name_en, active, sort_order, is_default)
+      VALUES (?, ?, ?, 1, ?, 0)
+    `).run(id, r.name_ar, r.name_en || null, (maxOrder || 0) + 1);
+    res.json(db.prepare('SELECT * FROM return_reasons WHERE id = ?').get(id));
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+app.patch('/api/return-reasons/:id', (req, res) => {
+  try {
+    const cur = db.prepare('SELECT * FROM return_reasons WHERE id = ?').get(req.params.id);
+    if (!cur) return res.status(404).json({ error: 'not found' });
+    const r = req.body || {};
+    const sets = []; const vals = [];
+    ['name_ar','name_en','active','sort_order'].forEach(k => {
+      if (Object.prototype.hasOwnProperty.call(r, k)) {
+        sets.push(`${k} = ?`); vals.push(typeof r[k] === 'boolean' ? (r[k] ? 1 : 0) : r[k]);
+      }
+    });
+    if (!sets.length) return res.json(cur);
+    vals.push(req.params.id);
+    db.prepare(`UPDATE return_reasons SET ${sets.join(', ')} WHERE id = ?`).run(...vals);
+    res.json(db.prepare('SELECT * FROM return_reasons WHERE id = ?').get(req.params.id));
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+app.delete('/api/return-reasons/:id', (req, res) => {
+  try {
+    const cur = db.prepare('SELECT * FROM return_reasons WHERE id = ?').get(req.params.id);
+    if (!cur) return res.status(404).json({ error: 'not found' });
+    if (cur.is_default) return res.status(400).json({ error: 'default reasons cannot be deleted — set active=0 instead' });
+    db.prepare('DELETE FROM return_reasons WHERE id = ?').run(req.params.id);
+    res.json({ ok: true });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// Append a note to internal_notes (Phase 1 stores plain newline-separated).
+app.post('/api/returns/:key/notes', (req, res) => {
+  try {
+    const k = req.params.key;
+    const cur = (k.startsWith('RET-')
+      ? db.prepare('SELECT * FROM returns WHERE return_number = ?').get(k)
+      : db.prepare('SELECT * FROM returns WHERE id = ?').get(k));
+    if (!cur) return res.status(404).json({ error: 'not found' });
+    const note = ((req.body && req.body.note) || '').trim();
+    const author = ((req.body && req.body.author) || 'admin');
+    if (!note) return res.status(400).json({ error: 'note required' });
+    const stamp = new Date().toISOString().slice(0, 16).replace('T', ' ');
+    const line = `[${stamp} · ${author}] ${note}`;
+    const merged = cur.internal_notes ? `${cur.internal_notes}\n${line}` : line;
+    db.prepare("UPDATE returns SET internal_notes = ?, updated_at = datetime('now') WHERE id = ?").run(merged, cur.id);
+    logReturnActivity({ return_id: cur.id, event_type: 'note_added', event_data: { note }, actor_name: author });
+    res.json({ ok: true, internal_notes: merged });
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 // ── SETTINGS (key/value JSON blobs) ───────────────────────────────────────────

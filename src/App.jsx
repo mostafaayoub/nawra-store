@@ -1856,16 +1856,85 @@ function AdminDash({ go }) {
   };
 
   // ── Returns ────────────────────────────────────────────────────────────────
+  // Phase 1: list page uses {rows,total,page,perPage} envelope from the new
+  // backend; we keep a flat array on the client + the total/page state next
+  // to it for pagination. Details subroute is keyed by RET-XXXX so deep
+  // links survive id rewrites.
   const [returns, setReturns] = useState([]);
+  const [retTotal, setRetTotal] = useState(0);
+  const [retPage, setRetPage] = useState(1);
+  const [retAggregates, setRetAggregates] = useState({ counts:{}, refunded_total:0, return_rate_pct:0, avg_processing_days:null, top_product:null, top_reason:null });
+  const [retReasons, setRetReasons] = useState([]);
   const [retTab, setRetTab] = useState("all"); // all | pending | approved | rejected | refunded
-  const refreshReturns = async () => {
-    try { const r = await fetch("/api/returns"); if (r.ok) setReturns(await r.json()); } catch {}
+  const [retFilters, setRetFilters] = useState({ q:"", from:"", to:"", reason_id:"all", refund_method:"all", sort:"date" });
+  const [retSelected, setRetSelected] = useState({}); // { [id]: true } for bulk actions
+  const [retDetail, setRetDetail] = useState(null);   // hydrated return detail OR null
+  const [retDetailKey, setRetDetailKey] = useState(null); // RET-XXXX in hash
+  const [retManualOpen, setRetManualOpen] = useState(false); // future Phase 2: manual create modal
+
+  const refreshReturns = useCallback(async () => {
+    try {
+      const qs = new URLSearchParams({
+        status: retTab,
+        q: retFilters.q || "",
+        from: retFilters.from || "",
+        to: retFilters.to || "",
+        reason_id: retFilters.reason_id !== "all" ? retFilters.reason_id : "",
+        refund_method: retFilters.refund_method !== "all" ? retFilters.refund_method : "",
+        sort: retFilters.sort,
+        page: String(retPage),
+        perPage: "25",
+      });
+      // Drop empty params so the backend doesn't AND them as ''
+      [...qs.keys()].forEach(k => { if (qs.get(k) === "") qs.delete(k); });
+      const r = await fetch(`/api/returns?${qs}`);
+      if (r.ok) {
+        const d = await r.json();
+        setReturns(Array.isArray(d.rows) ? d.rows : []);
+        setRetTotal(Number(d.total) || 0);
+      }
+    } catch {}
+  }, [retTab, retFilters, retPage]);
+  const refreshRetAggregates = useCallback(async () => {
+    try {
+      const r = await fetch("/api/returns/aggregates");
+      if (r.ok) setRetAggregates(await r.json());
+    } catch {}
+  }, []);
+  const refreshRetReasons = useCallback(async () => {
+    try { const r = await fetch("/api/return-reasons"); if (r.ok) setRetReasons(await r.json()); } catch {}
+  }, []);
+  useEffect(() => {
+    if (tab === "returns") { refreshReturns(); refreshRetAggregates(); refreshRetReasons(); }
+  }, [tab, refreshReturns, refreshRetAggregates, refreshRetReasons]);
+
+  const patchReturn = async (idOrNum, patch) => {
+    setReturns(prev => prev.map(x => (x.id === idOrNum || x.return_number === idOrNum) ? { ...x, ...patch } : x));
+    try {
+      const r = await fetch(`/api/returns/${encodeURIComponent(idOrNum)}`, {
+        method:"PATCH", headers:{"Content-Type":"application/json"},
+        body: JSON.stringify({ ...patch, actor_id: (authUser && authUser.email) || null, actor_name: (authUser && authUser.name) || null }),
+      });
+      if (r.ok) {
+        const fresh = await r.json();
+        // If we're on the details page for this row, swap in the hydrated version
+        setRetDetail(prev => (prev && (prev.id === idOrNum || prev.return_number === idOrNum)) ? fresh : prev);
+        refreshRetAggregates();
+        refreshReturns();
+      }
+    } catch {}
   };
-  useEffect(() => { if (tab === "returns") refreshReturns(); }, [tab]);
-  const patchReturn = async (id, patch) => {
-    setReturns(prev => prev.map(x => x.id === id ? { ...x, ...patch } : x));
-    try { await fetch(`/api/returns/${id}`, { method:"PATCH", headers:{"Content-Type":"application/json"}, body: JSON.stringify(patch) }); } catch {}
-  };
+
+  // Details fetch — used when the hash route puts us on #admin/returns/:retNum
+  const refreshRetDetail = useCallback(async (key) => {
+    if (!key) { setRetDetail(null); return; }
+    try {
+      const r = await fetch(`/api/returns/${encodeURIComponent(key)}`);
+      if (r.ok) setRetDetail(await r.json());
+      else setRetDetail(null);
+    } catch { setRetDetail(null); }
+  }, []);
+  useEffect(() => { refreshRetDetail(retDetailKey); }, [retDetailKey, refreshRetDetail]);
 
   // ── Settings (shipping / payment / seo) ────────────────────────────────────
   const DEFAULT_SHIPPING = {
@@ -2342,6 +2411,21 @@ function AdminDash({ go }) {
   }, [customerDetailEmail]);
   const goCustomer       = (email) => { window.location.hash = `#admin/customers/${encodeURIComponent(email)}`; };
   const goCustomersList  = ()      => { if (window.location.hash !== "#admin") window.location.hash = "#admin"; setTab("customers"); };
+
+  // Return detail subroute — #admin/returns/RET-0001
+  const retDetailHash = (() => {
+    if (typeof window === "undefined") return null;
+    const h = window.location.hash || "";
+    const m = h.match(/^#admin\/returns\/(.+)$/);
+    return m ? decodeURIComponent(m[1]) : null;
+  })();
+  useEffect(() => {
+    setRetDetailKey(retDetailHash);
+    if (retDetailHash && tab !== "returns") setTab("returns");
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [retDetailHash]);
+  const goReturn       = (retNum) => { window.location.hash = `#admin/returns/${encodeURIComponent(retNum)}`; };
+  const goReturnsList  = ()       => { if (window.location.hash !== "#admin") window.location.hash = "#admin"; setTab("returns"); };
   // Whenever the user lands on an order-detail URL, ensure the active tab is
   // "orders" (so leaving the detail returns to the right list, and the topbar
   // title is correct).
@@ -2727,7 +2811,7 @@ function AdminDash({ go }) {
 
   // ── Sidebar nav button ─────────────────────────────────────────────────────
   const NavBtn = ({ item }) => {
-    const active = tab === item.k && !detailOrderId && !productFormRoute && !customerDetailEmail;
+    const active = tab === item.k && !detailOrderId && !productFormRoute && !customerDetailEmail && !retDetailHash;
     return (
       <button onClick={()=>{
         // "إضافة منتج" is now a shortcut into the products subroute.
@@ -4742,98 +4826,277 @@ function AdminDash({ go }) {
           })()}
 
           {/* ─── RETURNS ─────────────────────────────────────────────────── */}
-          {tab === "returns" && (() => {
-            const total     = returns.length;
-            const pending   = returns.filter(r => r.status==="pending").length;
-            const refunded  = returns.filter(r => r.status==="refunded").length;
-            const refundedAmt = returns.filter(r => r.status==="refunded").reduce((s,r)=>s+(Number(r.amount)||0),0);
-            const returnRate = orderList.length ? Math.round((total/orderList.length)*100) : 0;
-
+          {/* Two rendering paths: detail page (when #admin/returns/RET-XXXX
+              is in the hash) OR the list with KPIs + filters + table. */}
+          {tab === "returns" && retDetailHash && (
+            <ReturnDetailsView
+              ret={retDetail}
+              retKey={retDetailHash}
+              ui={ui} mob={mob}
+              isSuper={isSuper}
+              authUser={authUser}
+              onBack={goReturnsList}
+              onPatch={patchReturn}
+              onReload={() => refreshRetDetail(retDetailHash)}
+            />
+          )}
+          {tab === "returns" && !retDetailHash && (() => {
+            const ag = retAggregates || {};
+            const counts = ag.counts || {};
             const statusBadge = (s) => {
-              if (s === "approved") return { bg:"#DBEAFE", fg:"#1D4ED8", l:"موافق" };
-              if (s === "rejected") return { bg:"#FEE2E2", fg:"#B91C1C", l:"مرفوض" };
-              if (s === "refunded") return { bg:"#DCFCE7", fg:"#15803D", l:"تم الاسترداد" };
+              if (s === "approved")  return { bg:"#DBEAFE", fg:"#1D4ED8", l:"موافق" };
+              if (s === "rejected")  return { bg:"#FEE2E2", fg:"#B91C1C", l:"مرفوض" };
+              if (s === "refunded")  return { bg:"#DCFCE7", fg:"#15803D", l:"تم الاسترداد" };
+              if (s === "exchange")  return { bg:"#F3E8FF", fg:"#6B21A8", l:"استبدال" };
+              if (s === "cancelled") return { bg:"#F3F4F6", fg:"#525252", l:"ملغي" };
               return { bg:"#FEF3C7", fg:"#92400E", l:"انتظار" };
             };
-            const retTabs = [["all","الكل"],["pending","انتظار"],["approved","موافق"],["rejected","مرفوض"],["refunded","تم الاسترداد"]];
-            const filtered = returns.filter(r => retTab === "all" ? true : r.status === retTab);
-
+            const retTabs = [
+              ["all",      "الكل",         counts.total    || 0],
+              ["pending",  "في الانتظار",   counts.pending  || 0],
+              ["approved", "موافق عليه",    counts.approved || 0],
+              ["rejected", "مرفوض",         counts.rejected || 0],
+              ["refunded", "تم الاسترداد",  counts.refunded || 0],
+            ];
+            const rmLabel = (m) => ({ cash:"كاش", transfer:"تحويل بنكي", wallet:"محفظة", store_credit:"رصيد متجر", exchange:"استبدال" })[m] || (m || "—");
+            const relativeDate = (iso) => {
+              if (!iso) return "—";
+              const t = new Date(String(iso).replace(" ","T") + "Z").getTime();
+              if (!t) return "—";
+              const days = Math.round((Date.now() - t) / 86400000);
+              if (days < 1) return "اليوم";
+              if (days === 1) return "أمس";
+              if (days < 7) return `منذ ${days} أيام`;
+              if (days < 30) return `منذ ${Math.round(days/7)} أسابيع`;
+              return new Date(t).toLocaleDateString("ar-EG");
+            };
+            const allChecked = returns.length > 0 && returns.every(r => retSelected[r.id]);
+            const someChecked = Object.values(retSelected).filter(Boolean).length > 0;
+            const selectedIds = Object.keys(retSelected).filter(k => retSelected[k]);
+            const exportCsv = () => {
+              const head = ["رقم المرتجع","رقم الطلب","العميل","المبلغ","الحالة","طريقة الاسترداد","السبب","تاريخ الطلب"];
+              const esc = (v) => { const s = v == null ? "" : String(v); return /[",\n]/.test(s) ? `"${s.replace(/"/g,'""')}"` : s; };
+              const rows = retSelected && someChecked ? returns.filter(r => retSelected[r.id]) : returns;
+              const lines = [head.join(",")];
+              rows.forEach(r => lines.push([
+                r.return_number, r.order_id, r.customer, (Number(r.amount)||0).toLocaleString(),
+                statusBadge(r.status).l, rmLabel(r.refund_method), r.reason || "—", r.requested_at || r.created_at || ""
+              ].map(esc).join(",")));
+              const blob = new Blob(["﻿" + lines.join("\n")], { type:"text/csv;charset=utf-8;" });
+              const url = URL.createObjectURL(blob);
+              const a = document.createElement("a"); a.href = url; a.download = `returns_${Date.now()}.csv`;
+              document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(url);
+            };
+            const totalPages = Math.max(1, Math.ceil(retTotal / 25));
             return (
               <div>
-                <div style={{display:"grid",gridTemplateColumns:mob?"1fr 1fr":"repeat(4,1fr)",gap:10,marginBottom:14}}>
-                  <Metric label="إجمالي المرتجعات" value={total} />
-                  <Metric label="في الانتظار"      value={pending} hint={pending ? "بحاجة لمراجعة" : "—"} />
-                  <Metric label="تم الاسترداد"     value={refundedAmt.toLocaleString()} suffix="ج" hint={refunded ? `${refunded} طلب` : "—"} />
-                  <Metric label="نسبة الإرجاع"     value={returnRate} suffix="%" />
+                {/* Top bar */}
+                <div style={{display:"flex",alignItems:"flex-start",justifyContent:"space-between",marginBottom:14,flexWrap:"wrap",gap:10}}>
+                  <div>
+                    <h2 style={{fontSize:18,fontWeight:600,color:ui.text,fontFamily:ui.fontBody,margin:0}}>المرتجعات</h2>
+                    <div style={{fontSize:12,color:ui.textSub,fontFamily:ui.fontBody,marginTop:2}}>إدارة طلبات الإرجاع والاسترداد</div>
+                  </div>
+                  <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
+                    <button onClick={exportCsv}
+                      style={{padding:"8px 14px",background:ui.cardBg,color:ui.text,border:ui.border,borderRadius:6,fontSize:12.5,cursor:"pointer",fontFamily:ui.fontBody}}>
+                      تصدير CSV
+                    </button>
+                    <button onClick={() => setRetManualOpen(true)}
+                      title="سيتم تفعيل النموذج اليدوي في المرحلة الثانية"
+                      style={{padding:"8px 14px",background:ui.text,color:"#fff",border:"none",borderRadius:6,fontSize:12.5,cursor:"pointer",fontFamily:ui.fontBody}}>
+                      + إنشاء مرتجع يدوي
+                    </button>
+                  </div>
                 </div>
 
-                {/* Status tabs */}
-                <div style={{background:ui.cardBg,border:ui.border,borderRadius:ui.radius,padding:"6px 6px",marginBottom:12,display:"flex",gap:4,overflowX:"auto"}}>
-                  {retTabs.map(([k,l])=>(
-                    <button key={k} onClick={()=>setRetTab(k)}
+                {/* KPI cards (5) */}
+                <div style={{display:"grid",gridTemplateColumns:mob?"1fr 1fr":"repeat(5,1fr)",gap:10,marginBottom:10}}>
+                  <Metric label="إجمالي المرتجعات" value={counts.total || 0} />
+                  <Metric label="في الانتظار"      value={counts.pending || 0}
+                          hint={(counts.pending || 0) > 0 ? "بحاجة لمراجعة" : "—"} />
+                  <Metric label="تم الاسترداد"     value={(ag.refunded_total || 0).toLocaleString()} suffix="ج"
+                          hint={(counts.refunded || 0) ? `${counts.refunded} طلب` : "—"} />
+                  <Metric label="نسبة الإرجاع"     value={ag.return_rate_pct ?? 0} suffix="%" />
+                  <Metric label="متوسط مدة المعالجة"
+                          value={ag.avg_processing_days == null ? "—" : ag.avg_processing_days} suffix={ag.avg_processing_days == null ? "" : " يوم"} />
+                </div>
+
+                {/* Insight cards (2) */}
+                <div style={{display:"grid",gridTemplateColumns:mob?"1fr":"1fr 1fr",gap:10,marginBottom:14}}>
+                  <div style={{background:ui.cardBg,border:ui.border,borderRadius:ui.radius,padding:"12px 14px"}}>
+                    <div style={{fontSize:11,color:ui.textSub,fontFamily:ui.fontBody,marginBottom:6}}>أعلى منتج مُرجع</div>
+                    {ag.top_product ? (
+                      <>
+                        <div style={{fontSize:14,color:ui.text,fontFamily:ui.fontBody,fontWeight:600}}>{ag.top_product.name}</div>
+                        <div style={{fontSize:11.5,color:ui.textSub,fontFamily:ui.fontBody,marginTop:3}}>
+                          {ag.top_product.return_count} إرجاع
+                          {ag.top_product.return_pct != null ? ` · ${ag.top_product.return_pct}% من مبيعاته` : ""}
+                        </div>
+                      </>
+                    ) : <div style={{fontSize:12.5,color:ui.textSub,fontFamily:ui.fontBody}}>لا توجد بيانات كافية بعد</div>}
+                  </div>
+                  <div style={{background:ui.cardBg,border:ui.border,borderRadius:ui.radius,padding:"12px 14px"}}>
+                    <div style={{fontSize:11,color:ui.textSub,fontFamily:ui.fontBody,marginBottom:6}}>أعلى سبب إرجاع</div>
+                    {ag.top_reason ? (
+                      <>
+                        <div style={{fontSize:14,color:ui.text,fontFamily:ui.fontBody,fontWeight:600}}>{ag.top_reason.label}</div>
+                        <div style={{fontSize:11.5,color:ui.textSub,fontFamily:ui.fontBody,marginTop:3}}>{ag.top_reason.count} طلب · {ag.top_reason.pct}% من الإجمالي</div>
+                      </>
+                    ) : <div style={{fontSize:12.5,color:ui.textSub,fontFamily:ui.fontBody}}>لا توجد بيانات كافية بعد</div>}
+                  </div>
+                </div>
+
+                {/* Tabs with counters */}
+                <div style={{background:ui.cardBg,border:ui.border,borderRadius:ui.radius,padding:"6px 6px",marginBottom:10,display:"flex",gap:4,overflowX:"auto"}}>
+                  {retTabs.map(([k,l,n])=>(
+                    <button key={k} onClick={()=>{ setRetTab(k); setRetPage(1); setRetSelected({}); }}
                       style={{padding:"7px 14px",border:"none",cursor:"pointer",borderRadius:6,
                         background: retTab===k ? ui.text : "transparent",
                         color: retTab===k ? "#fff" : ui.textSub,
-                        fontSize:12, fontFamily:ui.fontBody, whiteSpace:"nowrap"}}>{l}</button>
+                        fontSize:12, fontFamily:ui.fontBody, whiteSpace:"nowrap"}}>
+                      {l} ({n})
+                    </button>
                   ))}
                 </div>
 
-                {total===0 ? (
-                  <Placeholder icon="refresh" title="لا توجد مرتجعات" body="هتبان طلبات الإرجاع هنا أول ما يحصل أول طلب استرداد." />
-                ) : filtered.length === 0 ? (
-                  <div style={{background:ui.cardBg,border:ui.border,borderRadius:ui.radius,padding:"40px",textAlign:"center",color:ui.textSub,fontFamily:ui.fontBody,fontSize:13}}>لا توجد طلبات في هذه الفئة</div>
+                {/* Filter bar */}
+                <div style={{display:"flex",gap:8,flexWrap:"wrap",marginBottom:10}}>
+                  <input value={retFilters.q} onChange={e=>{setRetFilters({...retFilters,q:e.target.value}); setRetPage(1);}}
+                    placeholder="بحث برقم المرتجع/الطلب/العميل"
+                    style={{padding:"8px 11px",border:ui.border,borderRadius:6,background:ui.cardBg,fontFamily:ui.fontBody,fontSize:12.5,color:ui.text,outline:"none",direction:"rtl",minWidth:220,flex:1}}/>
+                  <input type="date" value={retFilters.from} onChange={e=>{setRetFilters({...retFilters,from:e.target.value}); setRetPage(1);}}
+                    title="من تاريخ"
+                    style={{padding:"8px 11px",border:ui.border,borderRadius:6,background:ui.cardBg,fontFamily:ui.fontBody,fontSize:12.5,color:ui.text,outline:"none"}}/>
+                  <input type="date" value={retFilters.to} onChange={e=>{setRetFilters({...retFilters,to:e.target.value}); setRetPage(1);}}
+                    title="إلى تاريخ"
+                    style={{padding:"8px 11px",border:ui.border,borderRadius:6,background:ui.cardBg,fontFamily:ui.fontBody,fontSize:12.5,color:ui.text,outline:"none"}}/>
+                  <select value={retFilters.reason_id} onChange={e=>{setRetFilters({...retFilters,reason_id:e.target.value}); setRetPage(1);}}
+                    style={{padding:"8px 11px",border:ui.border,borderRadius:6,background:ui.cardBg,fontFamily:ui.fontBody,fontSize:12.5,color:ui.text,outline:"none"}}>
+                    <option value="all">كل الأسباب</option>
+                    {(retReasons || []).map(r => <option key={r.id} value={r.id}>{r.name_ar}</option>)}
+                  </select>
+                  <select value={retFilters.refund_method} onChange={e=>{setRetFilters({...retFilters,refund_method:e.target.value}); setRetPage(1);}}
+                    style={{padding:"8px 11px",border:ui.border,borderRadius:6,background:ui.cardBg,fontFamily:ui.fontBody,fontSize:12.5,color:ui.text,outline:"none"}}>
+                    <option value="all">كل طرق الاسترداد</option>
+                    <option value="cash">كاش</option>
+                    <option value="transfer">تحويل بنكي</option>
+                    <option value="wallet">محفظة</option>
+                    <option value="store_credit">رصيد متجر</option>
+                    <option value="exchange">استبدال</option>
+                  </select>
+                  <select value={retFilters.sort} onChange={e=>setRetFilters({...retFilters,sort:e.target.value})}
+                    style={{padding:"8px 11px",border:ui.border,borderRadius:6,background:ui.cardBg,fontFamily:ui.fontBody,fontSize:12.5,color:ui.text,outline:"none"}}>
+                    <option value="date">الأحدث</option>
+                    <option value="oldest">الأقدم</option>
+                    <option value="amount_desc">الأعلى قيمة</option>
+                    <option value="amount_asc">الأقل قيمة</option>
+                  </select>
+                </div>
+
+                {/* Bulk actions */}
+                {someChecked && (
+                  <div style={{background:"#FFFBEA",border:"1px solid #FDE68A",borderRadius:6,padding:"8px 12px",marginBottom:8,display:"flex",alignItems:"center",gap:10,flexWrap:"wrap"}}>
+                    <span style={{fontSize:12.5,color:"#92400E",fontFamily:ui.fontBody}}>{selectedIds.length} مرتجع محدد</span>
+                    <button onClick={exportCsv}
+                      style={{padding:"5px 11px",background:"#fff",border:"0.5px solid #FDE68A",borderRadius:5,fontSize:11.5,cursor:"pointer",color:"#92400E",fontFamily:ui.fontBody}}>تصدير المحدد</button>
+                    {isSuper && (
+                      <>
+                        <button onClick={() => { selectedIds.forEach(id => patchReturn(id, { status:"approved" })); setRetSelected({}); }}
+                          style={{padding:"5px 11px",background:"#DCFCE7",border:"0.5px solid #86EFAC",borderRadius:5,fontSize:11.5,cursor:"pointer",color:"#15803D",fontFamily:ui.fontBody}}>موافقة جماعية</button>
+                        <button onClick={() => { const r = window.prompt("سبب الرفض الجماعي:"); if (r) { selectedIds.forEach(id => patchReturn(id, { status:"rejected", rejection_reason: r })); setRetSelected({}); } }}
+                          style={{padding:"5px 11px",background:"#FEE2E2",border:"0.5px solid #FCA5A5",borderRadius:5,fontSize:11.5,cursor:"pointer",color:"#B91C1C",fontFamily:ui.fontBody}}>رفض جماعي</button>
+                      </>
+                    )}
+                  </div>
+                )}
+
+                {/* Result count */}
+                <div style={{fontSize:12.5,color:ui.textSub,fontFamily:ui.fontBody,marginBottom:8}}>
+                  {retTotal === 0 ? "لا توجد نتائج" : `${returns.length} من ${retTotal} مرتجع`}
+                </div>
+
+                {/* Table or empty state */}
+                {(counts.total || 0) === 0 ? (
+                  <div style={{background:ui.cardBg,border:ui.border,borderRadius:ui.radius,padding:"56px 20px",textAlign:"center"}}>
+                    <div style={{fontSize:42,marginBottom:10}}>📦</div>
+                    <div style={{fontSize:15,color:ui.text,fontFamily:ui.fontBody,fontWeight:600,marginBottom:6}}>لا توجد مرتجعات حالياً</div>
+                    <div style={{fontSize:12.5,color:ui.textSub,fontFamily:ui.fontBody,maxWidth:380,margin:"0 auto"}}>
+                      ستظهر هنا كل طلبات الإرجاع من العملاء لمراجعتها والموافقة عليها.
+                    </div>
+                  </div>
+                ) : returns.length === 0 ? (
+                  <div style={{background:ui.cardBg,border:ui.border,borderRadius:ui.radius,padding:"40px",textAlign:"center",color:ui.textSub,fontFamily:ui.fontBody,fontSize:13}}>
+                    لا توجد نتائج تطابق الفلاتر — جرّب توسيع المعايير
+                  </div>
                 ) : (
                   <div style={{background:ui.cardBg,border:ui.border,borderRadius:ui.radius,overflow:"hidden",overflowX:"auto"}}>
-                    <table style={{width:"100%",borderCollapse:"collapse",direction:"rtl",fontFamily:ui.fontBody,minWidth:820}}>
+                    <table style={{width:"100%",borderCollapse:"collapse",direction:"rtl",fontFamily:ui.fontBody,minWidth:1100}}>
                       <thead>
                         <tr style={{background:ui.sideBg,borderBottom:`0.5px solid #E5E5E5`}}>
-                          {["رقم الطلب","العميل","المنتج","السبب","المبلغ","الحالة","التاريخ","إجراء"].map(h=>(
-                            <th key={h} style={{padding:"11px 14px",textAlign:"right",fontSize:11.5,color:ui.textSub,fontWeight:500,whiteSpace:"nowrap"}}>{h}</th>
+                          <th style={{padding:"11px 10px",textAlign:"right",width:34}}>
+                            <input type="checkbox" checked={allChecked}
+                              onChange={e => {
+                                if (e.target.checked) { const next = {}; returns.forEach(r => { next[r.id] = true; }); setRetSelected(next); }
+                                else setRetSelected({});
+                              }}/>
+                          </th>
+                          {["رقم المرتجع","رقم الطلب","العميل","المنتجات","السبب","المبلغ","تاريخ الطلب","الحالة","الإجراءات"].map(h => (
+                            <th key={h} style={{padding:"11px 12px",textAlign:"right",fontSize:11.5,color:ui.textSub,fontWeight:500,whiteSpace:"nowrap"}}>{h}</th>
                           ))}
                         </tr>
                       </thead>
                       <tbody>
-                        {filtered.map(r => {
+                        {returns.map(r => {
                           const b = statusBadge(r.status);
+                          const prev = Array.isArray(r.items_preview) ? r.items_preview : [];
                           return (
                             <tr key={r.id} style={{borderTop:"0.5px solid #EEE"}}>
-                              <td style={{padding:"11px 14px",fontSize:12,color:ui.text,fontFamily:"monospace"}}>#{r.order_id}</td>
-                              <td style={{padding:"11px 14px",fontSize:13,color:ui.text,fontFamily:ui.fontBody}}>{r.customer}</td>
-                              <td style={{padding:"11px 14px",fontSize:12.5,color:ui.text,fontFamily:ui.fontBody}}>{r.product||"—"}</td>
-                              <td style={{padding:"11px 14px",fontSize:12,color:ui.textSub,fontFamily:ui.fontBody,maxWidth:220,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{r.reason||"—"}</td>
-                              <td style={{padding:"11px 14px",fontSize:13,color:ui.text,fontWeight:500,fontFamily:ui.fontBody,whiteSpace:"nowrap"}}>{(Number(r.amount)||0).toLocaleString()} ج</td>
-                              <td style={{padding:"11px 14px"}}><span style={{fontSize:10.5,padding:"3px 10px",borderRadius:20,background:b.bg,color:b.fg,fontFamily:ui.fontBody,whiteSpace:"nowrap"}}>{b.l}</span></td>
-                              <td style={{padding:"11px 14px",fontSize:11.5,color:ui.textSub,fontFamily:ui.fontBody,whiteSpace:"nowrap"}}>
-                                {r.created_at ? new Date(r.created_at.replace(" ","T")+"Z").toLocaleDateString("ar-EG") : "—"}
+                              <td style={{padding:"9px 10px"}}>
+                                <input type="checkbox" checked={!!retSelected[r.id]}
+                                  onChange={e => setRetSelected(prev2 => ({ ...prev2, [r.id]: e.target.checked }))}/>
                               </td>
-                              <td style={{padding:"11px 14px"}}>
-                                {r.status === "pending" && (
-                                  <div style={{display:"flex",gap:5}}>
-                                    <button onClick={()=>patchReturn(r.id, { status:"approved" })}
-                                      style={{background:"#DCFCE7",border:"0.5px solid #86EFAC",padding:"4px 9px",cursor:"pointer",fontSize:11,fontFamily:ui.fontBody,color:"#15803D",borderRadius:4}}>موافقة</button>
-                                    <button onClick={()=>patchReturn(r.id, { status:"rejected" })}
-                                      style={{background:"#FEE2E2",border:"0.5px solid #FCA5A5",padding:"4px 9px",cursor:"pointer",fontSize:11,fontFamily:ui.fontBody,color:"#B91C1C",borderRadius:4}}>رفض</button>
+                              <td style={{padding:"9px 12px",fontSize:11.5,color:ui.textSub,fontFamily:"monospace"}}>{r.return_number || "—"}</td>
+                              <td style={{padding:"9px 12px",fontSize:12,fontFamily:"monospace"}}>
+                                {r.order_id ? (
+                                  <a href={`#admin/orders/${encodeURIComponent(r.order_id)}`} style={{color:"#1D4ED8",textDecoration:"none"}}>#{r.order_id}</a>
+                                ) : "—"}
+                              </td>
+                              <td style={{padding:"9px 12px",fontSize:13,color:ui.text,fontFamily:ui.fontBody}}>
+                                {r.customer || "—"}
+                                {r.customer_email && <div style={{fontSize:11,color:ui.textSub,fontFamily:"monospace"}}>{r.customer_email}</div>}
+                              </td>
+                              <td style={{padding:"9px 12px"}}>
+                                {prev.length === 0 ? (
+                                  <span style={{fontSize:12,color:ui.textSub,fontFamily:ui.fontBody}}>{r.product || "—"}</span>
+                                ) : (
+                                  <div style={{display:"flex",gap:4,alignItems:"center"}}>
+                                    {prev.slice(0,2).map((it, i) => (
+                                      <span key={i} title={it.product_name}
+                                        style={{width:28,height:28,borderRadius:4,background:"#F3F4F6",overflow:"hidden",display:"inline-block",border:"0.5px solid #E5E5E5"}}>
+                                        {it.product_image && <img src={it.product_image} alt="" style={{width:"100%",height:"100%",objectFit:"cover"}}/>}
+                                      </span>
+                                    ))}
+                                    {prev.length > 2 && <span style={{fontSize:11,color:ui.textSub,fontFamily:ui.fontBody}}>+{prev.length - 2}</span>}
                                   </div>
                                 )}
-                                {r.status === "approved" && r.inspection_status !== "good" && r.inspection_status !== "damaged" && (
-                                  <div style={{display:"flex",gap:5}}>
-                                    <button title="القطعة سليمة — ترجع للمخزون"
-                                      onClick={()=>patchReturn(r.id, { inspection_status:"good" })}
-                                      style={{background:"#DCFCE7",border:"0.5px solid #86EFAC",padding:"4px 9px",cursor:"pointer",fontSize:11,fontFamily:ui.fontBody,color:"#15803D",borderRadius:4}}>صالح</button>
-                                    <button title="القطعة معيبة — تروح للهالك وتتسجل تكلفتها"
-                                      onClick={()=>patchReturn(r.id, { inspection_status:"damaged" })}
-                                      style={{background:"#FEE2E2",border:"0.5px solid #FCA5A5",padding:"4px 9px",cursor:"pointer",fontSize:11,fontFamily:ui.fontBody,color:"#B91C1C",borderRadius:4}}>معيب</button>
-                                  </div>
-                                )}
-                                {r.status === "approved" && (r.inspection_status === "good" || r.inspection_status === "damaged") && (
-                                  <button onClick={()=>patchReturn(r.id, { status:"refunded" })}
-                                    style={{background:ui.text,color:"#fff",border:"none",padding:"4px 11px",cursor:"pointer",fontSize:11,fontFamily:ui.fontBody,borderRadius:4}}>تمت الإعادة</button>
-                                )}
-                                {(r.status==="rejected"||r.status==="refunded") && (
-                                  <span style={{fontSize:11,color:ui.textSub,fontFamily:ui.fontBody}}>
-                                    {r.inspection_status === "good" ? "سليم ✓" : r.inspection_status === "damaged" ? "هالك" : "—"}
-                                  </span>
-                                )}
+                              </td>
+                              <td style={{padding:"9px 12px",fontSize:12,color:ui.textSub,fontFamily:ui.fontBody,maxWidth:200,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}} title={r.reason || ""}>
+                                {r.reason || "—"}
+                              </td>
+                              <td style={{padding:"9px 12px",fontSize:13,color:ui.text,fontWeight:500,fontFamily:ui.fontBody,whiteSpace:"nowrap"}}>
+                                {(Number(r.amount)||0).toLocaleString()} ج
+                              </td>
+                              <td style={{padding:"9px 12px",fontSize:11.5,color:ui.textSub,fontFamily:ui.fontBody,whiteSpace:"nowrap"}}>
+                                {relativeDate(r.requested_at || r.created_at)}
+                              </td>
+                              <td style={{padding:"9px 12px"}}>
+                                <span style={{fontSize:10.5,padding:"3px 10px",borderRadius:20,background:b.bg,color:b.fg,fontFamily:ui.fontBody,whiteSpace:"nowrap"}}>{b.l}</span>
+                              </td>
+                              <td style={{padding:"9px 12px",textAlign:"left",whiteSpace:"nowrap"}}>
+                                <button title="عرض التفاصيل" onClick={() => goReturn(r.return_number || r.id)}
+                                  style={{background:"transparent",border:"none",cursor:"pointer",padding:4,color:"#1D4ED8",fontSize:14}}>
+                                  👁
+                                </button>
                               </td>
                             </tr>
                           );
@@ -4842,9 +5105,39 @@ function AdminDash({ go }) {
                     </table>
                   </div>
                 )}
+
+                {/* Pagination */}
+                {totalPages > 1 && (
+                  <div style={{display:"flex",justifyContent:"center",alignItems:"center",gap:8,marginTop:12,fontFamily:ui.fontBody,fontSize:12.5}}>
+                    <button disabled={retPage <= 1} onClick={() => setRetPage(retPage - 1)}
+                      style={{padding:"5px 11px",border:ui.border,background:ui.cardBg,borderRadius:5,cursor:retPage <= 1 ? "not-allowed" : "pointer",opacity:retPage <= 1 ? 0.5 : 1,color:ui.text}}>السابق</button>
+                    <span style={{color:ui.textSub}}>{retPage} / {totalPages}</span>
+                    <button disabled={retPage >= totalPages} onClick={() => setRetPage(retPage + 1)}
+                      style={{padding:"5px 11px",border:ui.border,background:ui.cardBg,borderRadius:5,cursor:retPage >= totalPages ? "not-allowed" : "pointer",opacity:retPage >= totalPages ? 0.5 : 1,color:ui.text}}>التالي</button>
+                  </div>
+                )}
+
+                {/* Manual-create placeholder modal (Phase 2 wires the form) */}
+                {retManualOpen && (
+                  <div onClick={() => setRetManualOpen(false)}
+                    style={{position:"fixed",inset:0,background:"rgba(0,0,0,.55)",zIndex:700,display:"flex",alignItems:"center",justifyContent:"center",padding:16,direction:"rtl"}}>
+                    <div onClick={ev => ev.stopPropagation()}
+                      style={{background:ui.cardBg,maxWidth:440,width:"100%",padding:22,borderRadius:8}}>
+                      <h3 style={{fontSize:15,fontWeight:600,color:ui.text,fontFamily:ui.fontBody,margin:"0 0 8px"}}>إنشاء مرتجع يدوي</h3>
+                      <p style={{fontSize:12.5,color:ui.textSub,fontFamily:ui.fontBody,marginBottom:14}}>
+                        النموذج الكامل (اختيار الطلب + اختيار المنتجات + السبب + الصور) سيتم تفعيله في المرحلة الثانية مع نموذج العميل في الواجهة.
+                      </p>
+                      <div style={{textAlign:"left"}}>
+                        <button onClick={() => setRetManualOpen(false)}
+                          style={{padding:"7px 14px",background:ui.text,color:"#fff",border:"none",borderRadius:6,fontSize:12.5,cursor:"pointer",fontFamily:ui.fontBody}}>حسناً</button>
+                      </div>
+                    </div>
+                  </div>
+                )}
               </div>
             );
           })()}
+
 
           {/* ─── EXPENSES ────────────────────────────────────────────────── */}
           {tab === "expenses" && (() => {
@@ -9630,6 +9923,495 @@ function ProductForm({
 // product thumbnails, price breakdown, customer notes, activity timeline,
 // action buttons (WhatsApp, email invoice, PDF, print, copy), sticky bottom
 // status bar, and a separate Cancel button with confirmation modal.
+// ─── ReturnDetailsView — module-scope so input focus is preserved on every keystroke ───
+// Renders the full return-details page (2-col layout) for a single hydrated
+// `ret` object from /api/returns/:returnNumber. The parent owns the data
+// (refresh + patch); this component is presentational + dispatches via
+// onPatch / onReload / onBack. Phase 1 wires status transitions, condition
+// + restock dropdowns, refund method selector, internal notes, and the
+// activity timeline. Phase 2 will add: printable slip (window.print), email
+// the customer, WhatsApp deep link, store credit, finance/inventory writes.
+function ReturnDetailsView({ ret, retKey, ui, mob, isSuper, authUser, onBack, onPatch, onReload }) {
+  const [rejectOpen, setRejectOpen]   = useState(false);
+  const [rejectNote, setRejectNote]   = useState("");
+  const [noteDraft,  setNoteDraft]    = useState("");
+  const [noteBusy,   setNoteBusy]     = useState(false);
+
+  if (!ret) {
+    return (
+      <div style={{padding:"40px",textAlign:"center",color:ui.textSub,fontFamily:ui.fontBody}}>
+        <button onClick={onBack} style={{background:"transparent",border:"none",color:"#1D4ED8",cursor:"pointer",fontFamily:ui.fontBody,fontSize:13,marginBottom:14}}>← العودة للمرتجعات</button>
+        <div style={{fontSize:14}}>جاري تحميل مرتجع {retKey}...</div>
+      </div>
+    );
+  }
+
+  const badge = (s) => {
+    if (s === "approved")  return { bg:"#DBEAFE", fg:"#1D4ED8", l:"موافق" };
+    if (s === "rejected")  return { bg:"#FEE2E2", fg:"#B91C1C", l:"مرفوض" };
+    if (s === "refunded")  return { bg:"#DCFCE7", fg:"#15803D", l:"تم الاسترداد" };
+    if (s === "cancelled") return { bg:"#F3F4F6", fg:"#525252", l:"ملغي" };
+    return { bg:"#FEF3C7", fg:"#92400E", l:"في الانتظار" };
+  };
+  const b = badge(ret.status);
+  // Per condition → suggested restock decision (admin can override)
+  const suggestRestock = (c) => ({ good:"restock_available", partial_damage:"move_to_damaged", full_damage:"write_off" })[c] || "pending";
+
+  const card = { background:ui.cardBg, border:ui.border, borderRadius:ui.radius, padding:"14px 16px", marginBottom:12 };
+  const cardTitle = { fontSize:13, fontWeight:600, color:ui.text, fontFamily:ui.fontBody, marginBottom:10, paddingBottom:8, borderBottom:"0.5px solid #EEE" };
+
+  // Status stepper — 4 ordered steps; current step is the row's status, all
+  // earlier steps are 'done', later are 'todo'. Rejected jumps to its own slot.
+  const baseSteps = [
+    { k:"pending",  l:"طلب الإرجاع", at: ret.requested_at || ret.created_at },
+    { k:"approved", l:"موافقة",      at: ret.reviewed_at && (ret.status === "approved" || ret.status === "refunded") ? ret.reviewed_at : null, by: ret.reviewed_by },
+    { k:"inspected",l:"قيد الفحص",   at: ret.inspected_at, by: ret.reviewed_by },
+    { k:"refunded", l:"تم الاسترداد", at: ret.processed_at, by: ret.processed_by },
+  ];
+  const isRejected = ret.status === "rejected";
+  const stepIdx = isRejected ? 1 : ({ pending:0, approved:1, refunded:3 }[ret.status] ?? 0);
+
+  // Order context — return-window calc (default 14 days; configurable in Phase 2 Settings)
+  const RETURN_WINDOW_DAYS = 14;
+  let windowInfo = null;
+  if (ret.order && ret.order.created_at) {
+    const orderTs = new Date(ret.order.created_at.replace(" ","T") + "Z").getTime();
+    const sinceDays = Math.floor((Date.now() - orderTs) / 86400000);
+    const remainingDays = RETURN_WINDOW_DAYS - sinceDays;
+    windowInfo = { sinceDays, remainingDays };
+  }
+
+  // Refund breakdown
+  const itemsRefund = (ret.items || []).reduce((s, it) => s + (Number(it.refund_amount) || 0), 0);
+  const shippingRefund = Number(ret.shipping_refund) || 0;
+  const discountRefund = Number(ret.discount_refund) || 0;
+  const totalRefund    = Number(ret.amount) || (itemsRefund + (ret.refund_shipping ? shippingRefund : 0) - discountRefund);
+
+  const submitNote = async () => {
+    if (noteDraft.trim().length < 2) return;
+    setNoteBusy(true);
+    try {
+      await fetch(`/api/returns/${encodeURIComponent(ret.id)}/notes`, {
+        method:"POST", headers:{"Content-Type":"application/json"},
+        body: JSON.stringify({ note: noteDraft.trim(), author: (authUser && authUser.name) || (authUser && authUser.email) || "admin" }),
+      });
+      setNoteDraft(""); onReload();
+    } catch {} finally { setNoteBusy(false); }
+  };
+
+  const updateItem = async (itemId, patch) => {
+    try {
+      await fetch(`/api/return-items/${itemId}`, {
+        method:"PATCH", headers:{"Content-Type":"application/json"}, body: JSON.stringify(patch),
+      });
+      onReload();
+    } catch {}
+  };
+
+  // Build the right-sidebar action buttons based on current status.
+  const ActionButtons = () => {
+    if (ret.status === "pending") {
+      return (
+        <>
+          <button onClick={() => onPatch(ret.id, { status:"approved" })}
+            style={{padding:"10px 14px",background:"#15803D",color:"#fff",border:"none",borderRadius:6,fontSize:13,cursor:"pointer",fontFamily:ui.fontBody,width:"100%",marginBottom:8}}>
+            ✓ موافقة على الإرجاع
+          </button>
+          <button onClick={() => setRejectOpen(true)}
+            style={{padding:"10px 14px",background:"transparent",color:"#B91C1C",border:"1px solid #FCA5A5",borderRadius:6,fontSize:13,cursor:"pointer",fontFamily:ui.fontBody,width:"100%",marginBottom:8}}>
+            ✗ رفض الإرجاع
+          </button>
+          <button disabled title="سيتم تفعيل المراسلة في المرحلة الثانية"
+            style={{padding:"10px 14px",background:"transparent",color:ui.textSub,border:ui.border,borderRadius:6,fontSize:13,cursor:"not-allowed",fontFamily:ui.fontBody,width:"100%",opacity:0.7}}>
+            📸 طلب صور إضافية
+          </button>
+        </>
+      );
+    }
+    if (ret.status === "approved") {
+      const canRefund = (ret.refund_method || "").length > 0;
+      return (
+        <>
+          <button onClick={() => {
+              if (!canRefund) { window.alert("اختر طريقة الاسترداد من بطاقة \"تفاصيل الاسترداد\" أولاً"); return; }
+              const ref = window.prompt("رقم العملية أو المرجع البنكي (اختياري):") || "";
+              onPatch(ret.id, { status:"refunded", refund_reference: ref || null });
+            }}
+            style={{padding:"10px 14px",background:"#15803D",color:"#fff",border:"none",borderRadius:6,fontSize:13,cursor:"pointer",fontFamily:ui.fontBody,width:"100%",marginBottom:8}}>
+            💰 تنفيذ الاسترداد
+          </button>
+          {isSuper && (
+            <button onClick={() => onPatch(ret.id, { status:"pending", reviewed_at: null, reviewed_by: null })}
+              style={{padding:"10px 14px",background:"transparent",color:"#B91C1C",border:"1px solid #FCA5A5",borderRadius:6,fontSize:13,cursor:"pointer",fontFamily:ui.fontBody,width:"100%"}}>
+              إلغاء الموافقة
+            </button>
+          )}
+        </>
+      );
+    }
+    if (ret.status === "refunded") {
+      return (
+        <>
+          <div style={{padding:"10px 12px",background:"#F0FDF4",border:"0.5px solid #86EFAC",borderRadius:6,fontSize:12.5,color:"#15803D",fontFamily:ui.fontBody,marginBottom:8}}>
+            ✓ تم الاسترداد بنجاح
+            {ret.refund_reference && <div style={{fontSize:11,marginTop:4,fontFamily:"monospace",color:"#166534"}}>المرجع: {ret.refund_reference}</div>}
+          </div>
+          <button disabled title="سيتم تفعيل إرسال الإيصال في المرحلة الثانية"
+            style={{padding:"10px 14px",background:"transparent",color:ui.textSub,border:ui.border,borderRadius:6,fontSize:13,cursor:"not-allowed",fontFamily:ui.fontBody,width:"100%",opacity:0.7}}>
+            📧 إرسال إيصال الاسترداد
+          </button>
+        </>
+      );
+    }
+    if (ret.status === "rejected") {
+      return (
+        <div style={{padding:"10px 12px",background:"#FEF2F2",border:"0.5px solid #FCA5A5",borderRadius:6,fontSize:12.5,color:"#B91C1C",fontFamily:ui.fontBody}}>
+          تم رفض هذا المرتجع
+          {ret.rejection_reason && <div style={{fontSize:11.5,marginTop:6,color:"#7F1D1D"}}>السبب: {ret.rejection_reason}</div>}
+        </div>
+      );
+    }
+    return null;
+  };
+
+  return (
+    <div>
+      {/* Top bar */}
+      <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:14,flexWrap:"wrap",gap:10}}>
+        <div style={{display:"flex",alignItems:"center",gap:12,flexWrap:"wrap"}}>
+          <button onClick={onBack}
+            style={{background:"transparent",border:"none",color:"#1D4ED8",cursor:"pointer",fontFamily:ui.fontBody,fontSize:13}}>← العودة للمرتجعات</button>
+          <h2 style={{fontSize:18,fontWeight:600,color:ui.text,fontFamily:ui.fontBody,margin:0,display:"flex",alignItems:"center",gap:10}}>
+            مرتجع {ret.return_number}
+            <span style={{fontSize:11,padding:"3px 10px",borderRadius:20,background:b.bg,color:b.fg,fontFamily:ui.fontBody}}>{b.l}</span>
+          </h2>
+        </div>
+        <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
+          <button disabled title="سيتم تفعيل طباعة البوليصة في المرحلة الثانية"
+            style={{padding:"7px 12px",background:ui.cardBg,color:ui.textSub,border:ui.border,borderRadius:6,fontSize:12,cursor:"not-allowed",fontFamily:ui.fontBody,opacity:0.7}}>
+            🖨️ طباعة بوليصة الإرجاع
+          </button>
+          {ret.customer && ret.customer.phone && (
+            <a href={`https://wa.me/2${(ret.customer.phone || "").replace(/[^\d]/g,"")}`} target="_blank" rel="noreferrer"
+              style={{padding:"7px 12px",background:"#25D366",color:"#fff",border:"none",borderRadius:6,fontSize:12,textDecoration:"none",fontFamily:ui.fontBody}}>
+              📞 واتساب
+            </a>
+          )}
+        </div>
+      </div>
+
+      {/* Two-column layout — collapses to one column on mobile */}
+      <div style={{display:"grid",gridTemplateColumns:mob?"1fr":"2fr 1fr",gap:12,alignItems:"start"}}>
+        {/* ═════════ LEFT COLUMN ═════════ */}
+        <div>
+          {/* CARD 1 — Status timeline */}
+          <div style={card}>
+            <div style={cardTitle}>مسار الطلب</div>
+            <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",direction:"rtl",gap:6,flexWrap:"wrap"}}>
+              {(isRejected
+                ? [baseSteps[0], { k:"rejected", l:"مرفوض", at: ret.reviewed_at, by: ret.reviewed_by }]
+                : baseSteps
+              ).map((step, i, arr) => {
+                const done = isRejected ? step.k === "rejected" || step.k === "pending" : i <= stepIdx;
+                const current = !isRejected && i === stepIdx;
+                const bgCircle = isRejected && step.k === "rejected" ? "#DC2626" : done ? "#16A34A" : "#E5E7EB";
+                return (
+                  <React.Fragment key={step.k}>
+                    <div style={{flex:1,minWidth:90,display:"flex",flexDirection:"column",alignItems:"center",gap:4}}>
+                      <div style={{width:28,height:28,borderRadius:"50%",background:bgCircle,display:"flex",alignItems:"center",justifyContent:"center",color:"#fff",fontSize:13,fontWeight:600,boxShadow: current ? "0 0 0 4px rgba(22,163,74,.2)" : "none"}}>
+                        {done ? (isRejected && step.k === "rejected" ? "✗" : "✓") : (i+1)}
+                      </div>
+                      <div style={{fontSize:11.5,color: done ? ui.text : ui.textSub,fontFamily:ui.fontBody,textAlign:"center"}}>{step.l}</div>
+                      {step.at && (
+                        <div style={{fontSize:10,color:ui.textSub,fontFamily:ui.fontBody,textAlign:"center",lineHeight:1.4}}>
+                          {String(step.at).slice(5,16).replace(" ", " · ")}
+                          {step.by && <div style={{fontSize:9.5}}>{step.by}</div>}
+                        </div>
+                      )}
+                    </div>
+                    {i < arr.length - 1 && <div style={{flex:1,height:2,background: i < stepIdx ? "#16A34A" : "#E5E7EB",alignSelf:"flex-start",marginTop:14}}/>}
+                  </React.Fragment>
+                );
+              })}
+            </div>
+          </div>
+
+          {/* CARD 2 — Original order */}
+          <div style={card}>
+            <div style={cardTitle}>الطلب الأصلي</div>
+            {ret.order ? (
+              <div style={{display:"grid",gridTemplateColumns:mob?"1fr":"1fr 1fr",gap:10,fontFamily:ui.fontBody,fontSize:12.5,color:ui.text}}>
+                <div>رقم الطلب: <a href={`#admin/orders/${encodeURIComponent(ret.order.id)}`} style={{color:"#1D4ED8",textDecoration:"none",fontFamily:"monospace"}}>#{ret.order.order_number || ret.order.id}</a></div>
+                <div>التاريخ: {ret.order.date || (ret.order.created_at && String(ret.order.created_at).slice(0,10)) || "—"}</div>
+                <div>إجمالي الطلب: <b>{(Number(ret.order.total)||0).toLocaleString()} ج</b></div>
+                <div>الحالة الحالية للطلب: {ret.order.status || "—"}</div>
+                {windowInfo && (
+                  <div style={{gridColumn:mob?"1":"1 / -1",marginTop:6}}>
+                    {windowInfo.remainingDays >= 0 ? (
+                      <span style={{color:ui.textSub,fontSize:12}}>
+                        تم التسليم منذ {windowInfo.sinceDays} يوم (متبقي {windowInfo.remainingDays} يوم لانتهاء مدة الإرجاع)
+                      </span>
+                    ) : (
+                      <span style={{color:"#B91C1C",fontSize:12,fontWeight:500}}>
+                        ⚠ انتهت مدة الإرجاع المسموح بها (بعد {Math.abs(windowInfo.remainingDays)} يوم من المهلة)
+                      </span>
+                    )}
+                  </div>
+                )}
+              </div>
+            ) : (
+              <div style={{fontSize:12.5,color:ui.textSub,fontFamily:ui.fontBody}}>لا يوجد سجل للطلب الأصلي</div>
+            )}
+          </div>
+
+          {/* CARD 3 — Returned products */}
+          <div style={card}>
+            <div style={cardTitle}>المنتجات المُرجعة ({(ret.items || []).length || (ret.product ? 1 : 0)})</div>
+            {(ret.items || []).length === 0 ? (
+              <div style={{fontSize:12.5,color:ui.textSub,fontFamily:ui.fontBody}}>
+                {ret.product
+                  ? <>منتج واحد (إدخال قديم): <b>{ret.product}</b> · المبلغ {(Number(ret.amount)||0).toLocaleString()} ج</>
+                  : "لا توجد منتجات مرتبطة"}
+              </div>
+            ) : (
+              <div style={{display:"flex",flexDirection:"column",gap:10}}>
+                {ret.items.map(it => (
+                  <div key={it.id} style={{display:"grid",gridTemplateColumns:mob?"1fr":"56px 1fr auto",gap:10,padding:"10px",border:"0.5px solid #EEE",borderRadius:6,alignItems:"center"}}>
+                    <div style={{width:56,height:56,background:"#F3F4F6",borderRadius:5,overflow:"hidden",display:"flex",alignItems:"center",justifyContent:"center"}}>
+                      {it.product_image ? <img src={it.product_image} alt="" style={{width:"100%",height:"100%",objectFit:"cover"}}/> : <span style={{fontSize:22}}>📦</span>}
+                    </div>
+                    <div>
+                      <div style={{fontSize:13,color:ui.text,fontFamily:ui.fontBody,fontWeight:500}}>{it.product_name || "—"}</div>
+                      {it.sku && <div style={{fontSize:11,color:ui.textSub,fontFamily:"monospace"}}>SKU: {it.sku}</div>}
+                      <div style={{fontSize:11.5,color:ui.textSub,fontFamily:ui.fontBody,marginTop:3}}>
+                        السعر: {(Number(it.unit_price)||0).toLocaleString()} ج · الكمية المُرجعة: {it.quantity} · القيمة: {(Number(it.refund_amount)||0).toLocaleString()} ج
+                      </div>
+                    </div>
+                    <div style={{display:"flex",flexDirection:"column",gap:5,minWidth:160}}>
+                      <select value={it.condition || "pending"}
+                        disabled={ret.status === "refunded" || ret.status === "rejected"}
+                        onChange={e => { const c = e.target.value; updateItem(it.id, { condition: c, restock_action: suggestRestock(c) }); }}
+                        style={{padding:"5px 8px",border:ui.border,borderRadius:5,fontSize:11.5,fontFamily:ui.fontBody,direction:"rtl"}}>
+                        <option value="pending">بانتظار الفحص</option>
+                        <option value="good">سليم</option>
+                        <option value="partial_damage">تالف جزئياً</option>
+                        <option value="full_damage">تالف كلياً</option>
+                      </select>
+                      <select value={it.restock_action || "pending"}
+                        disabled={ret.status === "refunded" || ret.status === "rejected"}
+                        onChange={e => updateItem(it.id, { restock_action: e.target.value })}
+                        style={{padding:"5px 8px",border:ui.border,borderRadius:5,fontSize:11.5,fontFamily:ui.fontBody,direction:"rtl"}}>
+                        <option value="pending">قرار المخزون</option>
+                        <option value="restock_available">إعادة للمخزون المتاح</option>
+                        <option value="move_to_damaged">نقل لمخزون التالف</option>
+                        <option value="write_off">إتلاف</option>
+                      </select>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+            <div style={{fontSize:11,color:ui.textSub,fontFamily:ui.fontBody,marginTop:8,fontStyle:"italic"}}>
+              ⚙ تطبيق قرار المخزون فعلياً على الكمية المتاحة/التالفة سيتم في المرحلة الثانية مع تكامل المالية.
+            </div>
+          </div>
+
+          {/* CARD 4 — Customer reason & notes */}
+          <div style={card}>
+            <div style={cardTitle}>سبب الإرجاع وملاحظات العميل</div>
+            <div style={{fontSize:12.5,color:ui.text,fontFamily:ui.fontBody,marginBottom:6}}>
+              السبب: <b>{ret.reason_label || ret.reason || "—"}</b>
+            </div>
+            {ret.customer_notes && (
+              <div style={{padding:"8px 11px",background:"#F9FAFB",border:"0.5px solid #EEE",borderRadius:5,fontSize:12.5,color:ui.text,fontFamily:ui.fontBody,marginBottom:8,whiteSpace:"pre-wrap"}}>{ret.customer_notes}</div>
+            )}
+            {(ret.attachments || []).length > 0 && (
+              <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
+                {ret.attachments.map(a => (
+                  <a key={a.id} href={a.file_path} target="_blank" rel="noreferrer"
+                    style={{width:60,height:60,background:"#F3F4F6",borderRadius:5,overflow:"hidden",border:"0.5px solid #E5E5E5"}}>
+                    <img src={a.file_path} alt="" style={{width:"100%",height:"100%",objectFit:"cover"}}/>
+                  </a>
+                ))}
+              </div>
+            )}
+          </div>
+
+          {/* CARD 5 — Refund breakdown */}
+          <div style={card}>
+            <div style={cardTitle}>تفاصيل الاسترداد المالي</div>
+            <div style={{display:"flex",flexDirection:"column",gap:7,fontFamily:ui.fontBody,fontSize:12.5,color:ui.text}}>
+              <div style={{display:"flex",justifyContent:"space-between"}}>
+                <span>قيمة المنتجات المُرجعة</span><span>{itemsRefund.toLocaleString()} ج</span>
+              </div>
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                <span style={{display:"flex",alignItems:"center",gap:6}}>
+                  تكلفة الشحن
+                  <label style={{display:"flex",alignItems:"center",gap:4,fontSize:11,color:ui.textSub,cursor: ret.status === "pending" || ret.status === "approved" ? "pointer" : "default"}}>
+                    <input type="checkbox" checked={!!ret.refund_shipping}
+                      disabled={ret.status === "refunded" || ret.status === "rejected"}
+                      onChange={e => onPatch(ret.id, { refund_shipping: e.target.checked })}/>
+                    استرداد
+                  </label>
+                </span>
+                <span>{ret.refund_shipping ? `${shippingRefund.toLocaleString()} ج` : "—"}</span>
+              </div>
+              {discountRefund > 0 && (
+                <div style={{display:"flex",justifyContent:"space-between"}}>
+                  <span>الخصم المسترد (كوبون نسبي)</span><span>−{discountRefund.toLocaleString()} ج</span>
+                </div>
+              )}
+              <div style={{display:"flex",justifyContent:"space-between",paddingTop:8,borderTop:"1px dashed #E5E5E5",fontWeight:600,fontSize:14}}>
+                <span>الإجمالي المسترد</span><span>{(Number(totalRefund) || 0).toLocaleString()} ج</span>
+              </div>
+            </div>
+            <div style={{marginTop:12}}>
+              <label style={{display:"block",fontSize:11.5,color:ui.textSub,fontFamily:ui.fontBody,marginBottom:5}}>طريقة الاسترداد</label>
+              <select value={ret.refund_method || ""}
+                disabled={ret.status === "refunded" || ret.status === "rejected"}
+                onChange={e => onPatch(ret.id, { refund_method: e.target.value })}
+                style={{padding:"7px 10px",border:ui.border,borderRadius:6,background:ui.cardBg,fontFamily:ui.fontBody,fontSize:12.5,color:ui.text,outline:"none",direction:"rtl",minWidth:240}}>
+                <option value="">— اختر طريقة —</option>
+                <option value="cash">كاش (عند استلام المرتجع)</option>
+                <option value="transfer">تحويل بنكي</option>
+                <option value="wallet">محفظة إلكترونية</option>
+                <option value="store_credit">رصيد للمتجر (+5% مكافأة في المرحلة الثانية)</option>
+                <option value="exchange">استبدال بمنتج آخر (بدون استرداد)</option>
+              </select>
+            </div>
+          </div>
+
+          {/* CARD 6 — Activity log */}
+          <div style={card}>
+            <div style={cardTitle}>سجل النشاط</div>
+            {(ret.activity || []).length === 0 ? (
+              <div style={{fontSize:12.5,color:ui.textSub,fontFamily:ui.fontBody}}>لا يوجد نشاط مُسجل بعد</div>
+            ) : (
+              <div style={{display:"flex",flexDirection:"column",gap:8}}>
+                {ret.activity.map(a => (
+                  <div key={a.id} style={{display:"flex",gap:10,fontSize:12.5,fontFamily:ui.fontBody,color:ui.text,paddingBottom:8,borderBottom:"0.5px dashed #EEE"}}>
+                    <div style={{width:24,height:24,borderRadius:"50%",background: a.event_type === "rejected" ? "#FEE2E2" : a.event_type === "approved" || a.event_type === "refunded" ? "#DCFCE7" : "#F3F4F6",display:"flex",alignItems:"center",justifyContent:"center",fontSize:12,flexShrink:0}}>
+                      {a.event_type === "submitted" ? "📥" : a.event_type === "approved" ? "✓" : a.event_type === "rejected" ? "✗" : a.event_type === "refunded" ? "💰" : a.event_type === "inspected" ? "🔍" : a.event_type === "note_added" ? "📝" : "•"}
+                    </div>
+                    <div style={{flex:1,minWidth:0}}>
+                      <div>{a.event_type === "submitted" ? "تم تقديم طلب الإرجاع" : a.event_type === "approved" ? "تمت الموافقة على الإرجاع" : a.event_type === "rejected" ? `تم رفض الإرجاع${a.event_data && a.event_data.reason ? ` — ${a.event_data.reason}` : ""}` : a.event_type === "refunded" ? "تم تنفيذ الاسترداد" : a.event_type === "inspected" ? "تم فحص المنتجات" : a.event_type === "note_added" ? "تمت إضافة ملاحظة داخلية" : a.event_type}</div>
+                      <div style={{fontSize:10.5,color:ui.textSub}}>
+                        {a.actor_name || a.actor_id || "النظام"} · {a.created_at && String(a.created_at).slice(0,16).replace(" ", " · ")}
+                      </div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+
+          {/* CARD 7 — Internal notes */}
+          <div style={card}>
+            <div style={cardTitle}>ملاحظات داخلية</div>
+            {ret.internal_notes && (
+              <div style={{padding:"8px 11px",background:"#FFFBEB",border:"0.5px solid #FDE68A",borderRadius:5,fontSize:12,color:"#92400E",fontFamily:ui.fontBody,marginBottom:8,whiteSpace:"pre-wrap"}}>{ret.internal_notes}</div>
+            )}
+            <textarea rows={2} value={noteDraft} onChange={e => setNoteDraft(e.target.value)}
+              placeholder="أضف ملاحظة داخلية (لن تظهر للعميل)"
+              style={{width:"100%",padding:"8px 11px",border:ui.border,borderRadius:6,fontFamily:ui.fontBody,fontSize:12.5,color:ui.text,outline:"none",direction:"rtl",resize:"vertical",boxSizing:"border-box"}}/>
+            <div style={{textAlign:"left",marginTop:6}}>
+              <button onClick={submitNote} disabled={noteBusy || noteDraft.trim().length < 2}
+                style={{padding:"6px 14px",background: (noteBusy || noteDraft.trim().length < 2) ? "#9CA3AF" : ui.text,color:"#fff",border:"none",borderRadius:5,fontSize:12,cursor:(noteBusy || noteDraft.trim().length < 2) ? "not-allowed" : "pointer",fontFamily:ui.fontBody}}>
+                {noteBusy ? "..." : "إضافة"}
+              </button>
+            </div>
+          </div>
+        </div>
+
+        {/* ═════════ RIGHT SIDEBAR ═════════ */}
+        <div>
+          {/* CARD A — Customer */}
+          <div style={card}>
+            <div style={cardTitle}>معلومات العميل</div>
+            {ret.customer ? (
+              <>
+                <div style={{fontSize:14,color:ui.text,fontFamily:ui.fontBody,fontWeight:600,marginBottom:3}}>{ret.customer.name || "—"}</div>
+                <div style={{fontSize:11.5,color:ui.textSub,fontFamily:"monospace",marginBottom:3}}>{ret.customer.email}</div>
+                {ret.customer.phone && <div style={{fontSize:11.5,color:ui.textSub,fontFamily:"monospace",marginBottom:8}}>📱 {ret.customer.phone}</div>}
+                <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:6,fontFamily:ui.fontBody,fontSize:11.5,color:ui.textSub,marginTop:8,paddingTop:8,borderTop:"0.5px dashed #EEE"}}>
+                  <div>طلبات سابقة: <b style={{color:ui.text}}>{ret.customer.totalOrders || 0}</b></div>
+                  <div>مرتجعات سابقة: <b style={{color: (ret.customer.total_returns || 0) >= 3 ? "#B91C1C" : ui.text}}>{ret.customer.total_returns || 0}</b></div>
+                </div>
+                <a href={`#admin/customers/${encodeURIComponent(ret.customer.email)}`}
+                  style={{display:"inline-block",marginTop:10,fontSize:11.5,color:"#1D4ED8",textDecoration:"none",fontFamily:ui.fontBody}}>
+                  عرض ملف العميل الكامل ←
+                </a>
+              </>
+            ) : (
+              <div style={{fontSize:12.5,color:ui.textSub,fontFamily:ui.fontBody}}>
+                {ret.customer_email || ret.customer || "—"}
+              </div>
+            )}
+          </div>
+
+          {/* CARD B — Status-driven action buttons */}
+          <div style={{...card,position:"sticky",top:14}}>
+            <div style={cardTitle}>إجراءات</div>
+            <ActionButtons />
+          </div>
+
+          {/* CARD C — Return shipping info */}
+          <div style={card}>
+            <div style={cardTitle}>معلومات الشحن المرتجع</div>
+            <div style={{fontSize:12,color:ui.textSub,fontFamily:ui.fontBody,marginBottom:8}}>كيف يصلنا المنتج المُرجع؟</div>
+            <select value={ret.pickup_method || "customer_ships"}
+              disabled={ret.status === "refunded" || ret.status === "rejected"}
+              onChange={e => onPatch(ret.id, { pickup_method: e.target.value })}
+              style={{width:"100%",padding:"7px 10px",border:ui.border,borderRadius:6,background:ui.cardBg,fontFamily:ui.fontBody,fontSize:12.5,color:ui.text,outline:"none",direction:"rtl",marginBottom:8}}>
+              <option value="customer_ships">العميل يُرسل بنفسه</option>
+              <option value="home_pickup">استلام من المنزل</option>
+            </select>
+            {ret.pickup_method === "home_pickup" && (
+              <input value={ret.pickup_address || ""}
+                onChange={e => onPatch(ret.id, { pickup_address: e.target.value })}
+                placeholder="عنوان الاستلام"
+                style={{width:"100%",padding:"7px 10px",border:ui.border,borderRadius:6,background:ui.cardBg,fontFamily:ui.fontBody,fontSize:12,color:ui.text,outline:"none",direction:"rtl",boxSizing:"border-box",marginBottom:8}}/>
+            )}
+            {ret.pickup_method !== "home_pickup" && (
+              <input value={ret.return_tracking || ""}
+                onChange={e => onPatch(ret.id, { return_tracking: e.target.value })}
+                placeholder="رقم تتبع الشحنة المرتجعة"
+                style={{width:"100%",padding:"7px 10px",border:ui.border,borderRadius:6,background:ui.cardBg,fontFamily:ui.fontBody,fontSize:12,color:ui.text,outline:"none",direction:"ltr",textAlign:"left",boxSizing:"border-box"}}/>
+            )}
+          </div>
+        </div>
+      </div>
+
+      {/* Reject modal */}
+      {rejectOpen && (
+        <div onClick={() => setRejectOpen(false)}
+          style={{position:"fixed",inset:0,background:"rgba(0,0,0,.55)",zIndex:700,display:"flex",alignItems:"center",justifyContent:"center",padding:16,direction:"rtl"}}>
+          <div onClick={e => e.stopPropagation()}
+            style={{background:ui.cardBg,maxWidth:440,width:"100%",padding:22,borderRadius:8}}>
+            <h3 style={{fontSize:15,fontWeight:600,color:ui.text,fontFamily:ui.fontBody,margin:"0 0 4px"}}>رفض الإرجاع</h3>
+            <div style={{fontSize:12.5,color:ui.textSub,fontFamily:ui.fontBody,marginBottom:14}}>{ret.return_number}</div>
+            <label style={{display:"block",fontSize:12,color:ui.text,marginBottom:5,fontFamily:ui.fontBody,fontWeight:500}}>
+              سبب الرفض (سيظهر للعميل)
+            </label>
+            <textarea rows={3} autoFocus value={rejectNote} onChange={e => setRejectNote(e.target.value)}
+              placeholder="مثال: المنتج تم استخدامه — يتعذّر إرجاعه"
+              style={{padding:"8px 12px",border:"1px solid #FCA5A5",borderRadius:6,background:"#FEF2F2",fontFamily:ui.fontBody,fontSize:13,color:ui.text,outline:"none",width:"100%",direction:"rtl",resize:"vertical",minHeight:80,boxSizing:"border-box"}}/>
+            <div style={{display:"flex",gap:8,justifyContent:"flex-end",marginTop:12}}>
+              <button onClick={() => setRejectOpen(false)}
+                style={{padding:"8px 16px",background:"transparent",border:ui.border,borderRadius:6,fontSize:12.5,color:ui.textSub,fontFamily:ui.fontBody,cursor:"pointer"}}>إلغاء</button>
+              <button disabled={rejectNote.trim().length < 3}
+                onClick={() => { onPatch(ret.id, { status:"rejected", rejection_reason: rejectNote.trim() }); setRejectOpen(false); setRejectNote(""); }}
+                style={{padding:"8px 18px",background: rejectNote.trim().length >= 3 ? "#DC2626" : "#9CA3AF",color:"#fff",border:"none",borderRadius:6,fontSize:12.5,fontFamily:ui.fontBody,cursor: rejectNote.trim().length >= 3 ? "pointer" : "not-allowed"}}>
+                إرسال الرفض
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function OrderDetailPage({
   order, orderId, onBack, onStatusChange, canManage,
   thumbForItem, payLabel, payStyle, badgeStyle, ui, mob, refreshOrders,
