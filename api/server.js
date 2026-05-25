@@ -730,6 +730,69 @@ if (mailer) {
   console.warn('[nawra-api] ! GMAIL_USER / GMAIL_PASS not set — email disabled');
 }
 
+// ── Email safety guard ──────────────────────────────────────────────────────
+// Hard, non-bypassable guard against smoke tests reaching production SMTP.
+// Originated from a real incident: a Phase-2 smoke run sent ~10 emails to
+// `__NAWRA_TEST__-...@nawra-test.local` which Gmail bounced back into the
+// admin inbox. EVERY mailer.sendMail() call in this codebase now goes
+// through safeSendMail() — there are no exceptions.
+//
+// Layer 1 (always on): block any recipient that LOOKS like a test address.
+//   patterns: contains __TEST__, __NAWRA_TEST__, __SMOKE__ (case-insensitive)
+//             ends with @nawra-test.local, @test.local, @example.com,
+//             @example.org, @example.net
+// Layer 2 (strict mode, default): also require the recipient to be either the
+//   admin/sender, OR an email that already exists in the users table.
+//   Override with EMAIL_SAFETY_MODE=permissive to disable layer 2 (useful for
+//   staging where you legitimately email never-before-seen prospects).
+//
+// Blocked emails are LOGGED with subject + reason so we keep an audit trail
+// — they're not silently dropped.
+const EMAIL_SAFETY_MODE = (process.env.EMAIL_SAFETY_MODE || 'strict').toLowerCase();
+const TEST_EMAIL_DOMAINS = new Set(['nawra-test.local','test.local','example.com','example.org','example.net','invalid','localhost']);
+const TEST_EMAIL_MARKERS = ['__test__','__nawra_test__','__smoke__'];
+function isTestRecipient(to) {
+  const s = String(to || '').toLowerCase().trim();
+  if (!s) return true; // empty == nothing to send to
+  if (TEST_EMAIL_MARKERS.some(m => s.includes(m))) return true;
+  const dom = s.split('@')[1] || '';
+  if (TEST_EMAIL_DOMAINS.has(dom)) return true;
+  return false;
+}
+async function safeSendMail(options) {
+  // Always returns an info-shaped object so callers can do `info.messageId`
+  // without null-checking. When blocked, messageId is null and `skipped`
+  // explains why.
+  if (!mailer) {
+    console.log('[nawra-api] ✋ mail-skip: transport disabled (GMAIL_USER/PASS missing)');
+    return { messageId: null, skipped: 'no_mailer' };
+  }
+  const to = options && options.to;
+  // Layer 1 — universal test-address block (cannot be disabled).
+  if (isTestRecipient(to)) {
+    console.log(`[nawra-api] ✋ mail-block: test recipient | to=${to} subject="${(options && options.subject || '').slice(0,80)}"`);
+    return { messageId: null, skipped: 'test_recipient', to };
+  }
+  // Layer 2 — strict mode: recipient must be admin OR a known customer.
+  if (EMAIL_SAFETY_MODE === 'strict') {
+    const t = String(to).toLowerCase().trim();
+    const admin = (SUPER_ADMIN_FALLBACK || '').toLowerCase();
+    const sender = (gmailUser || '').toLowerCase();
+    let allowed = t === admin || t === sender;
+    if (!allowed) {
+      try {
+        const row = db.prepare('SELECT 1 AS x FROM users WHERE LOWER(email) = ?').get(t);
+        allowed = !!row;
+      } catch {}
+    }
+    if (!allowed) {
+      console.log(`[nawra-api] ✋ mail-block: strict mode, unknown recipient | to=${to} subject="${(options && options.subject || '').slice(0,80)}"`);
+      return { messageId: null, skipped: 'strict_unknown_recipient', to };
+    }
+  }
+  return mailer.sendMail(options);
+}
+
 function orderEmailHtml(order) {
   const items = (order.items || []).map(i => `
     <tr style="border-top:1px solid rgba(201,169,110,.12);">
@@ -849,13 +912,13 @@ async function sendOrderEmail(order) {
     return;
   }
   try {
-    const info = await mailer.sendMail({
+    const info = await safeSendMail({
       from: `"نوّرَة Skincare" <${gmailUser}>`,
       to:   order.userEmail,
       subject: `✅ تم استلام طلبك من نوّرَة #${order.order_number || order.id}`,
       html: orderEmailHtml(order)
     });
-    console.log('[nawra-api] ✓ confirmation email sent to', order.userEmail, '|', info.messageId);
+    if (!info.skipped) console.log('[nawra-api] ✓ confirmation email sent to', order.userEmail, '|', info.messageId);
   } catch (err) {
     console.error('[nawra-api] ✗ email send failed for', order.userEmail, ':', err.message);
   }
@@ -956,13 +1019,13 @@ async function sendReturnEmail(kind, returnId, extras = {}) {
       extra = `تم إضافة <b>${extras.store_credit.credit.toLocaleString()} ج</b> إلى رصيدك (${extras.store_credit.base.toLocaleString()} ج + ${extras.store_credit.bonus_pct}% مكافأة).`;
     }
     const html = returnEmailHtml({ kind, returnRow: row, items, totalRefund: row.amount, intro: intros[kind], extra });
-    const info = await mailer.sendMail({
+    const info = await safeSendMail({
       from: `"نوّرَة Skincare" <${gmailUser}>`,
       to: toEmail,
       subject: subjects[kind] || `تحديث طلب الإرجاع ${row.return_number}`,
       html,
     });
-    console.log(`[nawra-api] ✓ return email (${kind}) → ${toEmail} | ${info.messageId}`);
+    if (!info.skipped) console.log(`[nawra-api] ✓ return email (${kind}) → ${toEmail} | ${info.messageId}`);
   } catch (err) {
     console.error('[nawra-api] ✗ return email failed:', err.message);
   }
@@ -1287,12 +1350,16 @@ app.post('/api/orders/:id/email-invoice', async (req, res) => {
     const to = req.body && req.body.to ? String(req.body.to) : order.userEmail;
     if (!to) return res.status(400).json({ error: 'no recipient email available for this order' });
     if (!mailer) return res.status(503).json({ error: 'email transport not configured' });
-    const info = await mailer.sendMail({
+    const info = await safeSendMail({
       from: `"\u0646\u0648\u0651\u0631\u064e\u0629 Skincare" <${gmailUser}>`,
       to,
       subject: `\ud83e\uddfe \u0641\u0627\u062a\u0648\u0631\u0629 \u0637\u0644\u0628\u0643 \u0645\u0646 \u0646\u0648\u0651\u0631\u064e\u0629 #${order.order_number || order.id}`,
       html: orderEmailHtml(order),
     });
+    if (info.skipped) {
+      // Bail loudly so the admin UI shows the blocked-test feedback instead of pretending it sent.
+      return res.status(409).json({ ok: false, blocked: info.skipped, to });
+    }
     console.log('[nawra-api] \u2713 invoice email sent to', to, '|', info.messageId);
     res.json({ ok: true, to, messageId: info.messageId });
   } catch (e) {
@@ -1628,10 +1695,14 @@ app.post('/api/users/:email/email', async (req, res) => {
     };
     const sub = renderTemplate(subject, ctx);
     const html = `<div dir="rtl" style="font-family:Tahoma,Arial,sans-serif;font-size:14px;line-height:1.8;color:#111;">${renderTemplate(body, ctx).replace(/\n/g, '<br/>')}</div>`;
-    const info = await mailer.sendMail({
+    const info = await safeSendMail({
       from: `"نوّرَة Skincare" <${gmailUser}>`,
       to: email, subject: sub, html,
     });
+    if (info.skipped) {
+      // Don't pretend it sent — return 409 so the admin UI can flag it.
+      return res.status(409).json({ ok: false, blocked: info.skipped, to: email });
+    }
     logCustomerActivity(email, 'email_sent', { subject: sub, messageId: info.messageId }, actor_id, actor_name);
     res.json({ ok: true, messageId: info.messageId });
   } catch (e) { console.error('POST /api/users/:email/email error:', e); res.status(500).json({ error: e.message }); }
@@ -1655,7 +1726,11 @@ app.post('/api/users/bulk-email', async (req, res) => {
         const sub = renderTemplate(subject, ctx);
         const html = `<div dir="rtl" style="font-family:Tahoma,Arial,sans-serif;font-size:14px;line-height:1.8;color:#111;">${renderTemplate(body, ctx).replace(/\n/g, '<br/>')}</div>`;
         // eslint-disable-next-line no-await-in-loop
-        const info = await mailer.sendMail({ from: `"نوّرَة Skincare" <${gmailUser}>`, to: email, subject: sub, html });
+        const info = await safeSendMail({ from: `"نوّرَة Skincare" <${gmailUser}>`, to: email, subject: sub, html });
+        if (info.skipped) {
+          failed.push({ email, error: `blocked: ${info.skipped}` });
+          continue;
+        }
         sent.push({ email, messageId: info.messageId });
         logCustomerActivity(email, 'email_sent', { subject: sub, bulk: true, messageId: info.messageId }, actor_id, actor_name);
       } catch (e) { failed.push({ email, error: e.message }); }
