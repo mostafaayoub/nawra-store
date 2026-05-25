@@ -290,6 +290,23 @@ ensureColumn('orders',    'subtotal',           'REAL');                     // 
 ensureColumn('orders',    'shipping_cost',      'REAL');                     // shipping fee charged
 ensureColumn('orders',    'discount_amount',    'REAL');                     // coupon savings
 ensureColumn('orders',    'coupon_code',        'TEXT');                     // applied coupon, if any
+ensureColumn('orders',    'payment_settled_at', 'DATETIME');                  // when cash actually arrived: COD auto-fills on delivery; online fills on gateway confirmation (Phase 1 fills on delivery + manual PATCH to paid)
+// Backfill payment_settled_at for already-paid orders so historical Cash In
+// aggregates are not zero. Best proxy for when the cash actually arrived:
+// updated_at on the row (the moment status was last touched, typically the
+// مكتمل transition). Falls back to created_at when updated_at is missing.
+(() => {
+  try {
+    // `orders` has no updated_at column; created_at is the best available
+    // proxy for legacy paid rows. Future paid-transitions stamp the actual
+    // settlement time via the PATCH handler.
+    const info = db.prepare(`
+      UPDATE orders SET payment_settled_at = created_at
+      WHERE payment_status = 'paid' AND payment_settled_at IS NULL
+    `).run();
+    if (info.changes > 0) console.log(`[nawra-api] backfilled payment_settled_at for ${info.changes} historically-paid orders`);
+  } catch (e) { console.warn('[nawra-api] payment_settled_at backfill skipped:', e.message); }
+})();
 
 // Backfill order_number for any legacy orders missing one (one-shot, sequential
 // over created_at). Safe to run on every boot — only touches rows with NULL.
@@ -530,6 +547,7 @@ ensureColumn('expenses', 'category_id',      'TEXT');                           
 ensureColumn('expenses', 'source_ref',       'TEXT');                            // e.g. "return:<id>" when auto-generated
 ensureColumn('expenses', 'beneficiary_type', "TEXT DEFAULT 'supplier'");        // supplier | employee | platform | government | other
 ensureColumn('expenses', 'budget_override_reason', 'TEXT');                      // populated when a pending_budget_approval expense is approved
+ensureColumn('expenses', 'payment_date',        'DATETIME');                     // NULL = approved-but-not-yet-paid; set = actual cash-out date (Cash Out calc reads this)
 
 // One-shot per (category, year-month) log used to suppress duplicate 80% budget warnings.
 db.exec(`
@@ -575,6 +593,32 @@ db.exec(`
     updated_at     DATETIME DEFAULT CURRENT_TIMESTAMP
   )
 `);
+
+// Pre-aggregated monthly financial summary. Populated on-demand via
+// POST /api/finance/backfill in Phase 1; will be filled nightly by a cron
+// in Phase 3. Reads are MUCH cheaper than re-running aggregateFinance over
+// raw orders/expenses every page load. Current month is always live-computed
+// (never cached) so admin sees today's numbers without waiting for the cron.
+db.exec(`
+  CREATE TABLE IF NOT EXISTS finance_monthly_summary (
+    id                    TEXT PRIMARY KEY,
+    year                  INTEGER NOT NULL,
+    month                 INTEGER NOT NULL,
+    revenue               REAL DEFAULT 0,
+    cogs                  REAL DEFAULT 0,
+    gross_profit          REAL DEFAULT 0,
+    total_expenses        REAL DEFAULT 0,
+    net_profit            REAL DEFAULT 0,
+    cash_in               REAL DEFAULT 0,
+    cash_out              REAL DEFAULT 0,
+    orders_count          INTEGER DEFAULT 0,
+    customers_count       INTEGER DEFAULT 0,
+    new_customers_count   INTEGER DEFAULT 0,
+    updated_at            DATETIME DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(year, month)
+  )
+`);
+try { db.exec('CREATE INDEX IF NOT EXISTS idx_finance_summary_ym ON finance_monthly_summary(year, month)'); } catch {}
 
 // Seed default categories (idempotent). The keys here match the legacy
 // EXPENSE_CATEGORIES enum used by the old expenses.category column, plus the
@@ -1313,15 +1357,26 @@ app.patch('/api/orders/:id', (req, res) => {
     // Build dynamic UPDATE
     const sets = [];
     const vals = [];
+    // Track whether this transition ought to stamp payment_settled_at (so we
+    // only do it ONCE \u2014 first time the row becomes paid).
+    let willBePaid = false;
     if (status != null)              { sets.push('status = ?');              vals.push(status); }
-    if (payment_status != null)      { sets.push('payment_status = ?');      vals.push(payment_status); }
+    if (payment_status != null)      { sets.push('payment_status = ?');      vals.push(payment_status); if (payment_status === 'paid' && cur.payment_status !== 'paid') willBePaid = true; }
     if (payment_reference != null)   { sets.push('payment_reference = ?');   vals.push(payment_reference); }
     if (cancellation_reason != null) { sets.push('cancellation_reason = ?'); vals.push(cancellation_reason); }
     sets.push('status_history = ?'); vals.push(JSON.stringify(history));
 
-    // Auto-mark cash orders as paid on delivery.
+    // Auto-mark cash orders as paid on delivery. This is the COD revenue
+    // recognition trigger \u2014 Cash In aggregates rely on payment_settled_at,
+    // so we stamp it here too. Online payment methods stay unpaid until
+    // their gateway callback (Phase 1: also covered by the willBePaid
+    // branch above when an admin manually PATCHes payment_status=paid).
     if (status === '\u0645\u0643\u062a\u0645\u0644' && cur.payment_method === 'cash' && cur.payment_status !== 'paid') {
       sets.push('payment_status = ?'); vals.push('paid');
+      willBePaid = true;
+    }
+    if (willBePaid && !cur.payment_settled_at) {
+      sets.push("payment_settled_at = datetime('now')");
     }
 
     vals.push(cur.id);
@@ -3911,9 +3966,30 @@ function inRangeISO(dateLike, fromISO, toISO) {
   return (!fromISO || day >= fromISO) && (!toISO || day <= toISO);
 }
 
+// Ordinary least squares on a series of {x, y} pairs. Returns slope +
+// intercept (y = slope*x + intercept) plus the predicted value at xNext.
+// Used by the 3-scenario forecast on /api/finance/summary. Returns null
+// when there are fewer than 3 points (spec: "Disable forecast if less
+// than 3 months of data").
+function linearRegression(series, xNext) {
+  const pts = (series || []).filter(p => p && Number.isFinite(p.x) && Number.isFinite(p.y));
+  if (pts.length < 3) return null;
+  const n = pts.length;
+  const sumX  = pts.reduce((s,p) => s + p.x,           0);
+  const sumY  = pts.reduce((s,p) => s + p.y,           0);
+  const sumXY = pts.reduce((s,p) => s + p.x * p.y,     0);
+  const sumXX = pts.reduce((s,p) => s + p.x * p.x,     0);
+  const denom = (n * sumXX) - (sumX * sumX);
+  if (denom === 0) return null; // degenerate (all x identical)
+  const slope     = (n * sumXY - sumX * sumY) / denom;
+  const intercept = (sumY - slope * sumX) / n;
+  const predicted = slope * xNext + intercept;
+  return { slope, intercept, predicted, n };
+}
+
 function aggregateFinance(fromISO, toISO) {
   const orders   = db.prepare('SELECT * FROM orders').all();
-  const products = db.prepare('SELECT name, cost FROM products').all();
+  const products = db.prepare('SELECT id, name, cost FROM products').all();
   // Finance reporting only counts settled (approved) expenses. Pending,
   // rejected, and pending_budget_approval rows are excluded from KPIs/charts
   // until a super admin actions them.
@@ -3923,11 +3999,20 @@ function aggregateFinance(fromISO, toISO) {
     + (toISO   ? ' AND date <= ?' : '')).all(...[fromISO, toISO].filter(Boolean));
   const returnsRows = db.prepare('SELECT * FROM returns WHERE status = ?').all('refunded');
 
+  // Indexes for resolving line items → product cost/category/image. Lookup
+  // by name (legacy) + by id (new orders carry it on items[]).
   const costByName = new Map(products.map(p => [(p.name||'').trim().toLowerCase(), Number(p.cost)||0]));
-  const findCost = (name) => costByName.get(String(name||'').trim().toLowerCase()) || 0;
+  const findCost   = (name) => costByName.get(String(name||'').trim().toLowerCase()) || 0;
+  const productByName = new Map(products.map(p => [(p.name||'').trim().toLowerCase(), p]));
+  // Pull category + image + a richer product row for the per-product / per-category breakdowns.
+  // Single SELECT shared across the iteration.
+  const productMeta = db.prepare("SELECT id, name, category, cost, COALESCE((SELECT json_extract(images, '$[0]') FROM products p2 WHERE p2.id = products.id), '') AS first_image FROM products").all();
+  const metaByName = new Map(productMeta.map(p => [(p.name||'').trim().toLowerCase(), p]));
 
   let revenue = 0, cogs = 0, refunds = 0, orderCount = 0;
   const productAgg = new Map();
+  const categoryAgg = new Map();             // section 7 — profit by product category
+  const soldZeroCost = new Set();            // section 4 warning banner: products with cost=0 that DID sell
   orders.forEach(o => {
     if (!inRangeISO(o.created_at || o.date, fromISO, toISO)) return;
     if (o.status === 'ملغي') return;
@@ -3941,11 +4026,20 @@ function aggregateFinance(fromISO, toISO) {
       const cost  = findCost(it.name);
       cogs += cost * qty;
       const key = (it.name || '').trim() || '—';
-      const prev = productAgg.get(key) || { name: key, qty: 0, revenue: 0, cost: 0 };
+      const meta = metaByName.get(key.toLowerCase());
+      if (qty > 0 && cost === 0 && key && key !== '—') soldZeroCost.add(key);
+      const prev = productAgg.get(key) || { name: key, qty: 0, revenue: 0, cost: 0, image: (meta && meta.first_image) || it.img || null };
       prev.qty     += qty;
       prev.revenue += qty * price;
       prev.cost    += qty * cost;
       productAgg.set(key, prev);
+      // Aggregate into product-category bucket too (section 7).
+      const catKey = (meta && meta.category) || 'غير مصنف';
+      const catCur = categoryAgg.get(catKey) || { category: catKey, qty: 0, revenue: 0, cost: 0 };
+      catCur.qty     += qty;
+      catCur.revenue += qty * price;
+      catCur.cost    += qty * cost;
+      categoryAgg.set(catKey, catCur);
     });
   });
   returnsRows.forEach(r => {
@@ -3963,53 +4057,198 @@ function aggregateFinance(fromISO, toISO) {
 
   const grossProfit = revenue - cogs;
   const netProfit   = grossProfit - expensesTotal - refunds;
-  const margin      = revenue ? (netProfit / revenue) * 100 : 0;
+  const margin      = revenue ? (netProfit / revenue) * 100 : 0;    // legacy: net margin
+  const grossMargin = revenue ? (grossProfit / revenue) * 100 : 0;  // new: gross margin (spec card 4)
+  const netMargin   = margin;                                       // alias for clarity
 
-  const topProducts = Array.from(productAgg.values())
-    .map(p => ({ ...p,
-      margin_pct: p.revenue ? Math.round(((p.revenue - p.cost) / p.revenue) * 100) : 0
-    }))
-    .sort((a,b) => b.revenue - a.revenue)
-    .slice(0, 5);
+  // Two product rankings — by revenue (legacy) AND by profit (new, spec sec 6).
+  const productList = Array.from(productAgg.values()).map(p => ({
+    ...p,
+    profit:     p.revenue - p.cost,
+    margin_pct: p.revenue ? Math.round(((p.revenue - p.cost) / p.revenue) * 100) : 0,
+  }));
+  const topByRevenue = productList.slice().sort((a,b) => b.revenue - a.revenue).slice(0, 5);
+  const topByProfit  = productList.slice().sort((a,b) => b.profit  - a.profit ).slice(0, 5);
 
-  return { revenue, cogs, grossProfit, expensesTotal, refunds, netProfit, margin,
-           orderCount, expensesByCategory, topProducts, expensesRows: expenses };
+  // Profit by product category — sorted by profit DESC for the horizontal bar
+  // chart in section 7. Includes qty/revenue/cost so the frontend can show
+  // multiple metrics in a tooltip.
+  const profitByCategory = Array.from(categoryAgg.values())
+    .map(c => ({ ...c, profit: c.revenue - c.cost,
+                 margin_pct: c.revenue ? Math.round(((c.revenue - c.cost) / c.revenue) * 100) : 0 }))
+    .sort((a,b) => b.profit - a.profit);
+
+  return {
+    revenue, cogs, grossProfit, expensesTotal, refunds, netProfit, margin,
+    grossMargin, netMargin,
+    orderCount, expensesByCategory,
+    topProducts: topByRevenue,           // legacy field — kept for back-compat
+    topByRevenue, topByProfit,
+    profitByCategory,
+    expensesRows: expenses,
+    cogsWarningProducts: Array.from(soldZeroCost), // section 4 warning banner
+  };
+}
+
+// Shared cash-flow helper — used by /summary and the dedicated /cash-flow
+// endpoint so both numbers always agree.
+//
+// Cash In  = orders where payment_status='paid' AND status != 'ملغي',
+//            grouped by payment_method, filtered by payment_settled_at.
+// Cash Out = approved expenses with payment_date in range. Returns refunds
+//            already auto-create an expense row (returns Phase 2), so
+//            they're naturally included.
+function computeCashFlow(fromISO, toISO) {
+  // Cash In, broken down by payment_method
+  let sql = `
+    SELECT COALESCE(payment_method, 'cash') AS pm, COALESCE(SUM(total), 0) AS amount, COUNT(*) AS n
+    FROM orders
+    WHERE payment_status = 'paid' AND status != 'ملغي'`;
+  const params = [];
+  if (fromISO) { sql += ' AND payment_settled_at >= ?'; params.push(fromISO); }
+  if (toISO)   { sql += " AND payment_settled_at <= ?"; params.push(toISO + ' 23:59:59'); }
+  sql += ' GROUP BY pm';
+  const inByMethod = db.prepare(sql).all(...params);
+  const cashInTotal = inByMethod.reduce((s, r) => s + (Number(r.amount) || 0), 0);
+  const inByMap = { cash:0, transfer:0, wallet:0, visa:0, card:0 };
+  inByMethod.forEach(r => { inByMap[r.pm] = Number(r.amount) || 0; });
+
+  // Cash Out: expenses paid in range
+  let outSql = `
+    SELECT COALESCE(payment_method,'cash') AS pm, COALESCE(category,'general') AS cat,
+           COALESCE(source_ref,'') AS src, COALESCE(SUM(amount),0) AS amount, COUNT(*) AS n
+    FROM expenses
+    WHERE status = 'approved' AND payment_date IS NOT NULL`;
+  const outParams = [];
+  if (fromISO) { outSql += ' AND payment_date >= ?'; outParams.push(fromISO); }
+  if (toISO)   { outSql += " AND payment_date <= ?"; outParams.push(toISO + ' 23:59:59'); }
+  outSql += ' GROUP BY pm, cat, src';
+  const outRows = db.prepare(outSql).all(...outParams);
+  const cashOutTotal = outRows.reduce((s, r) => s + (Number(r.amount) || 0), 0);
+  // Sub-totals for the spec's right-column breakdown.
+  const refundOut    = outRows.filter(r => r.src && r.src.startsWith('return:')).reduce((s,r) => s + (Number(r.amount)||0), 0);
+  const purchasesOut = outRows.filter(r => r.cat === 'purchases').reduce((s,r) => s + (Number(r.amount)||0), 0);
+  const otherOut     = cashOutTotal - refundOut - purchasesOut;
+
+  return {
+    cash_in:  cashInTotal,
+    cash_out: cashOutTotal,
+    net_cash: cashInTotal - cashOutTotal,
+    in_breakdown: {
+      cash:     inByMap.cash || 0,
+      transfer: inByMap.transfer || 0,
+      wallet:   inByMap.wallet || 0,
+      visa:     (inByMap.visa || 0) + (inByMap.card || 0),  // legacy column tagged as 'card'
+    },
+    out_breakdown: {
+      expenses:  otherOut,
+      refunds:   refundOut,
+      purchases: purchasesOut,
+    },
+  };
 }
 
 app.get('/api/finance/summary', (req, res) => {
   try {
-    const { from, to } = req.query;
+    const { from, to, comparison } = req.query;
     const cur = aggregateFinance(from || null, to || null);
+    const cashCur = computeCashFlow(from || null, to || null);
 
-    // Previous-period KPIs (for % change). When range is omitted, prev is null.
+    // Previous-period KPIs (for % change). Comparison modes:
+    //   'period'  (default) → same-length window immediately before [from, to]
+    //   'yoy'              → same calendar window one year earlier
     let prev = null;
+    let prevCash = null;
+    let comparisonMode = comparison === 'yoy' ? 'yoy' : 'period';
     if (from && to) {
       const f = new Date(from), t = new Date(to);
-      const days = Math.round((t - f) / 86400000) + 1;
-      const prevFrom = new Date(f); prevFrom.setDate(prevFrom.getDate() - days);
-      const prevTo   = new Date(f); prevTo.setDate(prevTo.getDate() - 1);
-      prev = aggregateFinance(prevFrom.toISOString().slice(0,10), prevTo.toISOString().slice(0,10));
+      let prevFromD, prevToD;
+      if (comparisonMode === 'yoy') {
+        prevFromD = new Date(f); prevFromD.setFullYear(prevFromD.getFullYear() - 1);
+        prevToD   = new Date(t); prevToD.setFullYear(prevToD.getFullYear() - 1);
+      } else {
+        const days = Math.round((t - f) / 86400000) + 1;
+        prevFromD = new Date(f); prevFromD.setDate(prevFromD.getDate() - days);
+        prevToD   = new Date(f); prevToD.setDate(prevToD.getDate() - 1);
+      }
+      const pfISO = prevFromD.toISOString().slice(0,10);
+      const ptISO = prevToD.toISOString().slice(0,10);
+      prev     = aggregateFinance(pfISO, ptISO);
+      prevCash = computeCashFlow(pfISO, ptISO);
     }
+
+    // Forecast (linear regression on last 6 months' net profit). Disabled
+    // automatically when fewer than 3 monthly data points exist — caller
+    // sees `forecast: null` and renders the "need more data" message.
+    let forecast = null;
+    try {
+      const end = to ? new Date(to) : new Date();
+      const start = new Date(end.getFullYear(), end.getMonth() - 5, 1);
+      const series = [];
+      const cursor = new Date(start);
+      let x = 0;
+      while (cursor <= end) {
+        const y = cursor.getFullYear(), m = cursor.getMonth();
+        const mFrom = `${y}-${String(m+1).padStart(2,'0')}-01`;
+        const last = new Date(y, m+1, 0);
+        const mTo   = `${y}-${String(m+1).padStart(2,'0')}-${String(last.getDate()).padStart(2,'0')}`;
+        const agg = aggregateFinance(mFrom, mTo);
+        series.push({ x, y: agg.netProfit });
+        cursor.setMonth(cursor.getMonth() + 1);
+        x += 1;
+      }
+      const reg = linearRegression(series, series.length); // predict NEXT period
+      if (reg) {
+        forecast = {
+          realistic:   Math.round(reg.predicted),
+          optimistic:  Math.round(reg.predicted * 1.20),
+          pessimistic: Math.round(reg.predicted * 0.80),
+          slope:       Math.round(reg.slope * 100) / 100,
+          history:     series.map(p => Math.round(p.y)),
+          method:      'OLS (ordinary least squares) on last 6 months\' net profit; ±20% scenarios',
+        };
+      }
+    } catch (e) { console.warn('[nawra-api] forecast skipped:', e.message); }
 
     const pct = (a, b) => b ? Math.round(((a - b) / Math.abs(b)) * 100) : (a ? 100 : 0);
     res.json({
       revenue:        cur.revenue,
       cogs:           cur.cogs,
       gross_profit:   cur.grossProfit,
+      gross_margin_pct: Math.round(cur.grossMargin * 10) / 10,
       expenses_total: cur.expensesTotal,
       net_profit:     cur.netProfit,
-      margin_pct:     Math.round(cur.margin * 10) / 10,
+      margin_pct:     Math.round(cur.margin * 10) / 10,   // legacy alias
+      net_margin_pct: Math.round(cur.netMargin * 10) / 10, // new (spec card 7)
       order_count:    cur.orderCount,
       refunds:        cur.refunds,
+      // Cash flow KPI card (spec card 8) — net cash for the period.
+      cash_flow:      cashCur.net_cash,
+      cash_in:        cashCur.cash_in,
+      cash_out:       cashCur.cash_out,
+      cash_in_breakdown:  cashCur.in_breakdown,
+      cash_out_breakdown: cashCur.out_breakdown,
       expenses_by_category: cur.expensesByCategory,
-      top_products: cur.topProducts,
+      top_products:    cur.topProducts,       // legacy field
+      top_by_revenue:  cur.topByRevenue,
+      top_by_profit:   cur.topByProfit,
+      profit_by_category: cur.profitByCategory,
+      // Data integrity warnings — frontend renders a banner if these are non-empty.
+      cogs_warning_count:    cur.cogsWarningProducts.length,
+      cogs_warning_products: cur.cogsWarningProducts.slice(0, 5),
+      // Forecast (null when < 3 months of data).
+      forecast,
+      comparison_mode: comparisonMode,
       change: prev ? {
         revenue:        pct(cur.revenue,      prev.revenue),
         cogs:           pct(cur.cogs,         prev.cogs),
         gross_profit:   pct(cur.grossProfit,  prev.grossProfit),
+        gross_margin_pct: Math.round((cur.grossMargin - prev.grossMargin) * 10) / 10,
         expenses_total: pct(cur.expensesTotal, prev.expensesTotal),
         net_profit:     pct(cur.netProfit,    prev.netProfit),
         margin_pct:     Math.round((cur.margin - prev.margin) * 10) / 10,
+        net_margin_pct: Math.round((cur.netMargin - prev.netMargin) * 10) / 10,
+        cash_flow:      prevCash ? pct(cashCur.net_cash, prevCash.net_cash) : null,
       } : null,
     });
   } catch (e) { console.error('GET /api/finance/summary error:', e); res.status(500).json({ error: e.message }); }
@@ -4068,6 +4307,285 @@ app.get('/api/finance/expenses', (req, res) => {
       };
     }).sort((a,b) => b.amount - a.amount);
     res.json({ rows, total: cur.expensesTotal, revenue: cur.revenue });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// ── Phase-1 finance: cash flow, receivables/payables, profit-by-category, ──
+//    key metrics (AOV/ITO/CAC/CLV), break-even, on-demand backfill.
+//    All endpoints read the same source-of-truth tables as the aggregate
+//    helpers above so numbers always reconcile.
+
+// /cash-flow — detailed cash in/out breakdown (spec section 2 + section 11).
+app.get('/api/finance/cash-flow', (req, res) => {
+  try {
+    const { from, to } = req.query;
+    res.json(computeCashFlow(from || null, to || null));
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// /receivables — money owed TO the store: COD orders not yet delivered,
+// online orders awaiting settlement. Spec section 3 card A.
+app.get('/api/finance/receivables', (_req, res) => {
+  try {
+    // COD pending = cash orders that haven't been delivered yet (status is
+    // anything except مكتمل or ملغي). Their cash is "expected".
+    const codRows = db.prepare(`
+      SELECT COALESCE(SUM(total),0) AS amount, COUNT(*) AS n
+      FROM orders WHERE payment_method = 'cash'
+        AND status NOT IN ('مكتمل','ملغي')`).get();
+    // Online pending = non-cash orders not yet marked paid.
+    const onlineRows = db.prepare(`
+      SELECT COALESCE(SUM(total),0) AS amount, COUNT(*) AS n
+      FROM orders WHERE payment_method != 'cash' AND payment_method IS NOT NULL
+        AND payment_status != 'paid' AND status != 'ملغي'`).get();
+    res.json({
+      total: Number(codRows.amount) + Number(onlineRows.amount),
+      cod_pending:    { amount: Number(codRows.amount)    || 0, count: Number(codRows.n)    || 0 },
+      online_pending: { amount: Number(onlineRows.amount) || 0, count: Number(onlineRows.n) || 0 },
+    });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// /payables — money the store owes: approved-but-unpaid expenses, plus
+// (Phase 1 stub) scheduled-this-month placeholder. Spec section 3 card B.
+app.get('/api/finance/payables', (_req, res) => {
+  try {
+    // Approved expenses with no payment_date set yet = invoice received but not paid.
+    const unpaidRows = db.prepare(`
+      SELECT COALESCE(SUM(amount),0) AS amount, COUNT(*) AS n
+      FROM expenses WHERE status = 'approved' AND payment_date IS NULL`).get();
+    // Scheduled-this-month: recurring expenses (is_recurring=1) whose date
+    // is in the current month and status='pending'. Lightweight indicator.
+    const ym = new Date().toISOString().slice(0,7);
+    const scheduledRows = db.prepare(`
+      SELECT COALESCE(SUM(amount),0) AS amount, COUNT(*) AS n
+      FROM expenses WHERE is_recurring = 1 AND status = 'pending' AND date LIKE ?`).get(`${ym}%`);
+    res.json({
+      total: Number(unpaidRows.amount) + Number(scheduledRows.amount),
+      pending_invoices:     { amount: Number(unpaidRows.amount)    || 0, count: Number(unpaidRows.n)    || 0 },
+      scheduled_this_month: { amount: Number(scheduledRows.amount) || 0, count: Number(scheduledRows.n) || 0 },
+    });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// /profit-by-category — spec section 7. Returns sorted bars.
+app.get('/api/finance/profit-by-category', (req, res) => {
+  try {
+    const { from, to } = req.query;
+    const cur = aggregateFinance(from || null, to || null);
+    res.json({ rows: cur.profitByCategory, revenue: cur.revenue, gross_profit: cur.grossProfit });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// /key-metrics — AOV, Inventory Turnover, CAC, CLV. Each comes with a
+// 6-period sparkline (one number per month) so the frontend can render
+// the trend without a second request. Spec section 9.
+app.get('/api/finance/key-metrics', (req, res) => {
+  try {
+    const { from, to } = req.query;
+    const cur = aggregateFinance(from || null, to || null);
+    // AOV (current period)
+    const aov = cur.orderCount ? cur.revenue / cur.orderCount : 0;
+    // Inventory Turnover (annualized): COGS / average inventory value
+    // Average inventory value approximated as current value at cost (single
+    // snapshot — improved when stock_movements are factored in Phase 3).
+    const invRow = db.prepare("SELECT COALESCE(SUM((COALESCE(stock,0)+COALESCE(stock_reserved,0)) * COALESCE(cost,0)), 0) AS inv FROM products").get();
+    const invValue = Number(invRow.inv) || 0;
+    // Annualize the rate by extrapolating the period's COGS — if the period
+    // is shorter than a year, multiply by (365 / days). Falls back to raw
+    // ratio when the range isn't bounded.
+    let inventoryTurnover = 0;
+    if (invValue > 0) {
+      let factor = 1;
+      if (from && to) {
+        const days = Math.max(1, Math.round((new Date(to) - new Date(from)) / 86400000) + 1);
+        factor = 365 / days;
+      }
+      inventoryTurnover = Math.round((cur.cogs * factor / invValue) * 10) / 10;
+    }
+    // CAC = marketing expenses ÷ new customers in the period.
+    const mkRow = db.prepare(`
+      SELECT COALESCE(SUM(amount),0) AS amount FROM expenses
+      WHERE status = 'approved' AND category = 'marketing'`
+      + (from ? ' AND date >= ?' : '')
+      + (to   ? ' AND date <= ?' : '')).get(...[from, to].filter(Boolean));
+    const newCustRow = db.prepare(`
+      SELECT COUNT(*) AS n FROM users WHERE 1=1`
+      + (from ? ' AND COALESCE(registered_at, firstOrder) >= ?' : '')
+      + (to   ? ' AND COALESCE(registered_at, firstOrder) <= ?' : '')).get(...[from, to].filter(Boolean));
+    const newCount = Number(newCustRow.n) || 0;
+    const marketing = Number(mkRow.amount) || 0;
+    const cac = newCount > 0 ? Math.round(marketing / newCount) : 0;
+    // CLV = average totalSpent per customer (all-time, simple version).
+    const clvRow = db.prepare(`
+      SELECT COALESCE(AVG(totalSpent), 0) AS clv, COUNT(*) AS n
+      FROM users WHERE totalOrders > 0`).get();
+    const clv = Math.round(Number(clvRow.clv) || 0);
+
+    // 6-period sparklines: one value per month going back from `to` (or now).
+    const end = to ? new Date(to) : new Date();
+    const sparks = { aov: [], inventory_turnover: [], cac: [], clv: [] };
+    for (let i = 5; i >= 0; i--) {
+      const d = new Date(end.getFullYear(), end.getMonth() - i, 1);
+      const y = d.getFullYear(), m = d.getMonth();
+      const mFrom = `${y}-${String(m+1).padStart(2,'0')}-01`;
+      const last  = new Date(y, m+1, 0);
+      const mTo   = `${y}-${String(m+1).padStart(2,'0')}-${String(last.getDate()).padStart(2,'0')}`;
+      const agg = aggregateFinance(mFrom, mTo);
+      sparks.aov.push(agg.orderCount ? Math.round(agg.revenue / agg.orderCount) : 0);
+      // Cheap inventory-turnover proxy per-month: COGS / current inv value × 12 (months/yr).
+      sparks.inventory_turnover.push(invValue > 0 ? Math.round((agg.cogs * 12 / invValue) * 10) / 10 : 0);
+      const mMk = (agg.expensesByCategory && agg.expensesByCategory.marketing) || 0;
+      const mNewRow = db.prepare(`
+        SELECT COUNT(*) AS n FROM users WHERE COALESCE(registered_at, firstOrder) >= ? AND COALESCE(registered_at, firstOrder) <= ?`).get(mFrom, mTo);
+      const mNew = Number(mNewRow.n) || 0;
+      sparks.cac.push(mNew > 0 ? Math.round(mMk / mNew) : 0);
+      // CLV per month is stable (it's an all-time avg) — store same value
+      // each cell so the sparkline at least renders a flat line.
+      sparks.clv.push(clv);
+    }
+
+    res.json({
+      aov:                { value: Math.round(aov), sparkline: sparks.aov },
+      inventory_turnover: { value: inventoryTurnover, inv_value: Math.round(invValue), sparkline: sparks.inventory_turnover },
+      cac:                { value: cac, marketing: Math.round(marketing), new_customers: newCount, sparkline: sparks.cac },
+      clv:                { value: clv, customers: Number(clvRow.n) || 0, sparkline: sparks.clv },
+    });
+  } catch (e) { console.error('GET /api/finance/key-metrics error:', e); res.status(500).json({ error: e.message }); }
+});
+
+// /break-even — spec section 8.
+//   fixed_monthly_expenses = sum of type='fixed' expenses for current month
+//                            (approved status only)
+//   gross_margin_pct       = period gross margin (from aggregateFinance)
+//   break_even_revenue     = fixed / (gross_margin_pct / 100)
+//   current_revenue        = revenue in current calendar month
+//   projected_revenue      = current_revenue × (days_in_month / day_of_month)
+app.get('/api/finance/break-even', (_req, res) => {
+  try {
+    const now = new Date();
+    const y = now.getFullYear(), m = now.getMonth();
+    const mFrom = `${y}-${String(m+1).padStart(2,'0')}-01`;
+    const lastDay = new Date(y, m+1, 0).getDate();
+    const mTo   = `${y}-${String(m+1).padStart(2,'0')}-${String(lastDay).padStart(2,'0')}`;
+
+    const fixedRow = db.prepare(`
+      SELECT COALESCE(SUM(amount),0) AS amt FROM expenses
+      WHERE type = 'fixed' AND status = 'approved' AND date >= ? AND date <= ?`).get(mFrom, mTo);
+    const fixed = Number(fixedRow.amt) || 0;
+
+    const agg = aggregateFinance(mFrom, mTo);
+    const grossMarginPct = agg.grossMargin;   // 0..100
+    const breakEvenRevenue = grossMarginPct > 0 ? Math.round(fixed / (grossMarginPct / 100)) : null;
+    const currentDay = now.getDate();
+    const projected = currentDay > 0 ? Math.round(agg.revenue * (lastDay / currentDay)) : 0;
+    const pct = breakEvenRevenue ? Math.round((agg.revenue / breakEvenRevenue) * 100) : null;
+    const daysRemaining = lastDay - currentDay;
+
+    res.json({
+      year: y, month: m + 1,
+      fixed_monthly_expenses: Math.round(fixed),
+      gross_margin_pct:       Math.round(grossMarginPct * 10) / 10,
+      break_even_revenue:     breakEvenRevenue,
+      current_revenue:        Math.round(agg.revenue),
+      projected_revenue:      projected,
+      pct_of_break_even:      pct,        // null when margin <= 0
+      days_remaining:         daysRemaining,
+    });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// POST /api/finance/backfill — populate finance_monthly_summary on demand.
+// Body: { from_year, to_year } OR { from: 'YYYY-MM', to: 'YYYY-MM' }.
+// If both missing, defaults to ALL months that have any order or expense
+// (intelligent default). Idempotent (UPSERT). Returns counts.
+app.post('/api/finance/backfill', (req, res) => {
+  try {
+    const b = req.body || {};
+    let startY, startM, endY, endM;
+    if (b.from && b.to) {
+      [startY, startM] = b.from.split('-').map(Number);
+      [endY,   endM]   = b.to.split('-').map(Number);
+    } else if (b.from_year && b.to_year) {
+      startY = Number(b.from_year); startM = 1;
+      endY   = Number(b.to_year);   endM   = 12;
+    } else {
+      // Smart default — scan min/max date across orders+expenses.
+      const minRow = db.prepare(`
+        SELECT MIN(d) AS d FROM (
+          SELECT MIN(COALESCE(created_at, date)) AS d FROM orders
+          UNION ALL SELECT MIN(date) AS d FROM expenses
+        )`).get();
+      const earliest = minRow && minRow.d ? new Date(String(minRow.d).slice(0,10)) : new Date();
+      startY = earliest.getFullYear(); startM = earliest.getMonth() + 1;
+      const now = new Date();
+      endY = now.getFullYear(); endM = now.getMonth() + 1;
+    }
+
+    const upsert = db.prepare(`
+      INSERT INTO finance_monthly_summary (
+        id, year, month, revenue, cogs, gross_profit, total_expenses, net_profit,
+        cash_in, cash_out, orders_count, customers_count, new_customers_count, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+      ON CONFLICT(year, month) DO UPDATE SET
+        revenue             = excluded.revenue,
+        cogs                = excluded.cogs,
+        gross_profit        = excluded.gross_profit,
+        total_expenses      = excluded.total_expenses,
+        net_profit          = excluded.net_profit,
+        cash_in             = excluded.cash_in,
+        cash_out            = excluded.cash_out,
+        orders_count        = excluded.orders_count,
+        customers_count     = excluded.customers_count,
+        new_customers_count = excluded.new_customers_count,
+        updated_at          = datetime('now')
+    `);
+
+    let populated = 0;
+    const cursor = new Date(startY, startM - 1, 1);
+    const endDate = new Date(endY,   endM   - 1, 1);
+    while (cursor <= endDate) {
+      const y = cursor.getFullYear(), m = cursor.getMonth();
+      const mFrom = `${y}-${String(m+1).padStart(2,'0')}-01`;
+      const last  = new Date(y, m+1, 0);
+      const mTo   = `${y}-${String(m+1).padStart(2,'0')}-${String(last.getDate()).padStart(2,'0')}`;
+      const agg = aggregateFinance(mFrom, mTo);
+      const cf  = computeCashFlow(mFrom, mTo);
+      // customers active in the month = distinct userEmail across non-cancelled orders
+      const custRow = db.prepare(`
+        SELECT COUNT(DISTINCT LOWER(userEmail)) AS n FROM orders
+        WHERE status != 'ملغي' AND created_at >= ? AND created_at <= ?`).get(mFrom, mTo + ' 23:59:59');
+      const newCustRow = db.prepare(`
+        SELECT COUNT(*) AS n FROM users
+        WHERE COALESCE(registered_at, firstOrder) >= ? AND COALESCE(registered_at, firstOrder) <= ?`).get(mFrom, mTo + ' 23:59:59');
+      const id = `fms_${y}_${String(m+1).padStart(2,'0')}`;
+      upsert.run(
+        id, y, m + 1,
+        Math.round(agg.revenue), Math.round(agg.cogs), Math.round(agg.grossProfit),
+        Math.round(agg.expensesTotal), Math.round(agg.netProfit),
+        Math.round(cf.cash_in), Math.round(cf.cash_out),
+        agg.orderCount, Number(custRow.n) || 0, Number(newCustRow.n) || 0
+      );
+      populated += 1;
+      cursor.setMonth(cursor.getMonth() + 1);
+    }
+    res.json({ ok: true, populated, from: `${startY}-${String(startM).padStart(2,'0')}`, to: `${endY}-${String(endM).padStart(2,'0')}` });
+  } catch (e) { console.error('POST /api/finance/backfill', e); res.status(500).json({ error: e.message }); }
+});
+
+// GET /api/finance/monthly — read the cached monthly summaries (Phase 2
+// frontend will use this for the long-range chart; backfill must be run
+// first or the table will be empty for past months).
+app.get('/api/finance/monthly', (req, res) => {
+  try {
+    const { from, to, limit } = req.query;
+    let sql = "SELECT * FROM finance_monthly_summary WHERE 1=1";
+    const params = [];
+    if (from) { const [y,m] = from.split('-').map(Number); sql += " AND (year > ? OR (year = ? AND month >= ?))"; params.push(y, y, m); }
+    if (to)   { const [y,m] = to.split('-').map(Number);   sql += " AND (year < ? OR (year = ? AND month <= ?))"; params.push(y, y, m); }
+    sql += " ORDER BY year ASC, month ASC";
+    if (limit) { sql += " LIMIT ?"; params.push(Number(limit)); }
+    res.json(db.prepare(sql).all(...params));
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
