@@ -865,15 +865,21 @@ function slugify(s) {
 }
 
 // ── Test-data self-heal ──────────────────────────────────────────────────────
-// Convention: smoke tests / deploy probes MUST embed the literal marker
-// `__NAWRA_TEST__` in the most distinctive textual field of any row they
-// create (description / name / email / etc). This boot-time purge scrubs
-// those rows so a crashed or aborted test never leaves residue in
-// production data. Combined with try/finally cleanup in the smoke scripts
-// themselves, the system is double-protected: a clean exit cleans the rows
-// immediately, and the next PM2 restart cleans anything missed.
+// Two complementary mechanisms:
+//   1. Marker-text purge — historical: any row with `__NAWRA_TEST__` in a
+//      distinctive textual field gets nuked. Legacy smokes relied on this.
+//   2. is_test column purge — Phase B: any row with is_test=1 gets nuked,
+//      cascade-aware.
+// Both run at boot. Both are also exposed via POST /api/test-data/purge so
+// smokes can call cleanup explicitly in their atexit handler, rather than
+// waiting for the next PM2 restart. The endpoint is safe to expose — it only
+// touches rows that were explicitly tagged as test data, never real rows.
 const TEST_MARKER = '__NAWRA_TEST__';
-(() => {
+function purgeTestData() {
+  const breakdown = {};
+  const log = (label, n) => { if (n > 0) { breakdown[label] = (breakdown[label] || 0) + n; console.log(`[nawra-api] test-data purge: ${label} → removed ${n}`); } };
+
+  // ── Pass 1: marker-text ───────────────────────────────────────────────────
   const targets = [
     { table: 'expenses',           field: 'description' },
     { table: 'orders',             field: 'name' },
@@ -885,45 +891,19 @@ const TEST_MARKER = '__NAWRA_TEST__';
     { table: 'messages',           field: 'subject' },
     { table: 'returns',            field: 'customer' },
   ];
-  let total = 0;
-  // Cascade-aware purge for returns — collect ids first, then delete child
-  // rows before the parent so we never leave orphaned items/attachments/
-  // activity_log entries pointing at a vanished return.
   try {
     const orphanIds = db.prepare("SELECT id FROM returns WHERE customer LIKE ?").all(`%${TEST_MARKER}%`).map(r => r.id);
     if (orphanIds.length) {
       ['return_items', 'return_attachments', 'return_activity_log'].forEach(t => {
-        try {
-          const info = db.prepare(`DELETE FROM ${t} WHERE return_id IN (${orphanIds.map(()=>'?').join(',')})`).run(...orphanIds);
-          if (info.changes > 0) {
-            console.log(`[nawra-api] test-data purge cascade: ${t} → removed ${info.changes}`);
-            total += info.changes;
-          }
-        } catch {}
+        try { log(`${t} (cascade)`, db.prepare(`DELETE FROM ${t} WHERE return_id IN (${orphanIds.map(()=>'?').join(',')})`).run(...orphanIds).changes); } catch {}
       });
     }
   } catch {}
   targets.forEach(({ table, field }) => {
-    try {
-      const info = db.prepare(`DELETE FROM ${table} WHERE ${field} LIKE ?`).run(`%${TEST_MARKER}%`);
-      if (info.changes > 0) {
-        console.log(`[nawra-api] test-data purge: ${table}.${field} → removed ${info.changes}`);
-        total += info.changes;
-      }
-    } catch (err) {
-      console.warn(`[nawra-api] test-data purge skipped for ${table}: ${err.message}`);
-    }
+    try { log(`${table}.${field}`, db.prepare(`DELETE FROM ${table} WHERE ${field} LIKE ?`).run(`%${TEST_MARKER}%`).changes); }
+    catch (err) { console.warn(`[nawra-api] purge skipped for ${table}: ${err.message}`); }
   });
-  // Also sweep return_items by product_name (covers any smoke that inserted
-  // marker-tagged items but didn't tag the parent's customer field).
-  try {
-    const info = db.prepare("DELETE FROM return_items WHERE product_name LIKE ?").run(`%${TEST_MARKER}%`);
-    if (info.changes > 0) { console.log(`[nawra-api] test-data purge: return_items.product_name → removed ${info.changes}`); total += info.changes; }
-  } catch {}
-  // Shipping tables — cascade-aware. Drop shipments referencing marker'd
-  // couriers/zones first, then the history rows, then the marker rows
-  // themselves. Without this, the courier/zone DELETE endpoints refuse to
-  // remove a row that's still referenced by a (cancelled) shipment.
+  try { log('return_items.product_name', db.prepare("DELETE FROM return_items WHERE product_name LIKE ?").run(`%${TEST_MARKER}%`).changes); } catch {}
   try {
     const orphanShipIds = db.prepare(`
       SELECT s.id FROM shipments s
@@ -932,37 +912,19 @@ const TEST_MARKER = '__NAWRA_TEST__';
       WHERE (c.name LIKE ? OR z.name_ar LIKE ?)
     `).all(`%${TEST_MARKER}%`, `%${TEST_MARKER}%`).map(r => r.id);
     if (orphanShipIds.length) {
-      const placeholders = orphanShipIds.map(() => '?').join(',');
-      try {
-        const h = db.prepare(`DELETE FROM shipment_status_history WHERE shipment_id IN (${placeholders})`).run(...orphanShipIds);
-        if (h.changes > 0) { console.log(`[nawra-api] test-data purge cascade: shipment_status_history → removed ${h.changes}`); total += h.changes; }
-      } catch {}
-      try {
-        const s = db.prepare(`DELETE FROM shipments WHERE id IN (${placeholders})`).run(...orphanShipIds);
-        if (s.changes > 0) { console.log(`[nawra-api] test-data purge cascade: shipments → removed ${s.changes}`); total += s.changes; }
-      } catch {}
+      const ph = orphanShipIds.map(() => '?').join(',');
+      try { log('shipment_status_history (cascade)', db.prepare(`DELETE FROM shipment_status_history WHERE shipment_id IN (${ph})`).run(...orphanShipIds).changes); } catch {}
+      try { log('shipments (cascade)',               db.prepare(`DELETE FROM shipments               WHERE id IN (${ph})`).run(...orphanShipIds).changes); } catch {}
     }
   } catch {}
-  // Now safe to remove the marker'd parent rows.
   ['couriers', 'shipping_zones'].forEach((t) => {
     const field = t === 'couriers' ? 'name' : 'name_ar';
-    try {
-      const info = db.prepare(`DELETE FROM ${t} WHERE ${field} LIKE ?`).run(`%${TEST_MARKER}%`);
-      if (info.changes > 0) { console.log(`[nawra-api] test-data purge: ${t}.${field} → removed ${info.changes}`); total += info.changes; }
-    } catch (err) { console.warn(`[nawra-api] test-data purge skipped for ${t}: ${err.message}`); }
+    try { log(`${t}.${field}`, db.prepare(`DELETE FROM ${t} WHERE ${field} LIKE ?`).run(`%${TEST_MARKER}%`).changes); }
+    catch (err) { console.warn(`[nawra-api] purge skipped for ${t}: ${err.message}`); }
   });
-  if (total === 0) console.log('[nawra-api] test-data purge: nothing to remove');
-})();
 
-// ── Test-data purge by is_test=1 column (Phase B safety net) ────────────────
-// Belt-and-braces: even when a smoke forgets the marker text, any row it
-// created with is_test=1 gets nuked on boot. Same dependency-ordered cascade
-// as the marker-text pass above so referential coherence is maintained.
-(() => {
-  let total = 0;
-  const log = (label, n) => { if (n > 0) { console.log(`[nawra-api] is_test purge: ${label} → removed ${n}`); total += n; } };
+  // ── Pass 2: is_test=1 column ──────────────────────────────────────────────
   try {
-    // Cascade: shipment_status_history → shipments (any is_test=1 ship OR ship whose order is_test=1)
     const polluted = db.prepare(`
       SELECT id FROM shipments WHERE is_test = 1
       UNION
@@ -970,33 +932,35 @@ const TEST_MARKER = '__NAWRA_TEST__';
     `).all().map(r => r.id);
     if (polluted.length) {
       const ph = polluted.map(() => '?').join(',');
-      log('shipment_status_history', db.prepare(`DELETE FROM shipment_status_history WHERE shipment_id IN (${ph})`).run(...polluted).changes);
-      log('shipments',               db.prepare(`DELETE FROM shipments               WHERE id IN (${ph})`).run(...polluted).changes);
+      log('is_test shipment_status_history', db.prepare(`DELETE FROM shipment_status_history WHERE shipment_id IN (${ph})`).run(...polluted).changes);
+      log('is_test shipments',               db.prepare(`DELETE FROM shipments               WHERE id IN (${ph})`).run(...polluted).changes);
     }
   } catch (e) { console.warn('[nawra-api] is_test purge shipments cascade:', e.message); }
-
   try {
     const retIds = db.prepare("SELECT id FROM returns WHERE is_test = 1").all().map(r => r.id);
     if (retIds.length) {
       const ph = retIds.map(() => '?').join(',');
-      log('return_items',        db.prepare(`DELETE FROM return_items        WHERE return_id IN (${ph}) OR is_test = 1`).run(...retIds).changes);
-      log('return_attachments',  db.prepare(`DELETE FROM return_attachments  WHERE return_id IN (${ph})`).run(...retIds).changes);
-      log('return_activity_log', db.prepare(`DELETE FROM return_activity_log WHERE return_id IN (${ph})`).run(...retIds).changes);
-      log('returns',             db.prepare(`DELETE FROM returns             WHERE id IN (${ph})`).run(...retIds).changes);
+      log('is_test return_items',        db.prepare(`DELETE FROM return_items        WHERE return_id IN (${ph}) OR is_test = 1`).run(...retIds).changes);
+      log('is_test return_attachments',  db.prepare(`DELETE FROM return_attachments  WHERE return_id IN (${ph})`).run(...retIds).changes);
+      log('is_test return_activity_log', db.prepare(`DELETE FROM return_activity_log WHERE return_id IN (${ph})`).run(...retIds).changes);
+      log('is_test returns',             db.prepare(`DELETE FROM returns             WHERE id IN (${ph})`).run(...retIds).changes);
     } else {
-      // Still sweep orphan return_items with is_test=1 (parent already deleted)
-      try { log('return_items (orphan)', db.prepare("DELETE FROM return_items WHERE is_test = 1").run().changes); } catch {}
+      try { log('is_test return_items (orphan)', db.prepare("DELETE FROM return_items WHERE is_test = 1").run().changes); } catch {}
     }
   } catch (e) { console.warn('[nawra-api] is_test purge returns cascade:', e.message); }
-
   ['orders', 'expenses', 'products', 'users'].forEach((t) => {
-    try { log(t, db.prepare(`DELETE FROM ${t} WHERE is_test = 1`).run().changes); }
+    try { log(`is_test ${t}`, db.prepare(`DELETE FROM ${t} WHERE is_test = 1`).run().changes); }
     catch (e) { console.warn(`[nawra-api] is_test purge ${t}:`, e.message); }
   });
 
-  if (total === 0) console.log('[nawra-api] is_test purge: nothing to remove');
-  else              console.log(`[nawra-api] is_test purge: removed ${total} rows total`);
-})();
+  const total = Object.values(breakdown).reduce((s, n) => s + n, 0);
+  if (total === 0) console.log('[nawra-api] test-data purge: nothing to remove');
+  else              console.log(`[nawra-api] test-data purge: removed ${total} rows total`);
+  return { total, breakdown };
+}
+
+// Boot-time purge.
+purgeTestData();
 
 console.log('[nawra-api] DB ready:', path.join(__dirname, 'orders.db'));
 
@@ -1324,6 +1288,18 @@ async function sendReturnEmail(kind, returnId, extras = {}) {
 }
 
 app.get('/api/health', (_req, res) => res.json({ ok: true, ts: Date.now(), mailer: !!mailer }));
+
+// POST /api/test-data/purge — explicit cleanup endpoint for smoke tests.
+// Safe to expose: only deletes rows tagged is_test=1 or carrying the
+// __NAWRA_TEST__ marker text, never touches real production rows.
+// Smokes call this in their atexit handler so cleanup is immediate
+// instead of waiting for the next PM2 restart.
+app.post('/api/test-data/purge', (_req, res) => {
+  try {
+    const result = purgeTestData();
+    res.json({ ok: true, ...result });
+  } catch (e) { console.error('POST /api/test-data/purge', e); res.status(500).json({ error: e.message }); }
+});
 
 // ── ORDERS ────────────────────────────────────────────────────────────────────
 const upsertUser = db.prepare(`
