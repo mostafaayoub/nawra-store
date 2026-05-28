@@ -726,7 +726,35 @@ function CartSide({ open, close, go }) {
   const [selAddrId, setSelAddrId] = useState(null);
   const [showNewAddrInCart, setShowNewAddrInCart] = useState(false);
   const [customerNotes, setCustomerNotes] = useState("");
+  // Live shipping quote — queries /api/shipping/calculate once the user has
+  // picked an address (so we know the governorate → zone). Until then we
+  // fall back to the flat `ship` that CartProvider computes from settings.
+  const [liveShip, setLiveShip] = useState(null); // null = not loaded; object = { fee, free, zone, ... }
   const W = mob ? "100vw" : "390px";
+
+  // Resolve the destination governorate from whichever input we have.
+  const selAddr = savedAddrs.find(a => a.id === selAddrId) || null;
+  const destGovernorate = selAddr ? selAddr.governorate : (f.city || "");
+
+  // Fetch live shipping fee whenever governorate or cart total changes.
+  // Falls back silently to the legacy `ship` value if the API errors.
+  useEffect(() => {
+    if (!destGovernorate || tot <= 0) { setLiveShip(null); return; }
+    let cancelled = false;
+    const qs = new URLSearchParams({ governorate: destGovernorate, total: String(tot) });
+    fetch(`/api/shipping/calculate?${qs}`)
+      .then(r => r.ok ? r.json() : null)
+      .then(d => { if (!cancelled && d) setLiveShip(d); })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, [destGovernorate, tot]);
+
+  // The fee actually shown to the customer + recorded on the order. Prefer
+  // the live quote when we have one; fall back to the CartProvider flat fee.
+  const effShip = liveShip ? (Number(liveShip.fee) || 0) : ship;
+  const effFreeNote = liveShip ? !!liveShip.free : (effShip === 0);
+  const effZoneName = liveShip && liveShip.zone ? liveShip.zone.name_ar : null;
+  const effEtaDays  = liveShip && liveShip.zone ? `${liveShip.zone.min_days}-${liveShip.zone.max_days}` : null;
 
   // Load user's saved addresses when entering checkout step
   useEffect(() => {
@@ -776,11 +804,13 @@ function CartSide({ open, close, go }) {
         qty: i.qty, price: i.price,
         img: i.img || null,
       })),
-      total: tot + ship, status: "جديد",
+      total: tot + effShip, status: "جديد",
       // New fields — recorded so admin Order Details can show the breakdown,
       // payment method, and any customer note. Defaults: cash-on-delivery, unpaid.
       subtotal: tot,
-      shipping_cost: ship,
+      shipping_cost: effShip,
+      // Zone label captured for analytics + the shipments page filter.
+      shipping_zone_name: effZoneName,
       discount_amount: 0,
       coupon_code: null,
       payment_method: "cash",
@@ -852,7 +882,7 @@ function CartSide({ open, close, go }) {
               ))}
               <div style={{ display:"flex", justifyContent:"space-between", fontFamily:C.fe, fontSize:15, borderTop:"1px solid rgba(196,149,106,.12)", paddingTop:8, marginTop:6, color:C.dk, fontWeight:500 }}>
                 <span style={{fontFamily:C.fa,fontSize:13}}>{t("cartTotal")}</span>
-                <span>{tot+ship} {t("egp")}</span>
+                <span>{tot+effShip} {t("egp")}</span>
               </div>
             </div>
 
@@ -970,8 +1000,15 @@ function CartSide({ open, close, go }) {
                   <span style={{ fontFamily: C.fb, fontSize: 11, color: C.mu, letterSpacing: "0.04em" }}>{t("cartTotal")}</span>
                   <span style={{ fontFamily: C.fe, fontSize: 20, fontWeight: 500, color: C.dk }}>{tot} {t("egp")}</span>
                 </div>
-                {ship > 0 && <div style={{ fontSize: 11, color: C.mu, marginBottom: 6, fontFamily: C.fb }}>+ {ship} {t("egp")} | {Math.max(0, freeShipMin - tot)} {t("cartShipAdd")}</div>}
-                {ship === 0 && <div style={{ fontSize: 11, color: "#2E6B3E", marginBottom: 6, fontFamily: C.fb }}>{t("cartShipFree")}</div>}
+                {effShip > 0 && !effFreeNote && (
+                  <div style={{ fontSize: 11, color: C.mu, marginBottom: 6, fontFamily: C.fb }}>
+                    + {effShip} {t("egp")}
+                    {effZoneName ? ` · ${effZoneName}` : ""}
+                    {effEtaDays ? ` · ${effEtaDays} يوم` : ""}
+                    {!liveShip && <> | {Math.max(0, freeShipMin - tot)} {t("cartShipAdd")}</>}
+                  </div>
+                )}
+                {effFreeNote && <div style={{ fontSize: 11, color: "#2E6B3E", marginBottom: 6, fontFamily: C.fb }}>{t("cartShipFree")}{effZoneName ? ` · ${effZoneName}` : ""}</div>}
                 <div style={{ background: C.cr2, padding: "9px 13px", fontSize: 11, color: C.wa, marginBottom: 12, fontFamily: C.fb }}>{t("cartCashOnly")}</div>
                 <Btn onClick={() => { if (!user) { close(); go("#login"); } else setStep(1); }}
                   style={{ width: "100%", background: C.dk, color: C.cr, padding: 16, fontSize: 13, letterSpacing: "0.05em", marginBottom: 8, fontFamily: C.fb, fontWeight: 600, border: "none" }}>{t("cartCheckout")}</Btn>
@@ -1889,6 +1926,70 @@ function AdminDash({ go }) {
     if (!confirm("حذف الكوبون نهائياً؟")) return;
     try { await fetch(`/api/coupons/${id}`, { method:"DELETE" }); refreshCoupons(); } catch {}
   };
+
+  // ── Shipments ─────────────────────────────────────────────────────────────
+  // Phase 2 list/details page. List uses the {rows,total,page,perPage}
+  // envelope from /api/shipments. Details opens as a modal — keyed by AWB
+  // so the URL can deep-link via #admin/shipments/AWB-XXXX (future).
+  const [shipments,       setShipments]       = useState([]);
+  const [shipTotal,       setShipTotal]       = useState(0);
+  const [shipPage,        setShipPage]        = useState(1);
+  const [shipTab,         setShipTab]         = useState("all"); // all | ready | shipped | delivered | returned | cancelled
+  const [shipFilters,     setShipFilters]     = useState({ q:"", from:"", to:"", courier_id:"all", zone_id:"all", sort:"newest" });
+  const [shipAggregates,  setShipAggregates]  = useState({ counts:{}, courier_cost_month:0, customer_paid_month:0, shipping_margin_month:0 });
+  const [shipCouriers,    setShipCouriers]    = useState([]);
+  const [shipZones,       setShipZones]       = useState([]);
+  const [shipSelected,    setShipSelected]    = useState({}); // { [id]: true } for bulk
+  const [shipDetailAwb,   setShipDetailAwb]   = useState(null);
+  const [shipDetail,      setShipDetail]      = useState(null);
+
+  const refreshShipments = useCallback(async () => {
+    try {
+      const qs = new URLSearchParams({
+        status: shipTab,
+        q: shipFilters.q || "",
+        from: shipFilters.from || "",
+        to: shipFilters.to || "",
+        courier_id: shipFilters.courier_id !== "all" ? shipFilters.courier_id : "",
+        zone_id:    shipFilters.zone_id    !== "all" ? shipFilters.zone_id    : "",
+        sort: shipFilters.sort === "newest" ? "" : shipFilters.sort,
+        page: String(shipPage), perPage: "25",
+      });
+      [...qs.keys()].forEach(k => { if (qs.get(k) === "") qs.delete(k); });
+      const r = await fetch(`/api/shipments?${qs}`);
+      if (r.ok) { const d = await r.json(); setShipments(d.rows || []); setShipTotal(Number(d.total) || 0); }
+    } catch {}
+  }, [shipTab, shipFilters, shipPage]);
+  const refreshShipAggregates = useCallback(async () => {
+    try { const r = await fetch("/api/shipments/aggregates"); if (r.ok) setShipAggregates(await r.json()); } catch {}
+  }, []);
+  const refreshShipCouriers = useCallback(async () => {
+    try { const r = await fetch("/api/shipping/couriers?all=1"); if (r.ok) setShipCouriers(await r.json()); } catch {}
+  }, []);
+  const refreshShipZones = useCallback(async () => {
+    try { const r = await fetch("/api/shipping/zones?all=1"); if (r.ok) setShipZones(await r.json()); } catch {}
+  }, []);
+  useEffect(() => {
+    if (tab === "shipping") {
+      refreshShipments(); refreshShipAggregates(); refreshShipCouriers(); refreshShipZones();
+    }
+  }, [tab, refreshShipments, refreshShipAggregates, refreshShipCouriers, refreshShipZones]);
+
+  const patchShipment = async (idOrAwb, patch) => {
+    setShipments(prev => prev.map(s => (s.id === idOrAwb || s.awb_number === idOrAwb) ? { ...s, ...patch } : s));
+    try {
+      const r = await fetch(`/api/shipments/${encodeURIComponent(idOrAwb)}`, {
+        method:"PATCH", headers:{"Content-Type":"application/json"},
+        body: JSON.stringify({ ...patch, actor_id: (authUser && authUser.email) || null, actor_name: (authUser && authUser.name) || null }),
+      });
+      if (r.ok) { const fresh = await r.json(); setShipDetail(prev => (prev && (prev.id === idOrAwb || prev.awb_number === idOrAwb)) ? fresh : prev); refreshShipAggregates(); refreshShipments(); }
+    } catch {}
+  };
+  const refreshShipDetail = useCallback(async (awb) => {
+    if (!awb) { setShipDetail(null); return; }
+    try { const r = await fetch(`/api/shipments/${encodeURIComponent(awb)}`); if (r.ok) setShipDetail(await r.json()); else setShipDetail(null); } catch { setShipDetail(null); }
+  }, []);
+  useEffect(() => { refreshShipDetail(shipDetailAwb); }, [shipDetailAwb, refreshShipDetail]);
 
   // ── Returns ────────────────────────────────────────────────────────────────
   // Phase 1: list page uses {rows,total,page,perPage} envelope from the new
@@ -6669,77 +6770,265 @@ function AdminDash({ go }) {
             );
           })()}
 
-          {/* ─── SHIPPING ────────────────────────────────────────────────── */}
+          {/* ─── SHIPMENTS MANAGEMENT (Phase 2 of the shipping refactor) ─── */}
           {tab === "shipping" && (() => {
-            const inputSm = { padding:"6px 10px", border:ui.border, borderRadius:6, background:ui.cardBg,
-              fontFamily:ui.fontBody, fontSize:13, color:ui.text, outline:"none", direction:"rtl", boxSizing:"border-box" };
-            const Toggle = ({ value, onChange }) => (
-              <button type="button" onClick={()=>onChange(!value)}
-                style={{ width:38, height:22, borderRadius:11, border:"none",
-                  background: value ? "#16A34A" : "#D4D4D4", position:"relative",
-                  cursor:"pointer", transition:"background .2s", flexShrink:0 }}>
-                <span style={{ position:"absolute", top:2, [value?"left":"right"]:2, width:18, height:18,
-                  background:"#fff", borderRadius:"50%", boxShadow:"0 1px 2px rgba(0,0,0,.2)" }}/>
-              </button>
-            );
-            const Section = ({ title, children }) => (
-              <div style={{background:ui.cardBg,border:ui.border,borderRadius:ui.radius,padding:mob?"14px":"18px",marginBottom:12}}>
-                <div style={{fontSize:13,fontWeight:600,color:ui.text,fontFamily:ui.fontBody,marginBottom:14,paddingBottom:8,borderBottom:`0.5px solid #EEE`}}>{title}</div>
-                {children}
-              </div>
-            );
-            const editZone = (id, patch) => {
-              setShipping(s => ({ ...s, zones: s.zones.map(z => z.id===id ? { ...z, ...patch } : z) }));
+            const ag = shipAggregates || { counts:{} };
+            const counts = ag.counts || {};
+            const statusBadge = (s) => {
+              if (s === "ready")     return { bg:"#FEF3C7", fg:"#92400E", l:"جاهز للشحن" };
+              if (s === "shipped")   return { bg:"#DBEAFE", fg:"#1D4ED8", l:"تم الشحن" };
+              if (s === "delivered") return { bg:"#DCFCE7", fg:"#15803D", l:"تم التسليم" };
+              if (s === "returned")  return { bg:"#FEE2E2", fg:"#B91C1C", l:"مرتجع للمتجر" };
+              if (s === "cancelled") return { bg:"#F3F4F6", fg:"#525252", l:"ملغي" };
+              return { bg:"#F3F4F6", fg:"#525252", l: s || "—" };
             };
+            const shipTabs = [
+              ["all",       "الكل",         counts.total     || 0],
+              ["ready",     "جاهز للشحن",   counts.ready     || 0],
+              ["shipped",   "تم الشحن",     counts.shipped   || 0],
+              ["delivered", "تم التسليم",   counts.delivered || 0],
+              ["returned",  "مرتجع للمتجر", counts.returned  || 0],
+              ["cancelled", "ملغي",         counts.cancelled || 0],
+            ];
+            const relDate = (iso) => {
+              if (!iso) return "—";
+              const t = new Date(String(iso).replace(" ","T") + "Z").getTime();
+              if (!t) return "—";
+              const days = Math.round((Date.now() - t) / 86400000);
+              if (days < 1) return "اليوم";
+              if (days === 1) return "أمس";
+              if (days < 7) return `منذ ${days} أيام`;
+              return new Date(t).toLocaleDateString("ar-EG");
+            };
+            const exportCsv = () => {
+              const head = ["AWB","رقم الطلب","العميل","المنطقة","الوزن (كجم)","الشركة","تكلفة الشحن","محصل من العميل","الحالة","تاريخ الشحن"];
+              const esc = (v) => { const x = v == null ? "" : String(v); return /[",\n]/.test(x) ? `"${x.replace(/"/g,'""')}"` : x; };
+              const rows = (Object.keys(shipSelected).filter(k => shipSelected[k]).length > 0)
+                ? shipments.filter(r => shipSelected[r.id]) : shipments;
+              const lines = [head.join(",")];
+              rows.forEach(r => lines.push([
+                r.awb_number, r.order_id, r.customer_name, r.zone_name,
+                r.weight_kg, r.courier_name,
+                (Number(r.courier_cost)||0).toLocaleString(),
+                ((Number(r.customer_paid_shipping)||0) + (Number(r.customer_paid_cod)||0)).toLocaleString(),
+                statusBadge(r.status).l,
+                r.shipped_at || ""
+              ].map(esc).join(",")));
+              const blob = new Blob(["﻿" + lines.join("\n")], { type:"text/csv;charset=utf-8;" });
+              const url = URL.createObjectURL(blob);
+              const a = document.createElement("a"); a.href = url; a.download = `shipments_${Date.now()}.csv`;
+              document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(url);
+            };
+            const totalPages = Math.max(1, Math.ceil(shipTotal / 25));
+            const allChecked = shipments.length > 0 && shipments.every(r => shipSelected[r.id]);
+            const selectedIds = Object.keys(shipSelected).filter(k => shipSelected[k]);
+
             return (
-              <div style={{maxWidth:1080}}>
-                {savedToast && (
-                  <div style={{padding:"8px 14px",borderRadius:6,marginBottom:10,background:"#DCFCE7",color:"#15803D",fontSize:12.5,fontFamily:ui.fontBody,border:"0.5px solid #86EFAC"}}>{savedToast}</div>
+              <div>
+                {/* Top bar */}
+                <div style={{display:"flex",alignItems:"flex-start",justifyContent:"space-between",marginBottom:14,flexWrap:"wrap",gap:10}}>
+                  <div>
+                    <h2 style={{fontSize:18,fontWeight:600,color:ui.text,fontFamily:ui.fontBody,margin:0}}>إدارة الشحنات</h2>
+                    <div style={{fontSize:12,color:ui.textSub,fontFamily:ui.fontBody,marginTop:2}}>تتبع كل شحنات المتجر</div>
+                  </div>
+                  <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
+                    <button onClick={exportCsv}
+                      style={{padding:"8px 14px",background:ui.cardBg,color:ui.text,border:ui.border,borderRadius:6,fontSize:12.5,cursor:"pointer",fontFamily:ui.fontBody}}>
+                      تصدير CSV
+                    </button>
+                    <button disabled title="سيتم تفعيل طباعة البوليصات المجمعة في المرحلة الثالثة (jsPDF + bwip-js)"
+                      style={{padding:"8px 14px",background:ui.text,color:"#fff",border:"none",borderRadius:6,fontSize:12.5,cursor:"not-allowed",fontFamily:ui.fontBody,opacity:0.55}}>
+                      طباعة بوليصات مجمعة
+                    </button>
+                  </div>
+                </div>
+
+                {/* KPI cards (5) */}
+                <div style={{display:"grid",gridTemplateColumns:mob?"1fr 1fr":"repeat(5,1fr)",gap:10,marginBottom:10}}>
+                  <div style={{background:ui.cardBg,border:ui.border,borderRadius:ui.radius,padding:"14px 16px",borderTop:`3px solid ${(counts.shipped || 0) > 10 ? "#F59E0B" : "#3B82F6"}`}}>
+                    <div style={{fontSize:11.5,color:ui.textSub,fontFamily:ui.fontBody,marginBottom:5}}>شحنات قيد التوصيل</div>
+                    <div style={{fontSize:mob?17:21,color:ui.text,fontFamily:ui.fontHead,fontWeight:500}}>{counts.shipped || 0}</div>
+                  </div>
+                  <div style={{background:ui.cardBg,border:ui.border,borderRadius:ui.radius,padding:"14px 16px",borderTop:"3px solid #16A34A"}}>
+                    <div style={{fontSize:11.5,color:ui.textSub,fontFamily:ui.fontBody,marginBottom:5}}>تم تسليمها هذا الشهر</div>
+                    <div style={{fontSize:mob?17:21,color:ui.text,fontFamily:ui.fontHead,fontWeight:500}}>{ag.delivered_current_month || 0}</div>
+                    {ag.delivered_change_pct != null && ag.delivered_change_pct !== 0 && (
+                      <div style={{fontSize:11,marginTop:4,color: ag.delivered_change_pct > 0 ? "#16A34A" : "#DC2626",fontFamily:ui.fontBody}}>
+                        {ag.delivered_change_pct > 0 ? "↑" : "↓"} {Math.abs(ag.delivered_change_pct)}% مقارنة بالشهر السابق
+                      </div>
+                    )}
+                  </div>
+                  <div style={{background:ui.cardBg,border:ui.border,borderRadius:ui.radius,padding:"14px 16px",borderTop:"3px solid #0EA5E9"}}>
+                    <div style={{fontSize:11.5,color:ui.textSub,fontFamily:ui.fontBody,marginBottom:5}}>متوسط وقت التوصيل</div>
+                    <div style={{fontSize:mob?17:21,color:ui.text,fontFamily:ui.fontHead,fontWeight:500}}>
+                      {ag.avg_delivery_days == null ? "—" : `${ag.avg_delivery_days}`}
+                      {ag.avg_delivery_days != null && <span style={{fontSize:11,color:ui.textSub,marginInlineStart:4,fontFamily:ui.fontBody}}>يوم</span>}
+                    </div>
+                  </div>
+                  <div style={{background:ui.cardBg,border:ui.border,borderRadius:ui.radius,padding:"14px 16px",borderTop:"3px solid #9333EA"}}>
+                    <div style={{fontSize:11.5,color:ui.textSub,fontFamily:ui.fontBody,marginBottom:5}}>نسبة التوصيل في الوقت</div>
+                    <div style={{fontSize:mob?17:21,color:ui.text,fontFamily:ui.fontHead,fontWeight:500}}>
+                      {ag.on_time_pct == null ? "—" : `${ag.on_time_pct}%`}
+                    </div>
+                  </div>
+                  <div style={{background:ui.cardBg,border:ui.border,borderRadius:ui.radius,padding:"14px 16px",borderTop:"3px solid #F97316"}}>
+                    <div style={{fontSize:11.5,color:ui.textSub,fontFamily:ui.fontBody,marginBottom:5}}>تكلفة الشحن (الشهر)</div>
+                    <div style={{fontSize:mob?17:21,color:ui.text,fontFamily:ui.fontHead,fontWeight:500}}>
+                      {(ag.courier_cost_month || 0).toLocaleString()} <span style={{fontSize:11,color:ui.textSub,fontFamily:ui.fontBody}}>ج</span>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Insight: shipping margin */}
+                <div style={{background:ui.cardBg,border:ui.border,borderRadius:ui.radius,padding:"12px 16px",marginBottom:14,display:"flex",alignItems:"center",justifyContent:"space-between",gap:10,flexWrap:"wrap"}}>
+                  <div>
+                    <div style={{fontSize:11.5,color:ui.textSub,fontFamily:ui.fontBody,marginBottom:4}}>هامش الشحن (الشهر)</div>
+                    <div style={{fontSize:14,color:ui.text,fontFamily:ui.fontBody,lineHeight:1.7}}>
+                      محصل من العملاء <b style={{fontFamily:"monospace"}}>{(ag.customer_paid_month || 0).toLocaleString()} ج</b> ناقص تكلفة الشركة <b style={{fontFamily:"monospace"}}>{(ag.courier_cost_month || 0).toLocaleString()} ج</b>
+                    </div>
+                  </div>
+                  <div style={{fontSize:20,fontFamily:ui.fontHead,fontWeight:700,color: (ag.shipping_margin_month || 0) >= 0 ? "#16A34A" : "#DC2626"}}>
+                    {(ag.shipping_margin_month || 0) >= 0 ? "+" : ""}{(ag.shipping_margin_month || 0).toLocaleString()} <span style={{fontSize:12,color:ui.textSub,fontFamily:ui.fontBody,fontWeight:400}}>ج</span>
+                    <div style={{fontSize:10.5,color: (ag.shipping_margin_month || 0) >= 0 ? "#15803D" : "#B91C1C",fontFamily:ui.fontBody,fontWeight:400,textAlign:"end"}}>
+                      {(ag.shipping_margin_month || 0) >= 0 ? "مربح" : "أنت تدعم الشحن"}
+                    </div>
+                  </div>
+                </div>
+
+                {/* Tabs */}
+                <div style={{background:ui.cardBg,border:ui.border,borderRadius:ui.radius,padding:"6px 6px",marginBottom:10,display:"flex",gap:4,overflowX:"auto"}}>
+                  {shipTabs.map(([k,l,n]) => (
+                    <button key={k} onClick={()=>{ setShipTab(k); setShipPage(1); setShipSelected({}); }}
+                      style={{padding:"7px 14px",border:"none",cursor:"pointer",borderRadius:6,
+                        background: shipTab===k ? ui.text : "transparent",
+                        color: shipTab===k ? "#fff" : ui.textSub,
+                        fontSize:12, fontFamily:ui.fontBody, whiteSpace:"nowrap"}}>
+                      {l} ({n})
+                    </button>
+                  ))}
+                </div>
+
+                {/* Filter bar */}
+                <div style={{display:"flex",gap:8,flexWrap:"wrap",marginBottom:10}}>
+                  <input value={shipFilters.q} onChange={e=>{setShipFilters({...shipFilters,q:e.target.value}); setShipPage(1);}}
+                    placeholder="بحث برقم البوليصة/الطلب/العميل/الهاتف"
+                    style={{padding:"8px 11px",border:ui.border,borderRadius:6,background:ui.cardBg,fontFamily:ui.fontBody,fontSize:12.5,color:ui.text,outline:"none",direction:"rtl",minWidth:240,flex:1}}/>
+                  <select value={shipFilters.zone_id} onChange={e=>{setShipFilters({...shipFilters,zone_id:e.target.value}); setShipPage(1);}}
+                    style={{padding:"8px 11px",border:ui.border,borderRadius:6,background:ui.cardBg,fontFamily:ui.fontBody,fontSize:12.5,color:ui.text,outline:"none"}}>
+                    <option value="all">كل المناطق</option>
+                    {(shipZones || []).map(z => <option key={z.id} value={z.id}>{z.name_ar}</option>)}
+                  </select>
+                  <select value={shipFilters.courier_id} onChange={e=>{setShipFilters({...shipFilters,courier_id:e.target.value}); setShipPage(1);}}
+                    style={{padding:"8px 11px",border:ui.border,borderRadius:6,background:ui.cardBg,fontFamily:ui.fontBody,fontSize:12.5,color:ui.text,outline:"none"}}>
+                    <option value="all">كل الشركات</option>
+                    {(shipCouriers || []).map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
+                  </select>
+                  <input type="date" value={shipFilters.from} onChange={e=>{setShipFilters({...shipFilters,from:e.target.value}); setShipPage(1);}}
+                    title="من تاريخ"
+                    style={{padding:"8px 11px",border:ui.border,borderRadius:6,background:ui.cardBg,fontFamily:ui.fontBody,fontSize:12.5,color:ui.text,outline:"none"}}/>
+                  <input type="date" value={shipFilters.to} onChange={e=>{setShipFilters({...shipFilters,to:e.target.value}); setShipPage(1);}}
+                    title="إلى تاريخ"
+                    style={{padding:"8px 11px",border:ui.border,borderRadius:6,background:ui.cardBg,fontFamily:ui.fontBody,fontSize:12.5,color:ui.text,outline:"none"}}/>
+                  <select value={shipFilters.sort} onChange={e=>setShipFilters({...shipFilters,sort:e.target.value})}
+                    style={{padding:"8px 11px",border:ui.border,borderRadius:6,background:ui.cardBg,fontFamily:ui.fontBody,fontSize:12.5,color:ui.text,outline:"none"}}>
+                    <option value="newest">الأحدث</option>
+                    <option value="late">المتأخرة أولاً</option>
+                    <option value="heavy">الأعلى وزناً</option>
+                  </select>
+                </div>
+
+                {/* Bulk action bar */}
+                {selectedIds.length > 0 && (
+                  <div style={{background:"#FFFBEA",border:"1px solid #FDE68A",borderRadius:6,padding:"8px 12px",marginBottom:8,display:"flex",alignItems:"center",gap:10,flexWrap:"wrap"}}>
+                    <span style={{fontSize:12.5,color:"#92400E",fontFamily:ui.fontBody}}>{selectedIds.length} شحنة محددة</span>
+                    <button onClick={exportCsv}
+                      style={{padding:"5px 11px",background:"#fff",border:"0.5px solid #FDE68A",borderRadius:5,fontSize:11.5,cursor:"pointer",color:"#92400E",fontFamily:ui.fontBody}}>تصدير المحدد</button>
+                    <button onClick={() => { selectedIds.forEach(id => patchShipment(id, {status:"shipped"})); setShipSelected({}); }}
+                      style={{padding:"5px 11px",background:"#DBEAFE",border:"0.5px solid #93C5FD",borderRadius:5,fontSize:11.5,cursor:"pointer",color:"#1D4ED8",fontFamily:ui.fontBody}}>
+                      تحديث الحالة → تم الشحن
+                    </button>
+                  </div>
                 )}
 
-                <Section title="مناطق الشحن">
-                  <div style={{overflowX:"auto"}}>
-                    <table style={{width:"100%",borderCollapse:"collapse",fontFamily:ui.fontBody,minWidth:700}}>
+                {/* Result count */}
+                <div style={{fontSize:12.5,color:ui.textSub,fontFamily:ui.fontBody,marginBottom:8}}>
+                  {shipTotal === 0 ? "لا توجد شحنات حالياً" : `${shipments.length} من ${shipTotal} شحنة`}
+                </div>
+
+                {/* Table or empty state */}
+                {(counts.total || 0) === 0 ? (
+                  <div style={{background:ui.cardBg,border:ui.border,borderRadius:ui.radius,padding:"56px 20px",textAlign:"center"}}>
+                    <div style={{fontSize:42,marginBottom:10}}>📦</div>
+                    <div style={{fontSize:15,color:ui.text,fontFamily:ui.fontBody,fontWeight:600,marginBottom:6}}>لا توجد شحنات بعد</div>
+                    <div style={{fontSize:12.5,color:ui.textSub,fontFamily:ui.fontBody,maxWidth:380,margin:"0 auto"}}>
+                      ستظهر هنا كل الشحنات بعد ضغط "شحن الطلب" من صفحة تفاصيل أي طلب.
+                    </div>
+                  </div>
+                ) : shipments.length === 0 ? (
+                  <div style={{background:ui.cardBg,border:ui.border,borderRadius:ui.radius,padding:"40px",textAlign:"center",color:ui.textSub,fontFamily:ui.fontBody,fontSize:13}}>
+                    لا توجد نتائج تطابق الفلاتر — جرّب توسيع المعايير
+                  </div>
+                ) : (
+                  <div style={{background:ui.cardBg,border:ui.border,borderRadius:ui.radius,overflow:"hidden",overflowX:"auto"}}>
+                    <table style={{width:"100%",borderCollapse:"collapse",direction:"rtl",fontFamily:ui.fontBody,minWidth:1100}}>
                       <thead>
                         <tr style={{background:ui.sideBg,borderBottom:`0.5px solid #E5E5E5`}}>
-                          {["المنطقة","المحافظات","السعر (ج)","أيام التوصيل","إجراء"].map(h=>(
-                            <th key={h} style={{padding:"10px 12px",textAlign:"right",fontSize:11.5,color:ui.textSub,fontWeight:500,whiteSpace:"nowrap"}}>{h}</th>
+                          <th style={{padding:"11px 10px",textAlign:"right",width:32}}>
+                            <input type="checkbox" checked={allChecked}
+                              onChange={e => {
+                                if (e.target.checked) { const n = {}; shipments.forEach(r => { n[r.id] = true; }); setShipSelected(n); }
+                                else setShipSelected({});
+                              }}/>
+                          </th>
+                          {["AWB","رقم الطلب","العميل","المنطقة","الوزن","الشركة","تكلفة الشحن","محصل من العميل","تاريخ الشحن","المتوقع","الحالة","الإجراءات"].map(h => (
+                            <th key={h} style={{padding:"11px 12px",textAlign:"right",fontSize:11.5,color:ui.textSub,fontWeight:500,whiteSpace:"nowrap"}}>{h}</th>
                           ))}
                         </tr>
                       </thead>
                       <tbody>
-                        {shipping.zones.map(z => {
-                          const isEdit = shipZoneEdit === z.id;
+                        {shipments.map(r => {
+                          const b = statusBadge(r.status);
+                          const customerPaid = (Number(r.customer_paid_shipping)||0) + (Number(r.customer_paid_cod)||0);
+                          const isLate = r.status === "shipped" && r.expected_delivery_date
+                            && r.expected_delivery_date < new Date().toISOString().slice(0,10);
                           return (
-                            <tr key={z.id} style={{borderTop:"0.5px solid #EEE"}}>
-                              <td style={{padding:"10px 12px"}}>
-                                {isEdit
-                                  ? <input style={{...inputSm, width:"100%"}} value={z.name} onChange={e=>editZone(z.id,{name:e.target.value})}/>
-                                  : <span style={{fontSize:13,color:ui.text,fontWeight:500}}>{z.name}</span>}
+                            <tr key={r.id} style={{borderTop:"0.5px solid #EEE", background: isLate ? "#FEF2F2" : "transparent"}}>
+                              <td style={{padding:"9px 10px"}}>
+                                <input type="checkbox" checked={!!shipSelected[r.id]}
+                                  onChange={e => setShipSelected(p => ({...p, [r.id]: e.target.checked}))}/>
                               </td>
-                              <td style={{padding:"10px 12px",maxWidth:320}}>
-                                {isEdit
-                                  ? <input style={{...inputSm, width:"100%"}} value={z.governorates} onChange={e=>editZone(z.id,{governorates:e.target.value})}/>
-                                  : <span style={{fontSize:12,color:ui.textSub,lineHeight:1.6}}>{z.governorates}</span>}
+                              <td style={{padding:"9px 12px",fontSize:11.5,color:ui.textSub,fontFamily:"monospace"}}>{r.awb_number || "—"}</td>
+                              <td style={{padding:"9px 12px",fontSize:12,fontFamily:"monospace"}}>
+                                {r.order_id ? (
+                                  <a href={`#admin/orders/${encodeURIComponent(r.order_id)}`} style={{color:"#1D4ED8",textDecoration:"none"}}>
+                                    #{r.order_number || r.order_id}
+                                  </a>
+                                ) : "—"}
                               </td>
-                              <td style={{padding:"10px 12px"}}>
-                                {isEdit
-                                  ? <input type="number" style={{...inputSm, width:80}} value={z.price} onChange={e=>editZone(z.id,{price:Number(e.target.value)||0})}/>
-                                  : <span style={{fontSize:13,color:ui.text,fontWeight:500}}>{z.price} ج</span>}
+                              <td style={{padding:"9px 12px",fontSize:13,color:ui.text}}>
+                                {r.customer_name || "—"}
+                                {r.customer_phone && <div style={{fontSize:11,color:ui.textSub,fontFamily:"monospace"}}>{r.customer_phone}</div>}
                               </td>
-                              <td style={{padding:"10px 12px"}}>
-                                {isEdit
-                                  ? <input style={{...inputSm, width:80}} value={z.days} onChange={e=>editZone(z.id,{days:e.target.value})}/>
-                                  : <span style={{fontSize:12.5,color:ui.text}}>{z.days} يوم</span>}
+                              <td style={{padding:"9px 12px",fontSize:12,color:ui.textSub}}>{r.zone_name || "—"}</td>
+                              <td style={{padding:"9px 12px",fontSize:12,color:ui.text,whiteSpace:"nowrap"}}>{(Number(r.weight_kg) || 0).toFixed(2)} <span style={{fontSize:10.5,color:ui.textSub}}>كجم</span></td>
+                              <td style={{padding:"9px 12px",fontSize:12,color:ui.text}}>{r.courier_name || "—"}</td>
+                              <td style={{padding:"9px 12px",fontSize:12.5,color:ui.text,fontWeight:500,whiteSpace:"nowrap"}}>{(Number(r.courier_cost)||0).toLocaleString()} ج</td>
+                              <td style={{padding:"9px 12px",fontSize:12.5,color:ui.text,fontWeight:500,whiteSpace:"nowrap"}}>{customerPaid.toLocaleString()} ج</td>
+                              <td style={{padding:"9px 12px",fontSize:11.5,color:ui.textSub,whiteSpace:"nowrap"}}>
+                                {r.shipped_at ? relDate(r.shipped_at) : <span style={{color:ui.textSub,fontStyle:"italic"}}>—</span>}
                               </td>
-                              <td style={{padding:"10px 12px",textAlign:"left"}}>
-                                {isEdit ? (
-                                  <button onClick={()=>{ setShipZoneEdit(null); saveSetting("shipping", shipping); }}
-                                    style={{background:ui.text,color:"#fff",border:"none",padding:"4px 11px",cursor:"pointer",fontSize:11.5,borderRadius:4,fontFamily:ui.fontBody}}>حفظ</button>
-                                ) : (
-                                  <button onClick={()=>setShipZoneEdit(z.id)}
-                                    style={{background:"transparent",border:ui.border,padding:"4px 11px",cursor:"pointer",fontSize:11.5,color:ui.text,borderRadius:4,fontFamily:ui.fontBody}}>تعديل</button>
-                                )}
+                              <td style={{padding:"9px 12px",fontSize:11.5,color: isLate ? "#B91C1C" : ui.textSub,whiteSpace:"nowrap",fontWeight: isLate ? 600 : 400}}>
+                                {r.expected_delivery_date || "—"}
+                                {isLate && <span style={{marginInlineStart:4,fontSize:10}}>⚠</span>}
+                              </td>
+                              <td style={{padding:"9px 12px"}}>
+                                <span style={{fontSize:10.5,padding:"3px 10px",borderRadius:20,background:b.bg,color:b.fg,fontFamily:ui.fontBody,whiteSpace:"nowrap"}}>{b.l}</span>
+                              </td>
+                              <td style={{padding:"9px 12px",textAlign:"left",whiteSpace:"nowrap"}}>
+                                <button title="عرض التفاصيل" onClick={() => setShipDetailAwb(r.awb_number || r.id)}
+                                  style={{background:"transparent",border:"none",cursor:"pointer",padding:4,color:"#1D4ED8",fontSize:14}}>
+                                  👁
+                                </button>
                               </td>
                             </tr>
                           );
@@ -6747,30 +7036,40 @@ function AdminDash({ go }) {
                       </tbody>
                     </table>
                   </div>
-                </Section>
+                )}
 
-                <div style={{padding:"10px 14px",background:"#FAFAFA",border:"0.5px dashed #D4D4D4",borderRadius:6,marginBottom:12,fontSize:11.5,color:ui.textSub,fontFamily:ui.fontBody,lineHeight:1.7}}>
-                  ℹ إعدادات الشحن المجاني (التفعيل + الحد الأدنى) تم نقلها لـ <strong>الإعدادات → الشحن</strong> ويتحكم فيها <strong>Super Admin</strong> فقط.
-                </div>
+                {/* Pagination */}
+                {totalPages > 1 && (
+                  <div style={{display:"flex",justifyContent:"center",alignItems:"center",gap:8,marginTop:12,fontFamily:ui.fontBody,fontSize:12.5}}>
+                    <button disabled={shipPage <= 1} onClick={() => setShipPage(shipPage - 1)}
+                      style={{padding:"5px 11px",border:ui.border,background:ui.cardBg,borderRadius:5,cursor:shipPage <= 1 ? "not-allowed" : "pointer",opacity:shipPage <= 1 ? 0.5 : 1,color:ui.text}}>السابق</button>
+                    <span style={{color:ui.textSub}}>{shipPage} / {totalPages}</span>
+                    <button disabled={shipPage >= totalPages} onClick={() => setShipPage(shipPage + 1)}
+                      style={{padding:"5px 11px",border:ui.border,background:ui.cardBg,borderRadius:5,cursor:shipPage >= totalPages ? "not-allowed" : "pointer",opacity:shipPage >= totalPages ? 0.5 : 1,color:ui.text}}>التالي</button>
+                  </div>
+                )}
 
-                <Section title="شركات الشحن">
-                  {[
-                    { key:"bosta",  l:"Bosta",     hint:"خدمة شحن سريع — توصيل خلال 24-48 ساعة" },
-                    { key:"jt",     l:"J&T Express", hint:"شبكة توصيل واسعة لكل المحافظات" },
-                    { key:"aramex", l:"Aramex",    hint:"شحن دولي ومحلي مع تتبع كامل" },
-                  ].map((c,i,arr)=>(
-                    <div key={c.key} style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"10px 0",borderBottom: i < arr.length-1 ? `0.5px solid #EEE` : "none"}}>
-                      <div>
-                        <div style={{fontSize:13,color:ui.text,fontWeight:500,fontFamily:ui.fontBody}}>{c.l}</div>
-                        <div style={{fontSize:11.5,color:ui.textSub,fontFamily:ui.fontBody,marginTop:2}}>{c.hint}</div>
-                      </div>
-                      <Toggle value={!!shipping.companies[c.key]} onChange={v=>{
-                        const next = { ...shipping, companies: { ...shipping.companies, [c.key]: v } };
-                        setShipping(next); saveSetting("shipping", next);
-                      }}/>
-                    </div>
-                  ))}
-                </Section>
+                {/* Shipment Details modal */}
+                {shipDetailAwb && (
+                  <ShipmentDetailsModal
+                    ship={shipDetail}
+                    awbKey={shipDetailAwb}
+                    onClose={() => setShipDetailAwb(null)}
+                    onPatch={patchShipment}
+                    onAppendNote={async (note) => {
+                      try {
+                        const r = await fetch(`/api/shipments/${encodeURIComponent(shipDetailAwb)}/notes`, {
+                          method:"POST", headers:{"Content-Type":"application/json"},
+                          body: JSON.stringify({ note, author: (authUser && authUser.name) || (authUser && authUser.email) || "admin" }),
+                        });
+                        if (r.ok) refreshShipDetail(shipDetailAwb);
+                      } catch {}
+                    }}
+                    isSuper={isSuper}
+                    ui={ui}
+                    mob={mob}
+                  />
+                )}
               </div>
             );
           })()}
@@ -6926,7 +7225,7 @@ function AdminDash({ go }) {
                 <div style={{background:ui.cardBg,border:ui.border,borderRadius:ui.radius,padding:"6px 6px",marginBottom:12,display:"flex",gap:4,flexWrap:"wrap"}}>
                   {[
                     ["store","المتجر"],["account","الحساب"],["emails","الإيميلات"],
-                    ["payment","الدفع"],["shipping_free","الشحن"],
+                    ["payment","الدفع"],["shipping","الشحن"],
                     ["notifications","الإشعارات"],["team","الفريق"],
                     ["expenses","المصروفات"],["returns","المرتجعات"],["seo","SEO"]
                   ].map(([k,l])=>(
@@ -7238,58 +7537,13 @@ function AdminDash({ go }) {
                 )}
 
                 {/* ── SHIPPING (super-admin only) ──────────────────────── */}
-                {settingsTab === "shipping_free" && (
-                  <div>
-                    <div style={sectionCard}>
-                      <div style={sectionTitle}>الشحن المجاني</div>
-                      <div style={{fontSize:11.5,color:ui.textSub,fontFamily:ui.fontBody,marginBottom:14,padding:"8px 12px",background:"#FAFAFA",borderRadius:6}}>
-                        🔒 يتحكم فيها Super Admin فقط. التغيير ينعكس فوراً على البانر في الصفحة الرئيسية وعربة التسوق.
-                      </div>
-                      <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"6px 0",borderBottom:`0.5px solid #EEE`,marginBottom:14}}>
-                        <span style={{fontSize:13,color:ui.text,fontFamily:ui.fontBody,fontWeight:500}}>تفعيل الشحن المجاني للطلبات الكبيرة</span>
-                        <button type="button"
-                          onClick={()=>{
-                            const next = { ...shipping, free_shipping_enabled: !shipping.free_shipping_enabled };
-                            setShipping(next); saveSetting("shipping", next);
-                          }}
-                          style={{ width:38, height:22, borderRadius:11, border:"none",
-                            background: shipping.free_shipping_enabled ? "#16A34A" : "#D4D4D4",
-                            position:"relative", cursor:"pointer", flexShrink:0 }}>
-                          <span style={{ position:"absolute", top:2,
-                            [shipping.free_shipping_enabled ? "left" : "right"]: 2,
-                            width:18, height:18, background:"#fff", borderRadius:"50%",
-                            boxShadow:"0 1px 2px rgba(0,0,0,.2)" }}/>
-                        </button>
-                      </div>
-
-                      <label style={{display:"block",fontSize:12,color:ui.text,fontFamily:ui.fontBody,marginBottom:5}}>الحد الأدنى للطلب (جنيه)</label>
-                      {/* Uncontrolled input: defaultValue + onBlur. The `key`
-                          forces a remount only when the saved value actually
-                          changes server-side, so typing doesn't lose focus. */}
-                      <div style={{display:"grid",gridTemplateColumns:mob?"1fr":"1fr auto",gap:10,alignItems:"end"}}>
-                        <input type="text" inputMode="numeric" pattern="[0-9]*"
-                          key={`fsmin-${shipping.free_shipping_min_order}`}
-                          defaultValue={String(shipping.free_shipping_min_order ?? "500")}
-                          onBlur={e=>{
-                            const v = Math.max(0, parseInt(e.target.value.replace(/[^0-9]/g,""), 10) || 0);
-                            const next = { ...shipping, free_shipping_min_order: v };
-                            setShipping(next); saveSetting("shipping", next);
-                          }}
-                          placeholder="مثال: 500"
-                          style={{padding:"10px 14px",border:ui.border,borderRadius:6,background:ui.cardBg,fontFamily:ui.fontBody,fontSize:14,color:ui.text,outline:"none",width:"100%",direction:"ltr",textAlign:"left",boxSizing:"border-box"}}/>
-                        <button onClick={()=>saveSetting("shipping", shipping)}
-                          style={{background:ui.text,color:"#fff",border:"none",padding:"10px 22px",cursor:"pointer",fontSize:13,borderRadius:6,fontFamily:ui.fontBody,fontWeight:500}}>حفظ</button>
-                      </div>
-                      <div style={{fontSize:11,color:ui.textSub,fontFamily:ui.fontBody,marginTop:8}}>
-                        القيمة الحالية المعلنة على الموقع:
-                        <strong style={{marginInlineStart:6,color: shipping.free_shipping_enabled ? "#16A34A" : "#DC2626"}}>
-                          {shipping.free_shipping_enabled
-                            ? `شحن مجاني فوق ${Number(shipping.free_shipping_min_order) || 0} ج`
-                            : "الشحن المجاني معطّل"}
-                        </strong>
-                      </div>
-                    </div>
-                  </div>
+                {settingsTab === "shipping" && (
+                  <ShippingSettingsPanel
+                    ui={ui} mob={mob} isSuper={isSuper}
+                    storeCfg={storeCfg} setStoreCfg={setStoreCfg}
+                    saveSetting={saveSetting}
+                    shipping={shipping} setShipping={setShipping}
+                  />
                 )}
 
                 {settingsTab === "payment" && (
@@ -8670,6 +8924,479 @@ const ChartLegend = React.memo(function ChartLegend({ items, ui, total }) {
 // the same payload as the rest of store config. Updates persist via the
 // parent's saveSetting('store', next). Reasons CRUD reuses the existing
 // /api/return-reasons endpoints; we just expose add/rename/toggle here.
+// ─── Shipping Settings Panel — 4 sections ───────────────────────────────────
+// Section A: Warehouse + sender info (NEW, lives in settings.store.shipping_*).
+// Section B: Zones — full CRUD via /api/shipping/zones (replaces legacy JSON edit).
+// Section C: Couriers — full CRUD via /api/shipping/couriers with single-default radio.
+// Section D: General — free threshold, auto weight calc, default product weight,
+//            payment method, processing days, delay alert, signature default,
+//            default special instructions.
+function ShippingSettingsPanel({ ui, mob, isSuper, storeCfg, setStoreCfg, saveSetting, shipping, setShipping }) {
+  const [zones, setZones]       = useState([]);
+  const [couriers, setCouriers] = useState([]);
+  const [zonesBusy, setZonesBusy] = useState(false);
+  const [courBusy,  setCourBusy]  = useState(false);
+  const [zoneExpanded, setZoneExpanded] = useState({});         // { [id]: true } for details panel
+  const [courierExpanded, setCourierExpanded] = useState({});
+  const [zoneDraft, setZoneDraft] = useState({ name_ar:"" });   // new-zone inline form
+  const [courDraft, setCourDraft] = useState({ name:"" });
+  const [msg, setMsg] = useState("");
+  const flash = (t) => { setMsg(t); setTimeout(() => setMsg(""), 1800); };
+  const reload = useCallback(async () => {
+    try {
+      const [z, c] = await Promise.all([
+        fetch("/api/shipping/zones?all=1").then(r => r.ok ? r.json() : []),
+        fetch("/api/shipping/couriers?all=1").then(r => r.ok ? r.json() : []),
+      ]);
+      setZones(Array.isArray(z) ? z : []);
+      setCouriers(Array.isArray(c) ? c : []);
+    } catch {}
+  }, []);
+  useEffect(() => { reload(); }, [reload]);
+
+  // ── A. Warehouse settings (NEW) ──
+  const wh = {
+    sender_name:        storeCfg.shipping_sender_name        || "",
+    sender_phone:       storeCfg.shipping_sender_phone       || "",
+    warehouse_address:  storeCfg.shipping_warehouse_address  || "",
+    warehouse_lat:      storeCfg.shipping_warehouse_lat      || "",
+    warehouse_lng:      storeCfg.shipping_warehouse_lng      || "",
+    pickup_hours_from:  storeCfg.shipping_pickup_hours_from  || "10:00",
+    pickup_hours_to:    storeCfg.shipping_pickup_hours_to    || "18:00",
+    pickup_days:        Array.isArray(storeCfg.shipping_pickup_days) ? storeCfg.shipping_pickup_days : ["sat","sun","mon","tue","wed","thu"],
+  };
+  const saveStore = async (patch) => {
+    if (!isSuper) return;
+    const next = { ...storeCfg, ...patch };
+    setStoreCfg(next);
+    try { await saveSetting("store", next); flash("تم الحفظ"); } catch {}
+  };
+
+  // ── D. General settings (NEW) ──
+  const gen = {
+    default_free_threshold:    storeCfg.shipping_default_free_threshold    ?? (shipping && shipping.free_shipping_min_order) ?? 1000,
+    auto_weight_calc:          storeCfg.shipping_auto_weight_calc !== false,    // default ON
+    default_product_weight:    storeCfg.shipping_default_product_weight    ?? 0.3,
+    payment_method:            storeCfg.shipping_payment_method            || "both",   // prepaid | cod | both
+    processing_days:           storeCfg.shipping_processing_days           ?? 1,
+    delay_alert_days:          storeCfg.shipping_delay_alert_days          ?? 5,
+    signature_default:         !!storeCfg.shipping_signature_default,
+    default_instructions:      storeCfg.shipping_default_instructions      || "",
+  };
+
+  // ── B. Zone CRUD ──
+  const addZone = async () => {
+    if (!zoneDraft.name_ar.trim()) return;
+    setZonesBusy(true);
+    try {
+      const r = await fetch("/api/shipping/zones", {
+        method:"POST", headers:{"Content-Type":"application/json"},
+        body: JSON.stringify({ ...zoneDraft, governorates: Array.isArray(zoneDraft.governorates) ? zoneDraft.governorates : [] }),
+      });
+      if (r.ok) { setZoneDraft({ name_ar:"" }); reload(); flash("تمت إضافة المنطقة"); }
+    } catch {} finally { setZonesBusy(false); }
+  };
+  const patchZone = async (id, patch) => {
+    try {
+      const r = await fetch(`/api/shipping/zones/${id}`, {
+        method:"PATCH", headers:{"Content-Type":"application/json"},
+        body: JSON.stringify(patch),
+      });
+      if (r.ok) reload();
+    } catch {}
+  };
+  const deleteZone = async (z) => {
+    if (!window.confirm(`حذف منطقة "${z.name_ar}"؟ (سيتم منع الحذف إذا كانت مرتبطة بشحنات)`)) return;
+    try {
+      const r = await fetch(`/api/shipping/zones/${z.id}`, { method:"DELETE" });
+      const d = await r.json().catch(()=>({}));
+      if (!r.ok) { window.alert(d.error || "تعذّر الحذف"); return; }
+      reload(); flash("تم الحذف");
+    } catch {}
+  };
+
+  // ── C. Courier CRUD ──
+  const addCourier = async () => {
+    if (!courDraft.name.trim()) return;
+    setCourBusy(true);
+    try {
+      const r = await fetch("/api/shipping/couriers", {
+        method:"POST", headers:{"Content-Type":"application/json"},
+        body: JSON.stringify({ ...courDraft }),
+      });
+      if (r.ok) { setCourDraft({ name:"" }); reload(); flash("تمت إضافة الشركة"); }
+    } catch {} finally { setCourBusy(false); }
+  };
+  const patchCourier = async (id, patch) => {
+    try {
+      const r = await fetch(`/api/shipping/couriers/${id}`, {
+        method:"PATCH", headers:{"Content-Type":"application/json"},
+        body: JSON.stringify(patch),
+      });
+      if (r.ok) reload();
+    } catch {}
+  };
+  const deleteCourier = async (c) => {
+    if (!window.confirm(`حذف "${c.name}"؟ (سيتم منع الحذف إذا كانت مرتبطة بشحنات)`)) return;
+    try {
+      const r = await fetch(`/api/shipping/couriers/${c.id}`, { method:"DELETE" });
+      const d = await r.json().catch(()=>({}));
+      if (!r.ok) { window.alert(d.error || "تعذّر الحذف"); return; }
+      reload(); flash("تم الحذف");
+    } catch {}
+  };
+
+  const card = { background:ui.cardBg, border:ui.border, borderRadius:ui.radius, padding: mob?"14px":"18px", marginBottom:12 };
+  const cardTitle = { fontSize:13, fontWeight:600, color:ui.text, fontFamily:ui.fontBody, marginBottom:12, paddingBottom:8, borderBottom:"0.5px solid #EEE" };
+  const labelStyle = { display:"block", fontSize:11.5, color:ui.textSub, fontFamily:ui.fontBody, marginBottom:4 };
+  const inputStyle = { width:"100%", padding:"7px 10px", border:ui.border, borderRadius:5, background:ui.cardBg, fontFamily:ui.fontBody, fontSize:12.5, color:ui.text, outline:"none", direction:"rtl", boxSizing:"border-box" };
+  const inputLtr   = { ...inputStyle, direction:"ltr", textAlign:"left", fontFamily:"monospace" };
+  const Toggle = ({ value, onChange, disabled }) => (
+    <button onClick={() => !disabled && onChange(!value)} disabled={disabled}
+      style={{width:38,height:22,borderRadius:11,border:"none",background: value ? "#16A34A" : "#D4D4D4",position:"relative",cursor: disabled ? "not-allowed" : "pointer",opacity: disabled ? 0.6 : 1,flexShrink:0}}>
+      <span style={{position:"absolute",top:2,[value?"left":"right"]:2,width:18,height:18,background:"#fff",borderRadius:"50%",boxShadow:"0 1px 2px rgba(0,0,0,.2)"}}/>
+    </button>
+  );
+
+  const EGYPT_GOVS = [
+    "القاهرة","الجيزة","القليوبية","الإسكندرية","البحيرة","مرسى مطروح",
+    "الدقهلية","الغربية","المنوفية","كفر الشيخ","الشرقية","دمياط",
+    "الفيوم","بني سويف","المنيا","أسيوط","سوهاج","قنا","الأقصر","أسوان",
+    "السويس","الإسماعيلية","بورسعيد","شمال سيناء","جنوب سيناء","البحر الأحمر","الوادي الجديد",
+  ];
+
+  return (
+    <div>
+      {msg && <div style={{padding:"8px 14px",borderRadius:6,marginBottom:10,background:"#DCFCE7",color:"#15803D",fontSize:12.5,fontFamily:ui.fontBody,border:"0.5px solid #86EFAC"}}>{msg}</div>}
+      {!isSuper && (
+        <div style={{padding:"8px 14px",borderRadius:6,marginBottom:10,background:"#FFFBEB",color:"#92400E",fontSize:12.5,fontFamily:ui.fontBody,border:"0.5px solid #FDE68A"}}>
+          🔒 إعدادات الشحن تتطلب صلاحية Super Admin
+        </div>
+      )}
+
+      {/* ─── A. Warehouse + sender ─── */}
+      <div style={card}>
+        <div style={cardTitle}>العناوين والمستودع</div>
+        <div style={{display:"grid",gridTemplateColumns:mob?"1fr":"1fr 1fr",gap:12}}>
+          <div>
+            <label style={labelStyle}>اسم المرسل (يظهر على البوليصة)</label>
+            <input style={inputStyle} defaultValue={wh.sender_name} disabled={!isSuper}
+              onBlur={e => e.target.value !== wh.sender_name && saveStore({ shipping_sender_name: e.target.value })}
+              placeholder="نوّرَة Skincare"/>
+          </div>
+          <div>
+            <label style={labelStyle}>رقم هاتف المرسل</label>
+            <input style={inputLtr} defaultValue={wh.sender_phone} disabled={!isSuper}
+              onBlur={e => e.target.value !== wh.sender_phone && saveStore({ shipping_sender_phone: e.target.value })}
+              placeholder="+201xxxxxxxxx"/>
+          </div>
+          <div style={{gridColumn: mob ? "1" : "1 / -1"}}>
+            <label style={labelStyle}>عنوان المستودع</label>
+            <input style={inputStyle} defaultValue={wh.warehouse_address} disabled={!isSuper}
+              onBlur={e => e.target.value !== wh.warehouse_address && saveStore({ shipping_warehouse_address: e.target.value })}
+              placeholder="مثال: شارع 9، المعادي، القاهرة"/>
+          </div>
+          <div>
+            <label style={labelStyle}>خط العرض (Lat)</label>
+            <input style={inputLtr} defaultValue={wh.warehouse_lat} disabled={!isSuper}
+              onBlur={e => e.target.value !== wh.warehouse_lat && saveStore({ shipping_warehouse_lat: e.target.value })}
+              placeholder="29.95..."/>
+          </div>
+          <div>
+            <label style={labelStyle}>خط الطول (Lng)</label>
+            <input style={inputLtr} defaultValue={wh.warehouse_lng} disabled={!isSuper}
+              onBlur={e => e.target.value !== wh.warehouse_lng && saveStore({ shipping_warehouse_lng: e.target.value })}
+              placeholder="31.25..."/>
+          </div>
+          <div>
+            <label style={labelStyle}>بداية ساعات الاستلام</label>
+            <input type="time" style={inputStyle} defaultValue={wh.pickup_hours_from} disabled={!isSuper}
+              onBlur={e => e.target.value !== wh.pickup_hours_from && saveStore({ shipping_pickup_hours_from: e.target.value })}/>
+          </div>
+          <div>
+            <label style={labelStyle}>نهاية ساعات الاستلام</label>
+            <input type="time" style={inputStyle} defaultValue={wh.pickup_hours_to} disabled={!isSuper}
+              onBlur={e => e.target.value !== wh.pickup_hours_to && saveStore({ shipping_pickup_hours_to: e.target.value })}/>
+          </div>
+          <div style={{gridColumn: mob ? "1" : "1 / -1"}}>
+            <label style={labelStyle}>أيام الاستلام</label>
+            <div style={{display:"flex",gap:5,flexWrap:"wrap"}}>
+              {[["sat","السبت"],["sun","الأحد"],["mon","الإثنين"],["tue","الثلاثاء"],["wed","الأربعاء"],["thu","الخميس"],["fri","الجمعة"]].map(([k,l])=>{
+                const on = wh.pickup_days.includes(k);
+                return (
+                  <button key={k} disabled={!isSuper}
+                    onClick={() => saveStore({ shipping_pickup_days: on ? wh.pickup_days.filter(x => x !== k) : [...wh.pickup_days, k] })}
+                    style={{padding:"5px 12px",borderRadius:14,fontSize:11.5,fontFamily:ui.fontBody,cursor: isSuper?"pointer":"not-allowed",
+                      background: on ? ui.text : "transparent", color: on ? "#fff" : ui.textSub, border: on ? "none" : ui.border}}>{l}</button>
+                );
+              })}
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* ─── B. Shipping zones ─── */}
+      <div style={card}>
+        <div style={{...cardTitle,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+          <span>مناطق الشحن ({zones.length})</span>
+        </div>
+        <div style={{display:"flex",flexDirection:"column",gap:8}}>
+          {zones.map(z => {
+            const expanded = !!zoneExpanded[z.id];
+            return (
+              <div key={z.id} style={{border:"0.5px solid #EEE",borderRadius:6,background:"#FAFAFA"}}>
+                <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"8px 11px",gap:8,flexWrap:"wrap"}}>
+                  <div style={{display:"flex",alignItems:"center",gap:8,flex:1,minWidth:0}}>
+                    <Toggle value={!!z.active} onChange={v => patchZone(z.id, { active: v })} disabled={!isSuper}/>
+                    <span style={{fontSize:13,color:ui.text,fontFamily:ui.fontBody,fontWeight:500}}>{z.name_ar}</span>
+                    <span style={{fontSize:11.5,color:ui.textSub,fontFamily:ui.fontBody}}>· {z.base_price} ج · {z.min_days}-{z.max_days} يوم · {(z.governorates||[]).length} محافظة</span>
+                    {(z.shipments_count || 0) > 0 && (
+                      <span style={{fontSize:11,padding:"2px 8px",borderRadius:10,background:"#EFF6FF",color:"#1D4ED8",fontFamily:ui.fontBody}}>
+                        {z.shipments_count} شحنة
+                      </span>
+                    )}
+                  </div>
+                  <div style={{display:"flex",gap:4}}>
+                    <button onClick={() => setZoneExpanded(p => ({...p, [z.id]: !expanded}))}
+                      style={{padding:"4px 10px",border:ui.border,background:ui.cardBg,borderRadius:4,fontSize:11.5,cursor:"pointer",color:ui.text,fontFamily:ui.fontBody}}>{expanded ? "إغلاق" : "تعديل"}</button>
+                    <button onClick={() => deleteZone(z)} disabled={!isSuper || (z.shipments_count || 0) > 0}
+                      title={(z.shipments_count || 0) > 0 ? "مرتبطة بشحنات — أوقفها بدلاً من الحذف" : "حذف"}
+                      style={{padding:"4px 10px",border:"0.5px solid #FCA5A5",background:"transparent",borderRadius:4,fontSize:11.5,cursor: (isSuper && (z.shipments_count || 0) === 0) ? "pointer" : "not-allowed",color:"#B91C1C",fontFamily:ui.fontBody,opacity:(isSuper && (z.shipments_count || 0) === 0) ? 1 : 0.5}}>✕</button>
+                  </div>
+                </div>
+                {expanded && (
+                  <div style={{padding:"10px 11px 12px",borderTop:"0.5px solid #EEE",display:"grid",gridTemplateColumns:mob?"1fr":"1fr 1fr",gap:10}}>
+                    <div>
+                      <label style={labelStyle}>الاسم (عربي)</label>
+                      <input style={inputStyle} defaultValue={z.name_ar} disabled={!isSuper}
+                        onBlur={e => e.target.value !== z.name_ar && patchZone(z.id, { name_ar: e.target.value })}/>
+                    </div>
+                    <div>
+                      <label style={labelStyle}>الاسم (English)</label>
+                      <input style={inputLtr} defaultValue={z.name_en || ""} disabled={!isSuper}
+                        onBlur={e => (e.target.value || null) !== (z.name_en || null) && patchZone(z.id, { name_en: e.target.value || null })}/>
+                    </div>
+                    <div style={{gridColumn: mob ? "1" : "1 / -1"}}>
+                      <label style={labelStyle}>المحافظات المشمولة ({(z.governorates||[]).length})</label>
+                      <div style={{display:"flex",gap:5,flexWrap:"wrap",padding:"6px 8px",background:ui.cardBg,border:ui.border,borderRadius:5,maxHeight:120,overflow:"auto"}}>
+                        {EGYPT_GOVS.map(g => {
+                          const on = (z.governorates || []).includes(g);
+                          return (
+                            <button key={g} disabled={!isSuper}
+                              onClick={() => patchZone(z.id, { governorates: on ? z.governorates.filter(x => x !== g) : [...(z.governorates || []), g] })}
+                              style={{padding:"3px 9px",borderRadius:12,fontSize:11,fontFamily:ui.fontBody,cursor:isSuper?"pointer":"not-allowed",
+                                background: on ? ui.text : "transparent", color: on ? "#fff" : ui.textSub, border: on ? "none" : ui.border}}>{g}</button>
+                          );
+                        })}
+                      </div>
+                    </div>
+                    <div>
+                      <label style={labelStyle}>السعر الأساسي (ج)</label>
+                      <input type="text" inputMode="numeric" style={inputLtr} defaultValue={z.base_price} disabled={!isSuper}
+                        onBlur={e => patchZone(z.id, { base_price: Number(e.target.value) || 0 })}/>
+                    </div>
+                    <div>
+                      <label style={labelStyle}>الوزن الأساسي (كجم)</label>
+                      <input type="text" inputMode="decimal" style={inputLtr} defaultValue={z.base_weight} disabled={!isSuper}
+                        onBlur={e => patchZone(z.id, { base_weight: Number(e.target.value) || 1 })}/>
+                    </div>
+                    <div>
+                      <label style={labelStyle}>سعر الكيلو الإضافي (ج)</label>
+                      <input type="text" inputMode="numeric" style={inputLtr} defaultValue={z.extra_per_kg} disabled={!isSuper}
+                        onBlur={e => patchZone(z.id, { extra_per_kg: Number(e.target.value) || 0 })}/>
+                    </div>
+                    <div>
+                      <label style={labelStyle}>أيام التوصيل (من - إلى)</label>
+                      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:6}}>
+                        <input type="text" inputMode="numeric" style={inputLtr} defaultValue={z.min_days} disabled={!isSuper}
+                          onBlur={e => patchZone(z.id, { min_days: Number(e.target.value) || 1 })}/>
+                        <input type="text" inputMode="numeric" style={inputLtr} defaultValue={z.max_days} disabled={!isSuper}
+                          onBlur={e => patchZone(z.id, { max_days: Number(e.target.value) || 3 })}/>
+                      </div>
+                    </div>
+                    <div>
+                      <label style={labelStyle}>حد الشحن المجاني للمنطقة (ج، اتركه فارغاً للحد الافتراضي)</label>
+                      <input type="text" inputMode="numeric" style={inputLtr} defaultValue={z.free_shipping_threshold ?? ""} disabled={!isSuper}
+                        onBlur={e => patchZone(z.id, { free_shipping_threshold: e.target.value === "" ? null : Number(e.target.value) })}/>
+                    </div>
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+        {/* Inline add row */}
+        <div style={{display:"flex",gap:8,marginTop:10,paddingTop:10,borderTop:"0.5px dashed #EEE"}}>
+          <input value={zoneDraft.name_ar || ""} onChange={e => setZoneDraft({...zoneDraft, name_ar: e.target.value})}
+            placeholder="اسم منطقة جديدة..." disabled={!isSuper} style={{...inputStyle, flex:1}}/>
+          <button onClick={addZone} disabled={!isSuper || zonesBusy || !zoneDraft.name_ar.trim()}
+            style={{padding:"7px 14px",background:(!isSuper||zonesBusy||!zoneDraft.name_ar.trim())?"#9CA3AF":ui.text,color:"#fff",border:"none",borderRadius:5,fontSize:12.5,cursor:(!isSuper||zonesBusy||!zoneDraft.name_ar.trim())?"not-allowed":"pointer",fontFamily:ui.fontBody}}>
+            + إضافة منطقة
+          </button>
+        </div>
+      </div>
+
+      {/* ─── C. Couriers ─── */}
+      <div style={card}>
+        <div style={{...cardTitle,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+          <span>شركات الشحن ({couriers.length})</span>
+        </div>
+        <div style={{display:"flex",flexDirection:"column",gap:8}}>
+          {couriers.map(c => {
+            const expanded = !!courierExpanded[c.id];
+            return (
+              <div key={c.id} style={{border:"0.5px solid #EEE",borderRadius:6,background:"#FAFAFA"}}>
+                <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"8px 11px",gap:8,flexWrap:"wrap"}}>
+                  <div style={{display:"flex",alignItems:"center",gap:8,flex:1,minWidth:0}}>
+                    <Toggle value={!!c.active} onChange={v => patchCourier(c.id, { active: v })} disabled={!isSuper}/>
+                    <span style={{fontSize:13,color:ui.text,fontFamily:ui.fontBody,fontWeight:500}}>{c.name}</span>
+                    {c.is_default ? <span style={{fontSize:10.5,padding:"2px 8px",borderRadius:10,background:"#534AB7",color:"#fff",fontFamily:ui.fontBody}}>افتراضية</span> : null}
+                    {c.description && <span style={{fontSize:11.5,color:ui.textSub,fontFamily:ui.fontBody}}>· {c.description}</span>}
+                  </div>
+                  <div style={{display:"flex",gap:4}}>
+                    <label style={{display:"inline-flex",alignItems:"center",gap:4,fontSize:11,color:ui.textSub,fontFamily:ui.fontBody,cursor:isSuper?"pointer":"not-allowed",padding:"4px 8px"}}>
+                      <input type="radio" name="default-courier" checked={!!c.is_default} disabled={!isSuper}
+                        onChange={() => patchCourier(c.id, { is_default: true })}
+                        style={{accentColor:ui.text,cursor:isSuper?"pointer":"not-allowed"}}/>
+                      افتراضية
+                    </label>
+                    <button onClick={() => setCourierExpanded(p => ({...p, [c.id]: !expanded}))}
+                      style={{padding:"4px 10px",border:ui.border,background:ui.cardBg,borderRadius:4,fontSize:11.5,cursor:"pointer",color:ui.text,fontFamily:ui.fontBody}}>{expanded ? "إغلاق" : "تعديل"}</button>
+                    <button onClick={() => deleteCourier(c)} disabled={!isSuper}
+                      style={{padding:"4px 10px",border:"0.5px solid #FCA5A5",background:"transparent",borderRadius:4,fontSize:11.5,cursor:isSuper?"pointer":"not-allowed",color:"#B91C1C",fontFamily:ui.fontBody,opacity:isSuper?1:0.5}}>✕</button>
+                  </div>
+                </div>
+                {expanded && (
+                  <div style={{padding:"10px 11px 12px",borderTop:"0.5px solid #EEE",display:"grid",gridTemplateColumns:mob?"1fr":"1fr 1fr",gap:10}}>
+                    <div>
+                      <label style={labelStyle}>اسم الشركة</label>
+                      <input style={inputStyle} defaultValue={c.name} disabled={!isSuper}
+                        onBlur={e => e.target.value !== c.name && patchCourier(c.id, { name: e.target.value })}/>
+                    </div>
+                    <div>
+                      <label style={labelStyle}>وصف مختصر</label>
+                      <input style={inputStyle} defaultValue={c.description || ""} disabled={!isSuper}
+                        onBlur={e => (e.target.value || null) !== (c.description || null) && patchCourier(c.id, { description: e.target.value || null })}/>
+                    </div>
+                    <div>
+                      <label style={labelStyle}>جهة الاتصال</label>
+                      <input style={inputStyle} defaultValue={c.contact_name || ""} disabled={!isSuper}
+                        onBlur={e => (e.target.value || null) !== (c.contact_name || null) && patchCourier(c.id, { contact_name: e.target.value || null })}/>
+                    </div>
+                    <div>
+                      <label style={labelStyle}>هاتف</label>
+                      <input style={inputLtr} defaultValue={c.contact_phone || ""} disabled={!isSuper}
+                        onBlur={e => (e.target.value || null) !== (c.contact_phone || null) && patchCourier(c.id, { contact_phone: e.target.value || null })}/>
+                    </div>
+                    <div>
+                      <label style={labelStyle}>إيميل</label>
+                      <input type="email" style={inputLtr} defaultValue={c.contact_email || ""} disabled={!isSuper}
+                        onBlur={e => (e.target.value || null) !== (c.contact_email || null) && patchCourier(c.id, { contact_email: e.target.value || null })}/>
+                    </div>
+                    <div>
+                      <label style={labelStyle}>قالب رابط التتبع</label>
+                      <input style={inputLtr} defaultValue={c.tracking_url_template || ""} disabled={!isSuper}
+                        onBlur={e => (e.target.value || null) !== (c.tracking_url_template || null) && patchCourier(c.id, { tracking_url_template: e.target.value || null })}
+                        placeholder="https://bosta.co/track/{tracking_number}"/>
+                      <div style={{fontSize:10.5,color:ui.textSub,fontFamily:ui.fontBody,marginTop:3}}>استخدم <code>{"{tracking_number}"}</code> كمتغير</div>
+                    </div>
+                    <div style={{gridColumn:mob?"1":"1 / -1"}}>
+                      <label style={labelStyle}>ملاحظات داخلية</label>
+                      <textarea rows={2} style={inputStyle} defaultValue={c.internal_notes || ""} disabled={!isSuper}
+                        onBlur={e => (e.target.value || null) !== (c.internal_notes || null) && patchCourier(c.id, { internal_notes: e.target.value || null })}/>
+                    </div>
+                    <div style={{gridColumn:mob?"1":"1 / -1"}}>
+                      <label style={labelStyle}>المناطق التي تخدمها (اتركها فارغة = كل المناطق)</label>
+                      <div style={{display:"flex",gap:5,flexWrap:"wrap"}}>
+                        {zones.map(z => {
+                          const on = (c.zone_ids || []).includes(z.id);
+                          return (
+                            <button key={z.id} disabled={!isSuper}
+                              onClick={() => patchCourier(c.id, { zone_ids: on ? (c.zone_ids || []).filter(x => x !== z.id) : [...(c.zone_ids || []), z.id] })}
+                              style={{padding:"3px 9px",borderRadius:12,fontSize:11,fontFamily:ui.fontBody,cursor:isSuper?"pointer":"not-allowed",
+                                background: on ? ui.text : "transparent", color: on ? "#fff" : ui.textSub, border: on ? "none" : ui.border}}>{z.name_ar}</button>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+        {/* Inline add row */}
+        <div style={{display:"flex",gap:8,marginTop:10,paddingTop:10,borderTop:"0.5px dashed #EEE"}}>
+          <input value={courDraft.name || ""} onChange={e => setCourDraft({...courDraft, name: e.target.value})}
+            placeholder="اسم شركة شحن جديدة..." disabled={!isSuper} style={{...inputStyle, flex:1}}/>
+          <button onClick={addCourier} disabled={!isSuper || courBusy || !courDraft.name.trim()}
+            style={{padding:"7px 14px",background:(!isSuper||courBusy||!courDraft.name.trim())?"#9CA3AF":ui.text,color:"#fff",border:"none",borderRadius:5,fontSize:12.5,cursor:(!isSuper||courBusy||!courDraft.name.trim())?"not-allowed":"pointer",fontFamily:ui.fontBody}}>
+            + إضافة شركة
+          </button>
+        </div>
+      </div>
+
+      {/* ─── D. General settings ─── */}
+      <div style={card}>
+        <div style={cardTitle}>إعدادات عامة</div>
+        <div style={{display:"grid",gridTemplateColumns:mob?"1fr":"1fr 1fr",gap:12}}>
+          <div>
+            <label style={labelStyle}>الحد الافتراضي للشحن المجاني (ج)</label>
+            <input type="text" inputMode="numeric" style={inputLtr} defaultValue={gen.default_free_threshold} disabled={!isSuper}
+              onBlur={e => saveStore({ shipping_default_free_threshold: Number(e.target.value) || 0 })}/>
+            <div style={{fontSize:10.5,color:ui.textSub,fontFamily:ui.fontBody,marginTop:3}}>المناطق التي لها حد خاص تتجاوز هذا الحد</div>
+          </div>
+          <div>
+            <label style={labelStyle}>الوزن الافتراضي للمنتج (كجم)</label>
+            <input type="text" inputMode="decimal" style={inputLtr} defaultValue={gen.default_product_weight} disabled={!isSuper}
+              onBlur={e => saveStore({ shipping_default_product_weight: Number(e.target.value) || 0.3 })}/>
+          </div>
+          <div>
+            <label style={labelStyle}>زمن المعالجة قبل الشحن (أيام)</label>
+            <input type="text" inputMode="numeric" style={inputLtr} defaultValue={gen.processing_days} disabled={!isSuper}
+              onBlur={e => saveStore({ shipping_processing_days: Number(e.target.value) || 0 })}/>
+          </div>
+          <div>
+            <label style={labelStyle}>تنبيه التأخير بعد (أيام)</label>
+            <input type="text" inputMode="numeric" style={inputLtr} defaultValue={gen.delay_alert_days} disabled={!isSuper}
+              onBlur={e => saveStore({ shipping_delay_alert_days: Number(e.target.value) || 5 })}/>
+          </div>
+          <div>
+            <label style={labelStyle}>طريقة دفع الشحن</label>
+            <select value={gen.payment_method} disabled={!isSuper}
+              onChange={e => saveStore({ shipping_payment_method: e.target.value })}
+              style={inputStyle}>
+              <option value="prepaid">العميل يدفع مع الطلب</option>
+              <option value="cod">الدفع عند الاستلام</option>
+              <option value="both">كلاهما (يختار العميل)</option>
+            </select>
+          </div>
+          <div style={{display:"flex",alignItems:"flex-end",gap:14}}>
+            <label style={{display:"flex",alignItems:"center",gap:6,fontSize:12.5,color:ui.text,fontFamily:ui.fontBody,cursor:isSuper?"pointer":"not-allowed"}}>
+              <input type="checkbox" checked={gen.auto_weight_calc} disabled={!isSuper}
+                onChange={e => saveStore({ shipping_auto_weight_calc: e.target.checked })}
+                style={{accentColor:ui.text}}/>
+              حساب الوزن تلقائياً
+            </label>
+            <label style={{display:"flex",alignItems:"center",gap:6,fontSize:12.5,color:ui.text,fontFamily:ui.fontBody,cursor:isSuper?"pointer":"not-allowed"}}>
+              <input type="checkbox" checked={gen.signature_default} disabled={!isSuper}
+                onChange={e => saveStore({ shipping_signature_default: e.target.checked })}
+                style={{accentColor:ui.text}}/>
+              توقيع المستلم مطلوب
+            </label>
+          </div>
+          <div style={{gridColumn:mob?"1":"1 / -1"}}>
+            <label style={labelStyle}>تعليمات خاصة افتراضية (تظهر على كل بوليصة)</label>
+            <textarea rows={2} style={inputStyle} defaultValue={gen.default_instructions} disabled={!isSuper}
+              onBlur={e => saveStore({ shipping_default_instructions: e.target.value })}
+              placeholder="مثال: التعامل بحذر — منتجات قابلة للكسر"/>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function ReturnsSettingsPanel({ ui, mob, isSuper, storeCfg, setStoreCfg, saveSetting, reasons, onReasonsChanged }) {
   const ret = storeCfg.returns || {};
   // Defaults — applied on first read when the key is absent so the UI shows
@@ -9766,6 +10493,10 @@ function ProductForm({
     price:        "",
     price_before: "",
     cost:         "",
+    // weight_kg: per-unit shipping weight; defaults to the new schema default (0.3 kg)
+    // for newly-created products. Existing rows take the value loaded from the
+    // server when editing (see the hydration path below).
+    weight_kg:    "0.3",
     stock:           "0",
     alert_threshold: "5",
     status:    "draft",
@@ -9839,6 +10570,7 @@ function ProductForm({
           price:        p.price != null ? String(p.price) : "",
           price_before: p.price_before ? String(p.price_before) : "",
           cost:         p.cost ? String(p.cost) : "",
+          weight_kg:    p.weight_kg != null ? String(p.weight_kg) : "0.3",
           stock:           String(p.stock || 0),
           alert_threshold: String(p.alert_threshold || 5),
           status:    p.status || "draft",
@@ -9976,6 +10708,7 @@ function ProductForm({
     price:        Number(f.price)||0,
     price_before: Number(f.price_before)||0,
     cost:         Number(f.cost)||0,
+    weight_kg:    Number(f.weight_kg)||0,   // 0 means "use shipping_default_product_weight" at calc time
     stock:           Number(f.stock)||0,
     alert_threshold: Number(f.alert_threshold)||5,
     status:    overrideStatus || f.status,
@@ -10474,6 +11207,17 @@ function ProductForm({
                   )}
                 </div>
               )}
+              {/* Per-unit shipping weight in kilograms. Read by the auto
+                  weight-calc on order/checkout: weight × qty summed per line,
+                  falls back to settings.store.shipping_default_product_weight
+                  when this is 0. Affects shipping fee tier (base + extra/kg). */}
+              <div style={{marginBottom:12}}>
+                <label style={labelStyle}>وزن الوحدة (كجم)</label>
+                <input {...numProps("dec")} style={inputStyle} value={f.weight_kg}
+                  onChange={e=>update({ weight_kg: cleanNumDec(e.target.value) })}
+                  placeholder="0.3"/>
+                <div style={helperText}>يُستخدم لحساب تكلفة الشحن — اتركه 0 لاستخدام الوزن الافتراضي من الإعدادات</div>
+              </div>
               <div style={{marginBottom:12}}>
                 <label style={labelStyle}>SKU</label>
                 <input style={inputStyle} value={f.sku} onChange={e=>update({ sku: e.target.value })}
@@ -10934,6 +11678,268 @@ function printReturnSlip(ret) {
   const win = window.open("", "nawra-return-slip", "width=820,height=900");
   if (!win) { window.alert("تم منع النافذة المنبثقة. فعّل النوافذ المنبثقة من إعدادات المتصفح."); return; }
   win.document.open(); win.document.write(html); win.document.close();
+}
+
+// ─── ShipmentDetailsModal — module-scope to keep input focus on every keystroke ───
+// Renders a modal for a single hydrated shipment from /api/shipments/:awb.
+// Phase 2 wires: status transitions, courier reassignment, cost edits,
+// notes, customer contact links. Phase 3 will wire AWB PDF print + manifest.
+function ShipmentDetailsModal({ ship, awbKey, onClose, onPatch, onAppendNote, isSuper, ui, mob }) {
+  const [noteDraft, setNoteDraft] = useState("");
+  const [noteBusy,  setNoteBusy]  = useState(false);
+  if (!ship) {
+    return (
+      <div onClick={onClose}
+        style={{position:"fixed",inset:0,background:"rgba(0,0,0,.55)",zIndex:800,display:"flex",alignItems:"center",justifyContent:"center",padding:16,direction:"rtl"}}>
+        <div style={{background:ui.cardBg,padding:30,borderRadius:8,fontFamily:ui.fontBody,fontSize:13,color:ui.textSub}}>
+          جاري تحميل {awbKey}...
+        </div>
+      </div>
+    );
+  }
+  const badge = (s) => {
+    if (s === "ready")     return { bg:"#FEF3C7", fg:"#92400E", l:"جاهز للشحن" };
+    if (s === "shipped")   return { bg:"#DBEAFE", fg:"#1D4ED8", l:"تم الشحن" };
+    if (s === "delivered") return { bg:"#DCFCE7", fg:"#15803D", l:"تم التسليم" };
+    if (s === "returned")  return { bg:"#FEE2E2", fg:"#B91C1C", l:"مرتجع للمتجر" };
+    if (s === "cancelled") return { bg:"#F3F4F6", fg:"#525252", l:"ملغي" };
+    return { bg:"#F3F4F6", fg:"#525252", l: s || "—" };
+  };
+  const b = badge(ship.status);
+  const statusOrder = ["ready", "shipped", "delivered"];
+  const stepIdx = ship.status === "cancelled" || ship.status === "returned"
+    ? 0
+    : (statusOrder.indexOf(ship.status));
+  const customerPaid = (Number(ship.customer_paid_shipping) || 0) + (Number(ship.customer_paid_cod) || 0);
+  const margin = customerPaid - (Number(ship.courier_cost) || 0);
+  const order = ship.order || {};
+  const items = Array.isArray(order.items) ? order.items : [];
+  const trackingUrl = ship.courier && ship.courier.tracking_url_template && ship.tracking_number
+    ? ship.courier.tracking_url_template.replace("{tracking_number}", encodeURIComponent(ship.tracking_number))
+    : null;
+
+  const submitNote = async () => {
+    if (noteDraft.trim().length < 2) return;
+    setNoteBusy(true);
+    try { await onAppendNote(noteDraft.trim()); setNoteDraft(""); } finally { setNoteBusy(false); }
+  };
+
+  const card = { background:ui.cardBg, border:ui.border, borderRadius:ui.radius, padding:"12px 14px", marginBottom:10 };
+  const cardTitle = { fontSize:12,fontWeight:600,color:ui.text,fontFamily:ui.fontBody,marginBottom:8,paddingBottom:6,borderBottom:"0.5px solid #EEE" };
+
+  return (
+    <div onClick={onClose}
+      style={{position:"fixed",inset:0,background:"rgba(0,0,0,.55)",zIndex:800,display:"flex",alignItems:"center",justifyContent:"center",padding:mob?10:24,direction:"rtl",overflowY:"auto"}}>
+      <div onClick={e => e.stopPropagation()}
+        style={{background:"#F5F5F5",maxWidth:880,width:"100%",maxHeight:"92vh",overflowY:"auto",borderRadius:8,boxShadow:"0 12px 48px rgba(0,0,0,.25)"}}>
+        {/* Header */}
+        <div style={{background:ui.cardBg,padding:"14px 18px",borderBottom:"0.5px solid #EEE",display:"flex",alignItems:"center",justifyContent:"space-between",flexWrap:"wrap",gap:10,position:"sticky",top:0,zIndex:1}}>
+          <div style={{display:"flex",alignItems:"center",gap:10,flexWrap:"wrap"}}>
+            <h3 style={{fontSize:16,fontWeight:600,color:ui.text,fontFamily:ui.fontBody,margin:0}}>{ship.awb_number}</h3>
+            <span style={{fontSize:11,padding:"3px 10px",borderRadius:20,background:b.bg,color:b.fg,fontFamily:ui.fontBody}}>{b.l}</span>
+            <button onClick={() => navigator.clipboard && navigator.clipboard.writeText(ship.awb_number).catch(() => {})}
+              title="نسخ رقم البوليصة"
+              style={{background:"transparent",border:"none",cursor:"pointer",color:ui.textSub,fontSize:13,padding:0}}>📋</button>
+          </div>
+          <div style={{display:"flex",gap:6,alignItems:"center"}}>
+            <button disabled title="سيتم تفعيل بوليصة PDF في المرحلة الثالثة (jsPDF + bwip-js)"
+              style={{padding:"6px 11px",background:ui.cardBg,color:ui.textSub,border:ui.border,borderRadius:5,fontSize:11.5,cursor:"not-allowed",fontFamily:ui.fontBody,opacity:0.6}}>
+              🖨️ طباعة بوليصة
+            </button>
+            {order && order.phone && (
+              <a href={`https://wa.me/2${(order.phone || "").replace(/[^\d]/g,"")}`} target="_blank" rel="noreferrer"
+                style={{padding:"6px 11px",background:"#25D366",color:"#fff",border:"none",borderRadius:5,fontSize:11.5,textDecoration:"none",fontFamily:ui.fontBody}}>📞 واتساب</a>
+            )}
+            <button onClick={onClose}
+              style={{background:"none",border:"none",fontSize:20,color:ui.textSub,cursor:"pointer",padding:4,lineHeight:1}}>✕</button>
+          </div>
+        </div>
+
+        {/* Body — two-column layout on desktop */}
+        <div style={{padding:14,display:"grid",gridTemplateColumns:mob?"1fr":"2fr 1fr",gap:10,alignItems:"start"}}>
+          {/* LEFT column */}
+          <div>
+            {/* Status timeline */}
+            <div style={card}>
+              <div style={cardTitle}>مسار الشحنة</div>
+              <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",direction:"rtl",gap:6,flexWrap:"wrap"}}>
+                {[
+                  { k:"ready",     l:"تم الإنشاء", at: ship.created_at },
+                  { k:"shipped",   l:"تم الشحن",   at: ship.shipped_at },
+                  { k:"delivered", l:"تم التسليم", at: ship.delivered_at },
+                ].map((step, i, arr) => {
+                  const done = stepIdx >= i;
+                  const current = stepIdx === i && ship.status !== "cancelled" && ship.status !== "returned";
+                  const tone = ship.status === "returned" ? "#DC2626" : ship.status === "cancelled" ? "#9CA3AF" : (done ? "#16A34A" : "#E5E7EB");
+                  return (
+                    <React.Fragment key={step.k}>
+                      <div style={{flex:1,minWidth:80,display:"flex",flexDirection:"column",alignItems:"center",gap:3}}>
+                        <div style={{width:26,height:26,borderRadius:"50%",background:tone,display:"flex",alignItems:"center",justifyContent:"center",color:"#fff",fontSize:12,fontWeight:600,boxShadow: current ? "0 0 0 4px rgba(22,163,74,.18)" : "none"}}>
+                          {done ? "✓" : (i+1)}
+                        </div>
+                        <div style={{fontSize:11,color: done ? ui.text : ui.textSub,fontFamily:ui.fontBody,textAlign:"center"}}>{step.l}</div>
+                        {step.at && <div style={{fontSize:9.5,color:ui.textSub,fontFamily:ui.fontBody,textAlign:"center"}}>{String(step.at).slice(5,16)}</div>}
+                      </div>
+                      {i < arr.length - 1 && <div style={{flex:1,height:2,background: stepIdx > i ? "#16A34A" : "#E5E7EB",marginTop:13}}/>}
+                    </React.Fragment>
+                  );
+                })}
+              </div>
+              {ship.status === "returned" && <div style={{marginTop:8,fontSize:11.5,color:"#B91C1C",fontFamily:ui.fontBody,textAlign:"center"}}>الشحنة مرتجعة للمتجر — راجع سبب الفشل مع الشركة</div>}
+              {ship.status === "cancelled" && <div style={{marginTop:8,fontSize:11.5,color:ui.textSub,fontFamily:ui.fontBody,textAlign:"center"}}>تم إلغاء الشحنة</div>}
+            </div>
+
+            {/* Customer + address */}
+            <div style={card}>
+              <div style={cardTitle}>العميل والعنوان</div>
+              <div style={{fontSize:13,color:ui.text,fontFamily:ui.fontBody,marginBottom:4,fontWeight:500}}>{order.name || "—"}</div>
+              {order.phone && <div style={{fontSize:11.5,color:ui.textSub,fontFamily:"monospace",marginBottom:3}}>📱 {order.phone}</div>}
+              <div style={{fontSize:12.5,color:ui.text,fontFamily:ui.fontBody}}>{order.city || "—"} · {order.address || "—"}</div>
+              {order.userEmail && <div style={{fontSize:11,color:ui.textSub,fontFamily:"monospace",marginTop:3}}>{order.userEmail}</div>}
+            </div>
+
+            {/* Items */}
+            <div style={card}>
+              <div style={cardTitle}>المنتجات ({items.length})</div>
+              {items.length === 0 ? (
+                <div style={{fontSize:12.5,color:ui.textSub,fontFamily:ui.fontBody}}>لا توجد منتجات</div>
+              ) : (
+                <div style={{display:"flex",flexDirection:"column",gap:6}}>
+                  {items.map((it, i) => (
+                    <div key={i} style={{display:"flex",alignItems:"center",gap:8,padding:"5px 0",borderBottom: i < items.length - 1 ? "0.5px solid #EEE" : "none"}}>
+                      <div style={{width:34,height:34,background:"#F3F4F6",borderRadius:4,overflow:"hidden",flexShrink:0}}>
+                        {it.img && <img src={it.img} alt="" style={{width:"100%",height:"100%",objectFit:"cover"}}/>}
+                      </div>
+                      <div style={{flex:1,fontSize:12.5,color:ui.text,fontFamily:ui.fontBody}}>{it.name || "—"}</div>
+                      <div style={{fontSize:11.5,color:ui.textSub,fontFamily:"monospace"}}>×{it.qty} · {(Number(it.price)||0).toLocaleString()} ج</div>
+                    </div>
+                  ))}
+                </div>
+              )}
+              <div style={{fontSize:11.5,color:ui.textSub,fontFamily:ui.fontBody,marginTop:8,paddingTop:6,borderTop:"0.5px dashed #EEE"}}>
+                إجمالي الوزن: <b style={{color:ui.text}}>{(Number(ship.weight_kg) || 0).toFixed(2)} كجم</b>
+              </div>
+            </div>
+
+            {/* Internal notes */}
+            <div style={card}>
+              <div style={cardTitle}>ملاحظات داخلية</div>
+              {ship.internal_notes && (
+                <div style={{padding:"8px 11px",background:"#FFFBEB",border:"0.5px solid #FDE68A",borderRadius:5,fontSize:12,color:"#92400E",fontFamily:ui.fontBody,marginBottom:8,whiteSpace:"pre-wrap"}}>{ship.internal_notes}</div>
+              )}
+              <textarea rows={2} value={noteDraft} onChange={e => setNoteDraft(e.target.value)}
+                placeholder="أضف ملاحظة داخلية"
+                style={{width:"100%",padding:"7px 10px",border:ui.border,borderRadius:5,fontFamily:ui.fontBody,fontSize:12,color:ui.text,outline:"none",direction:"rtl",resize:"vertical",boxSizing:"border-box"}}/>
+              <div style={{textAlign:"left",marginTop:6}}>
+                <button onClick={submitNote} disabled={noteBusy || noteDraft.trim().length < 2}
+                  style={{padding:"5px 13px",background:(noteBusy||noteDraft.trim().length<2)?"#9CA3AF":ui.text,color:"#fff",border:"none",borderRadius:4,fontSize:11.5,cursor:(noteBusy||noteDraft.trim().length<2)?"not-allowed":"pointer",fontFamily:ui.fontBody}}>
+                  {noteBusy ? "..." : "إضافة"}
+                </button>
+              </div>
+            </div>
+          </div>
+
+          {/* RIGHT sidebar */}
+          <div>
+            {/* Courier + tracking */}
+            <div style={card}>
+              <div style={cardTitle}>الشركة والتتبع</div>
+              <div style={{fontSize:13,color:ui.text,fontFamily:ui.fontBody,fontWeight:500,marginBottom:4}}>{ship.courier ? ship.courier.name : "غير محدد"}</div>
+              {ship.courier && ship.courier.contact_phone && <div style={{fontSize:11.5,color:ui.textSub,fontFamily:"monospace",marginBottom:4}}>📱 {ship.courier.contact_phone}</div>}
+              <input value={ship.tracking_number || ""}
+                onChange={e => onPatch(ship.id, { tracking_number: e.target.value })}
+                placeholder="رقم تتبع الشركة (AWB لدى الشركة)"
+                style={{width:"100%",padding:"6px 10px",border:ui.border,borderRadius:5,fontFamily:"monospace",fontSize:12,color:ui.text,outline:"none",direction:"ltr",boxSizing:"border-box",marginTop:6}}/>
+              {trackingUrl && (
+                <a href={trackingUrl} target="_blank" rel="noreferrer"
+                  style={{display:"inline-block",marginTop:6,fontSize:11.5,color:"#1D4ED8",textDecoration:"none",fontFamily:ui.fontBody}}>تتبع لدى الشركة ←</a>
+              )}
+            </div>
+
+            {/* Cost breakdown */}
+            <div style={card}>
+              <div style={cardTitle}>تفاصيل الشحن المالية</div>
+              <div style={{display:"flex",flexDirection:"column",gap:5,fontFamily:ui.fontBody,fontSize:12,color:ui.text}}>
+                <div style={{display:"flex",justifyContent:"space-between"}}>
+                  <span>تكلفة الشركة</span>
+                  <input type="number" value={ship.courier_cost || 0}
+                    onChange={e => onPatch(ship.id, { courier_cost: Number(e.target.value) || 0 })}
+                    style={{width:90,padding:"3px 7px",border:ui.border,borderRadius:4,fontFamily:"monospace",fontSize:12,color:ui.text,outline:"none",direction:"ltr",textAlign:"left"}}/>
+                </div>
+                <div style={{display:"flex",justifyContent:"space-between"}}>
+                  <span>محصل من العميل (شحن)</span>
+                  <span style={{fontFamily:"monospace"}}>{(Number(ship.customer_paid_shipping)||0).toLocaleString()} ج</span>
+                </div>
+                {(Number(ship.customer_paid_cod) || 0) > 0 && (
+                  <div style={{display:"flex",justifyContent:"space-between"}}>
+                    <span>COD يتم تحصيله</span>
+                    <span style={{fontFamily:"monospace"}}>{(Number(ship.customer_paid_cod)||0).toLocaleString()} ج</span>
+                  </div>
+                )}
+                <div style={{display:"flex",justifyContent:"space-between",paddingTop:6,marginTop:4,borderTop:"1px dashed #E5E5E5",fontWeight:600,fontSize:13}}>
+                  <span>هامش الشحن</span>
+                  <span style={{color: margin >= 0 ? "#15803D" : "#B91C1C",fontFamily:"monospace"}}>{margin >= 0 ? "+" : ""}{margin.toLocaleString()} ج</span>
+                </div>
+              </div>
+            </div>
+
+            {/* Action buttons */}
+            <div style={{...card, position:"sticky", top:8}}>
+              <div style={cardTitle}>الإجراءات</div>
+              {ship.status === "ready" && (
+                <button onClick={() => onPatch(ship.id, { status:"shipped" })}
+                  style={{padding:"9px 14px",background:"#1D4ED8",color:"#fff",border:"none",borderRadius:5,fontSize:12.5,cursor:"pointer",fontFamily:ui.fontBody,width:"100%",marginBottom:6}}>
+                  📦 تأكيد تسليم للشركة (تم الشحن)
+                </button>
+              )}
+              {ship.status === "shipped" && (
+                <>
+                  <button onClick={() => onPatch(ship.id, { status:"delivered" })}
+                    style={{padding:"9px 14px",background:"#15803D",color:"#fff",border:"none",borderRadius:5,fontSize:12.5,cursor:"pointer",fontFamily:ui.fontBody,width:"100%",marginBottom:6}}>
+                    ✓ تأكيد التسليم للعميل
+                  </button>
+                  <button onClick={() => onPatch(ship.id, { status:"returned" })}
+                    style={{padding:"9px 14px",background:"transparent",color:"#B91C1C",border:"1px solid #FCA5A5",borderRadius:5,fontSize:12.5,cursor:"pointer",fontFamily:ui.fontBody,width:"100%",marginBottom:6}}>
+                    ↩ مرتجع للمتجر
+                  </button>
+                </>
+              )}
+              {ship.status === "delivered" && (
+                <div style={{padding:"9px 14px",background:"#F0FDF4",color:"#15803D",border:"0.5px solid #86EFAC",borderRadius:5,fontSize:12,fontFamily:ui.fontBody,textAlign:"center",marginBottom:6}}>
+                  ✓ تم التسليم
+                  {ship.delivered_at && <div style={{fontSize:10.5,marginTop:2,color:"#166534"}}>{String(ship.delivered_at).slice(0,16)}</div>}
+                </div>
+              )}
+              {(ship.status === "ready" || ship.status === "shipped") && isSuper && (
+                <button onClick={() => { if (window.confirm("إلغاء هذه الشحنة؟ هذا الإجراء لا يمكن التراجع عنه.")) onPatch(ship.id, { status:"cancelled" }); }}
+                  style={{padding:"7px 14px",background:"transparent",color:ui.textSub,border:ui.border,borderRadius:5,fontSize:11.5,cursor:"pointer",fontFamily:ui.fontBody,width:"100%"}}>
+                  إلغاء الشحنة
+                </button>
+              )}
+            </div>
+
+            {/* History */}
+            {Array.isArray(ship.history) && ship.history.length > 0 && (
+              <div style={card}>
+                <div style={cardTitle}>سجل الحالة</div>
+                <div style={{display:"flex",flexDirection:"column",gap:6}}>
+                  {ship.history.map(h => (
+                    <div key={h.id} style={{fontSize:11.5,fontFamily:ui.fontBody,color:ui.text,paddingBottom:5,borderBottom:"0.5px dashed #EEE"}}>
+                      <div>{h.from_status ? `${badge(h.from_status).l} → ` : ""}<b>{badge(h.to_status).l}</b></div>
+                      <div style={{fontSize:10,color:ui.textSub,marginTop:2}}>
+                        {h.actor_name || h.actor_id || "النظام"} · {h.created_at && String(h.created_at).slice(0,16)}
+                      </div>
+                      {h.notes && <div style={{fontSize:10.5,color:ui.textSub,marginTop:2}}>{h.notes}</div>}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
 }
 
 // ─── ReturnDetailsView — module-scope so input focus is preserved on every keystroke ───
@@ -11441,6 +12447,11 @@ function OrderDetailPage({
   const [emailFeedback, setEmailFeedback] = useState("");
   const [copyFeedback, setCopyFeedback] = useState("");
   const [, tickClock] = useState(0);
+  // Shipment for this order — null = none yet; object = exists. We poll on
+  // mount + after a successful "شحن الطلب" POST so the badge updates live.
+  const [shipment,  setShipment]  = useState(null);
+  const [shipBusy,  setShipBusy]  = useState(false);
+  const [shipError, setShipError] = useState("");
 
   useEffect(() => { injectPrintStyles(); }, []);
   // Re-render every minute so relative "since X" timestamps stay current.
@@ -11448,6 +12459,38 @@ function OrderDetailPage({
     const i = setInterval(() => tickClock(n => n + 1), 60000);
     return () => clearInterval(i);
   }, []);
+  // Look up an existing shipment for this order. The list endpoint accepts
+  // ?order_id=X (added in P1 backend). One order → max one shipment by
+  // current design; we take rows[0] if any.
+  useEffect(() => {
+    if (!orderId) return;
+    let cancelled = false;
+    fetch(`/api/shipments?order_id=${encodeURIComponent(orderId)}&perPage=1`)
+      .then(r => r.ok ? r.json() : { rows:[] })
+      .then(d => { if (!cancelled) setShipment((d.rows && d.rows[0]) || null); })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, [orderId]);
+  const createShipment = async () => {
+    setShipBusy(true); setShipError("");
+    try {
+      const r = await fetch("/api/shipments", {
+        method:"POST", headers:{"Content-Type":"application/json"},
+        body: JSON.stringify({ order_id: orderId }),
+      });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok) { setShipError(d.error || `HTTP ${r.status}`); return; }
+      setShipment(d.shipment || d);
+    } catch (e) { setShipError(e.message || "تعذّر إنشاء الشحنة"); }
+    finally { setShipBusy(false); }
+  };
+  const shipStatusBadge = (s) => ({
+    ready:     { bg:"#FEF3C7", fg:"#92400E", l:"جاهز للشحن" },
+    shipped:   { bg:"#DBEAFE", fg:"#1D4ED8", l:"تم الشحن" },
+    delivered: { bg:"#DCFCE7", fg:"#15803D", l:"تم التسليم" },
+    returned:  { bg:"#FEE2E2", fg:"#B91C1C", l:"مرتجع للمتجر" },
+    cancelled: { bg:"#F3F4F6", fg:"#525252", l:"ملغي" },
+  }[s] || { bg:"#F3F4F6", fg:"#525252", l: s || "—" });
 
   if (!order) {
     return (
@@ -11578,6 +12621,24 @@ function OrderDetailPage({
               📞 واتساب
             </a>
           )}
+          {/* Shipping: either "create shipment" button OR a passive pill
+              showing the existing AWB + status. Pill is non-interactive —
+              admin reviews the AWB number visibly; full shipment management
+              lives on the "الشحن" page in the sidebar. */}
+          {shipment ? (
+            <span title={`AWB ${shipment.awb_number}`}
+              style={{...actionBtnStyle, background:shipStatusBadge(shipment.status).bg, border:`1px solid ${shipStatusBadge(shipment.status).fg}33`, color:shipStatusBadge(shipment.status).fg, cursor:"default"}}>
+              📦 {shipment.awb_number} · {shipStatusBadge(shipment.status).l}
+            </span>
+          ) : (
+            <button onClick={createShipment} disabled={shipBusy || !canManage}
+              title={canManage ? "إنشاء بوليصة شحن" : "تتطلب صلاحية إدارة الطلبات"}
+              style={{...actionBtnStyle, background:ui.text, color:"#fff", border:"none",
+                opacity: (shipBusy || !canManage) ? 0.55 : 1,
+                cursor: (shipBusy || !canManage) ? "not-allowed" : "pointer"}}>
+              📦 {shipBusy ? "جارٍ الإنشاء..." : "شحن الطلب"}
+            </button>
+          )}
           <button onClick={handleEmailInvoice} disabled={emailBusy || !order.userEmail}
             title={order.userEmail ? `إرسال إلى ${order.userEmail}` : "لا يوجد إيميل للعميل"}
             style={{...actionBtnStyle, opacity: (emailBusy || !order.userEmail) ? 0.55 : 1,
@@ -11593,6 +12654,12 @@ function OrderDetailPage({
         <div className="no-print" style={{marginBottom:10,padding:"7px 12px",borderRadius:6,
           background:"#F0FDF4",border:"1px solid #BBF7D0",color:"#15803D",fontSize:12,fontFamily:ui.fontBody}}>
           {emailFeedback || copyFeedback}
+        </div>
+      )}
+      {shipError && (
+        <div className="no-print" style={{marginBottom:10,padding:"7px 12px",borderRadius:6,
+          background:"#FEF2F2",border:"1px solid #FCA5A5",color:"#B91C1C",fontSize:12,fontFamily:ui.fontBody}}>
+          ⚠ تعذّر إنشاء الشحنة: {shipError}
         </div>
       )}
 
