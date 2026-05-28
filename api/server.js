@@ -1498,8 +1498,11 @@ app.post('/api/orders', (req, res) => {
     }
 
     // Reserve stock so the inventory page reflects what's locked to this order.
+    // Skip for is_test=1 orders so smoke runs can't increment stock_reserved
+    // on real products — the orphan reservation would survive the order purge
+    // and drift inventory_value across every run.
     const order = db.prepare('SELECT * FROM orders WHERE id = ?').get(String(id));
-    reserveStockForOrder(order, items || []);
+    if (!isTest) reserveStockForOrder(order, items || []);
 
     // Notify the super admin so they see the new order in their inbox.
     sendMessage({
