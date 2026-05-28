@@ -3839,11 +3839,14 @@ app.post('/api/shipments', (req, res) => {
   try {
     const b = req.body || {};
     if (!b.order_id) return res.status(400).json({ error: 'order_id required' });
+    // orders.id is TEXT — coerce to string here so a JSON-number id from
+    // the client still matches (better-sqlite3 binds typed args strictly).
+    const orderId = String(b.order_id);
     // Block duplicate active shipments per order (one shipment at a time).
-    const existing = db.prepare("SELECT id, awb_number, status FROM shipments WHERE order_id = ? AND status NOT IN ('cancelled','returned')").get(b.order_id);
+    const existing = db.prepare("SELECT id, awb_number, status FROM shipments WHERE order_id = ? AND status NOT IN ('cancelled','returned')").get(orderId);
     if (existing) return res.status(409).json({ error: 'order already has an active shipment', existing });
 
-    const order = db.prepare('SELECT * FROM orders WHERE id = ?').get(b.order_id);
+    const order = db.prepare('SELECT * FROM orders WHERE id = ?').get(orderId);
     if (!order) return res.status(404).json({ error: 'order not found' });
     let items = [];
     try { items = JSON.parse(order.items || '[]'); } catch {}
@@ -3903,7 +3906,7 @@ app.post('/api/shipments', (req, res) => {
          expected_delivery_date, signature_required, special_instructions, internal_notes)
       VALUES (?,?,?,?,?,?,?,?,?, 'ready', ?,?,?,?)
     `).run(
-      id, awb, b.order_id, courierId, zone ? zone.id : null, weight,
+      id, awb, orderId, courierId, zone ? zone.id : null, weight,
       Number(b.courier_cost) || 0,
       customerPaidShipping, customerPaidCod,
       expectedDate,
