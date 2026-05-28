@@ -468,6 +468,7 @@ ensureColumn('products', 'publish_at',           'DATETIME');              // op
 ensureColumn('products', 'is_best_seller',       'INTEGER DEFAULT 0');
 ensureColumn('products', 'has_variants',         'INTEGER DEFAULT 0');
 ensureColumn('products', 'archived',             'INTEGER DEFAULT 0');
+ensureColumn('products', 'weight_kg',            'REAL DEFAULT 0.3');           // per-unit weight; drives shipment weight auto-calc
 
 // Variant rows — one product can have many (size variants etc.). When
 // has_variants = 1 the storefront should display from these instead of the
@@ -619,6 +620,164 @@ db.exec(`
   )
 `);
 try { db.exec('CREATE INDEX IF NOT EXISTS idx_finance_summary_ym ON finance_monthly_summary(year, month)'); } catch {}
+
+// ── Shipping Phase 1 — 4 tables + seed ──────────────────────────────────────
+// `shipping_zones` replaces the legacy JSON blob in settings.shipping.zones.
+// One row per geographic zone with explicit weight tiers + free-shipping
+// threshold + active flag. Migration below copies the 5 default zones from
+// the old JSON the first time (idempotent — only runs when the table is empty).
+db.exec(`
+  CREATE TABLE IF NOT EXISTS shipping_zones (
+    id                       TEXT PRIMARY KEY,
+    name_ar                  TEXT NOT NULL,
+    name_en                  TEXT,
+    governorates             TEXT DEFAULT '[]',         -- JSON array of governorate names
+    base_price               REAL DEFAULT 0,
+    base_weight              REAL DEFAULT 1,             -- kg covered by base_price
+    extra_per_kg             REAL DEFAULT 0,             -- additional fee per kg above base
+    min_days                 INTEGER DEFAULT 1,
+    max_days                 INTEGER DEFAULT 3,
+    free_shipping_threshold  REAL,                       -- NULL = use global default
+    active                   INTEGER DEFAULT 1,
+    sort_order               INTEGER DEFAULT 0,
+    created_at               DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at               DATETIME DEFAULT CURRENT_TIMESTAMP
+  )
+`);
+
+// `couriers` — shipping companies. One can be `is_default=1` (only one); the
+// admin UI enforces this. `zone_ids` is a JSON array indicating which zones
+// this courier serves (empty = any). Tracking URL has a {tracking_number}
+// placeholder that the frontend substitutes when rendering a tracking link.
+db.exec(`
+  CREATE TABLE IF NOT EXISTS couriers (
+    id                       TEXT PRIMARY KEY,
+    name                     TEXT NOT NULL,
+    description              TEXT,
+    logo_path                TEXT,
+    contact_name             TEXT,
+    contact_phone            TEXT,
+    contact_email            TEXT,
+    tracking_url_template    TEXT,                       -- e.g., https://bosta.co/track/{tracking_number}
+    internal_notes           TEXT,
+    is_default               INTEGER DEFAULT 0,
+    active                   INTEGER DEFAULT 0,          -- inactive by default; admin enables explicitly
+    zone_ids                 TEXT DEFAULT '[]',          -- JSON array of shipping_zones.id (empty = all)
+    sort_order               INTEGER DEFAULT 0,
+    created_at               DATETIME DEFAULT CURRENT_TIMESTAMP
+  )
+`);
+
+// `shipments` — one row per actual shipment (linked to an order). AWB number
+// is the human-facing handle; admins typically work with the AWB, not the id.
+// `customer_paid_*` columns capture what the customer actually paid so the
+// shipping-margin KPI on the management page can compare against
+// `courier_cost`. Status enum follows the spec's tab names directly.
+db.exec(`
+  CREATE TABLE IF NOT EXISTS shipments (
+    id                       TEXT PRIMARY KEY,
+    awb_number               TEXT,                       -- AWB-XXXX (unique below)
+    order_id                 TEXT NOT NULL,
+    courier_id               TEXT,
+    zone_id                  TEXT,
+    weight_kg                REAL DEFAULT 0,
+    courier_cost             REAL DEFAULT 0,             -- what the store pays the courier
+    customer_paid_shipping   REAL DEFAULT 0,             -- shipping fee paid by customer
+    customer_paid_cod        REAL DEFAULT 0,             -- COD amount (if applicable)
+    status                   TEXT DEFAULT 'ready',       -- ready|shipped|delivered|returned|cancelled
+    shipped_at               DATETIME,
+    delivered_at             DATETIME,
+    expected_delivery_date   DATE,
+    tracking_number          TEXT,
+    signature_required       INTEGER DEFAULT 0,
+    special_instructions     TEXT,
+    internal_notes           TEXT,
+    created_at               DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at               DATETIME DEFAULT CURRENT_TIMESTAMP
+  )
+`);
+try { db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_shipments_awb ON shipments(awb_number) WHERE awb_number IS NOT NULL'); } catch {}
+try { db.exec('CREATE INDEX IF NOT EXISTS idx_shipments_order ON shipments(order_id)'); } catch {}
+try { db.exec('CREATE INDEX IF NOT EXISTS idx_shipments_status ON shipments(status)'); } catch {}
+
+// `shipment_status_history` — audit log of every status transition.
+db.exec(`
+  CREATE TABLE IF NOT EXISTS shipment_status_history (
+    id                       TEXT PRIMARY KEY,
+    shipment_id              TEXT NOT NULL,
+    from_status              TEXT,
+    to_status                TEXT NOT NULL,
+    notes                    TEXT,
+    actor_id                 TEXT,
+    actor_name               TEXT,
+    created_at               DATETIME DEFAULT CURRENT_TIMESTAMP
+  )
+`);
+try { db.exec('CREATE INDEX IF NOT EXISTS idx_shipment_history_shipment ON shipment_status_history(shipment_id, created_at)'); } catch {}
+
+// ── Seed: migrate the 5 zones from legacy settings.shipping.zones ───────────
+// Only runs once: if the shipping_zones table has no rows AND the legacy JSON
+// has zones, copy them across with sensible defaults for the new fields.
+// After migration, the admin UI is the source of truth — the legacy JSON
+// becomes read-only/orphan. (Storefront still reads it through Phase 2; in
+// Phase 2 the storefront switches to the new endpoint.)
+(() => {
+  try {
+    const haveRows = db.prepare("SELECT COUNT(*) AS n FROM shipping_zones").get().n;
+    if (haveRows > 0) return;
+    const row = db.prepare("SELECT value FROM settings WHERE key = 'shipping'").get();
+    if (!row) return;
+    let legacy = {};
+    try { legacy = JSON.parse(row.value || '{}'); } catch {}
+    const zones = Array.isArray(legacy.zones) ? legacy.zones : [];
+    if (!zones.length) return;
+    const ins = db.prepare(`
+      INSERT INTO shipping_zones
+        (id, name_ar, name_en, governorates, base_price, base_weight, extra_per_kg,
+         min_days, max_days, free_shipping_threshold, active, sort_order)
+      VALUES (?, ?, NULL, ?, ?, 1, 0, ?, ?, NULL, 1, ?)
+    `);
+    zones.forEach((z, i) => {
+      // Split the comma-separated governorate string into a JSON array of trimmed names.
+      const govs = String(z.governorates || '')
+        .split(/[،,]/)
+        .map(s => s.trim())
+        .filter(Boolean);
+      // Parse "1-2" / "3-5" style strings into min/max.
+      let [minD, maxD] = String(z.days || '1-2').split('-').map(s => parseInt(s.trim(), 10));
+      if (!Number.isFinite(minD)) minD = 1;
+      if (!Number.isFinite(maxD)) maxD = minD;
+      ins.run(
+        z.id || `zone_${i+1}`,
+        z.name || `Zone ${i+1}`,
+        JSON.stringify(govs),
+        Number(z.price) || 0,
+        minD, maxD,
+        i + 1
+      );
+    });
+    console.log(`[nawra-api] migrated ${zones.length} shipping zones from legacy settings.shipping.zones`);
+  } catch (e) { console.warn('[nawra-api] shipping zone migration skipped:', e.message); }
+})();
+
+// ── Seed: 3 default couriers (Bosta, J&T, Aramex), all inactive ─────────────
+(() => {
+  try {
+    const haveRows = db.prepare("SELECT COUNT(*) AS n FROM couriers").get().n;
+    if (haveRows > 0) return;
+    const seeds = [
+      { id: 'cou_bosta',  name: 'Bosta',       desc: 'شركة شحن مصرية',         track: 'https://bosta.co/track/{tracking_number}', sort: 1 },
+      { id: 'cou_jt',     name: 'J&T Express', desc: 'J&T Express Egypt',       track: 'https://www.jtexpress.eg/track?awb={tracking_number}', sort: 2 },
+      { id: 'cou_aramex', name: 'Aramex',      desc: 'شركة أرامكس للشحن الدولي', track: 'https://www.aramex.com/track/results?ShipmentNumber={tracking_number}', sort: 3 },
+    ];
+    const ins = db.prepare(`
+      INSERT INTO couriers (id, name, description, tracking_url_template, is_default, active, zone_ids, sort_order)
+      VALUES (?, ?, ?, ?, 0, 0, '[]', ?)
+    `);
+    seeds.forEach(s => ins.run(s.id, s.name, s.desc, s.track, s.sort));
+    console.log(`[nawra-api] seeded ${seeds.length} default couriers (all inactive)`);
+  } catch (e) { console.warn('[nawra-api] courier seed skipped:', e.message); }
+})();
 
 // Seed default categories (idempotent). The keys here match the legacy
 // EXPENSE_CATEGORIES enum used by the old expenses.category column, plus the
@@ -3253,6 +3412,589 @@ app.get('/api/stock-changes', (_req, res) => {
   try {
     const rows = db.prepare('SELECT * FROM stock_changes ORDER BY created_at DESC LIMIT 100').all();
     res.json(rows);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// ── SHIPPING (Phase 1) ────────────────────────────────────────────────────────
+// Helpers + endpoints for: shipping_zones, couriers, shipments. The admin UI
+// (Phase 2) calls these; for now the storefront still reads the legacy
+// settings.shipping JSON for the cart's free-shipping calc — that switch
+// happens in Phase 2 alongside the new admin pages.
+
+const SHIPMENT_STATUSES = new Set(['ready','shipped','delivered','returned','cancelled']);
+
+// Sequential AWB allocator wrapped in a txn so two simultaneous POSTs can't
+// pick the same number. Starts at 1 in a fresh DB.
+const allocateAwbNumber = db.transaction(() => {
+  const row = db.prepare(
+    "SELECT COALESCE(MAX(CAST(SUBSTR(awb_number, 5) AS INTEGER)), 0) AS m FROM shipments WHERE awb_number LIKE 'AWB-%'"
+  ).get();
+  const n = (row.m || 0) + 1;
+  return `AWB-${String(n).padStart(4, '0')}`;
+});
+
+// Match a customer's governorate string to a shipping zone. Iterates active
+// zones and checks if the governorate appears in the zone's governorates
+// array. Falls back to null when no match — caller should handle.
+function matchZoneByGovernorate(governorate) {
+  if (!governorate) return null;
+  const target = String(governorate).trim();
+  if (!target) return null;
+  const zones = db.prepare('SELECT * FROM shipping_zones WHERE active = 1 ORDER BY sort_order, name_ar').all();
+  for (const z of zones) {
+    let govs = [];
+    try { govs = JSON.parse(z.governorates || '[]'); } catch {}
+    if (govs.some(g => String(g).trim() === target)) return z;
+  }
+  return null;
+}
+
+// Sum line items × per-unit weight. Falls back to settings.store
+// .shipping_default_product_weight (default 0.3kg) when a line item's
+// product has no weight set. `items` is the orders.items JSON-decoded array.
+function computeOrderWeight(items, opts = {}) {
+  const defaultW = Number(opts.defaultWeight) || 0.3;
+  if (!Array.isArray(items) || !items.length) return 0;
+  // Build a name→weight lookup once per call.
+  const products = db.prepare("SELECT name, weight_kg FROM products").all();
+  const weightByName = new Map(products.map(p => [(p.name || '').trim().toLowerCase(), Number(p.weight_kg) || 0]));
+  let total = 0;
+  items.forEach(it => {
+    const qty = Number(it.qty) || 0;
+    const w   = weightByName.get(String(it.name || '').trim().toLowerCase()) || defaultW;
+    total += qty * w;
+  });
+  return Math.round(total * 100) / 100;
+}
+
+// Quote a shipping fee for a given zone + weight + order_total.
+//   · Free when order_total >= zone.free_shipping_threshold (or the global
+//     default when the zone has no threshold of its own AND the global is set).
+//   · Otherwise: base_price + max(0, weight - base_weight) * extra_per_kg.
+// Returns { fee, free, reason, zone_id }.
+function computeShippingFee(zone, weight, orderTotal, globalFreeThreshold) {
+  if (!zone) return { fee: 0, free: false, reason: 'no_zone', zone_id: null };
+  const z = zone;
+  const total = Number(orderTotal) || 0;
+  const w     = Math.max(0, Number(weight) || 0);
+  const zoneThreshold = Number(z.free_shipping_threshold);
+  const globalThreshold = Number(globalFreeThreshold) || 0;
+  const threshold = Number.isFinite(zoneThreshold) && zoneThreshold > 0
+    ? zoneThreshold
+    : (globalThreshold > 0 ? globalThreshold : null);
+  if (threshold != null && total >= threshold) {
+    return { fee: 0, free: true, reason: 'free_threshold', zone_id: z.id, threshold };
+  }
+  const base = Number(z.base_price) || 0;
+  const baseW = Number(z.base_weight) || 1;
+  const perKg = Number(z.extra_per_kg) || 0;
+  const overWeight = Math.max(0, w - baseW);
+  const fee = Math.round((base + overWeight * perKg) * 100) / 100;
+  return { fee, free: false, reason: 'tiered', zone_id: z.id, base, base_weight: baseW, extra_per_kg: perKg };
+}
+
+// Read shipping_default_free_threshold from settings.store (set by the
+// Phase-2 Settings → Shipping section D). Falls back to legacy
+// settings.shipping.free_shipping_min_order. Returns 0 when neither is set.
+function getGlobalFreeThreshold() {
+  try {
+    const row = db.prepare("SELECT value FROM settings WHERE key = 'store'").get();
+    const store = row ? JSON.parse(row.value || '{}') : {};
+    const v = Number(store.shipping_default_free_threshold);
+    if (Number.isFinite(v) && v > 0) return v;
+  } catch {}
+  try {
+    const row = db.prepare("SELECT value FROM settings WHERE key = 'shipping'").get();
+    const sh  = row ? JSON.parse(row.value || '{}') : {};
+    if (sh.free_shipping_enabled) return Number(sh.free_shipping_min_order) || 0;
+  } catch {}
+  return 0;
+}
+
+function logShipmentHistory({ shipment_id, from_status, to_status, notes, actor_id, actor_name }) {
+  try {
+    const id = `shh_${Date.now().toString(36)}_${Math.random().toString(36).slice(2,5)}`;
+    db.prepare(`
+      INSERT INTO shipment_status_history (id, shipment_id, from_status, to_status, notes, actor_id, actor_name)
+      VALUES (?,?,?,?,?,?,?)
+    `).run(id, shipment_id, from_status || null, to_status, notes || null, actor_id || null, actor_name || null);
+  } catch (e) { console.warn('[nawra-api] shipment history log skipped:', e.message); }
+}
+
+function hydrateShipment(s) {
+  if (!s) return null;
+  // Resolve courier + zone + order + status history in one go. Used by
+  // GET /api/shipments/:awb to feed the modal.
+  let courier = null, zone = null, order = null;
+  if (s.courier_id) courier = db.prepare('SELECT id, name, logo_path, tracking_url_template, contact_phone FROM couriers WHERE id = ?').get(s.courier_id) || null;
+  if (s.zone_id)    zone    = db.prepare('SELECT * FROM shipping_zones WHERE id = ?').get(s.zone_id) || null;
+  if (s.order_id)   {
+    const o = db.prepare('SELECT id, order_number, date, created_at, total, subtotal, shipping_cost, status, payment_method, payment_status, name, phone, city, address, items AS items_json, userEmail FROM orders WHERE id = ?').get(s.order_id);
+    if (o) {
+      try { o.items = JSON.parse(o.items_json || '[]'); } catch { o.items = []; }
+      delete o.items_json;
+      order = o;
+    }
+  }
+  const history = db.prepare('SELECT * FROM shipment_status_history WHERE shipment_id = ? ORDER BY created_at').all(s.id);
+  return { ...s, courier, zone, order, history };
+}
+
+// ─── Shipping ZONES CRUD ────────────────────────────────────────────────────
+app.get('/api/shipping/zones', (req, res) => {
+  try {
+    const all = req.query.all === '1';
+    const sql = all
+      ? 'SELECT * FROM shipping_zones ORDER BY sort_order, name_ar'
+      : 'SELECT * FROM shipping_zones WHERE active = 1 ORDER BY sort_order, name_ar';
+    const rows = db.prepare(sql).all().map(z => {
+      try { z.governorates = JSON.parse(z.governorates || '[]'); } catch { z.governorates = []; }
+      // Optional shipment-count enrichment — useful insight on the settings page.
+      const c = db.prepare("SELECT COUNT(*) AS n FROM shipments WHERE zone_id = ?").get(z.id);
+      z.shipments_count = Number(c.n) || 0;
+      return z;
+    });
+    res.json(rows);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+app.post('/api/shipping/zones', (req, res) => {
+  try {
+    const z = req.body || {};
+    if (!z.name_ar) return res.status(400).json({ error: 'name_ar required' });
+    const id = z.id || `zone_${Date.now().toString(36)}_${Math.random().toString(36).slice(2,5)}`;
+    const govs = Array.isArray(z.governorates) ? z.governorates : [];
+    const maxOrder = db.prepare("SELECT COALESCE(MAX(sort_order), 0) AS m FROM shipping_zones").get().m;
+    db.prepare(`
+      INSERT INTO shipping_zones
+        (id, name_ar, name_en, governorates, base_price, base_weight, extra_per_kg,
+         min_days, max_days, free_shipping_threshold, active, sort_order)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+    `).run(
+      id, z.name_ar, z.name_en || null, JSON.stringify(govs),
+      Number(z.base_price)   || 0,
+      Number(z.base_weight)  || 1,
+      Number(z.extra_per_kg) || 0,
+      Number.isFinite(+z.min_days) ? +z.min_days : 1,
+      Number.isFinite(+z.max_days) ? +z.max_days : 3,
+      z.free_shipping_threshold === '' || z.free_shipping_threshold == null ? null : Number(z.free_shipping_threshold),
+      z.active === false ? 0 : 1,
+      (maxOrder || 0) + 1,
+    );
+    const out = db.prepare('SELECT * FROM shipping_zones WHERE id = ?').get(id);
+    try { out.governorates = JSON.parse(out.governorates || '[]'); } catch { out.governorates = []; }
+    res.json(out);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+app.patch('/api/shipping/zones/:id', (req, res) => {
+  try {
+    const cur = db.prepare('SELECT * FROM shipping_zones WHERE id = ?').get(req.params.id);
+    if (!cur) return res.status(404).json({ error: 'not found' });
+    const z = req.body || {};
+    const sets = []; const vals = [];
+    ['name_ar','name_en','base_price','base_weight','extra_per_kg','min_days','max_days','active','sort_order'].forEach(k => {
+      if (Object.prototype.hasOwnProperty.call(z, k)) {
+        let v = z[k];
+        if (k === 'active') v = v ? 1 : 0;
+        sets.push(`${k} = ?`); vals.push(v);
+      }
+    });
+    if (Object.prototype.hasOwnProperty.call(z, 'governorates')) {
+      sets.push('governorates = ?');
+      vals.push(JSON.stringify(Array.isArray(z.governorates) ? z.governorates : []));
+    }
+    if (Object.prototype.hasOwnProperty.call(z, 'free_shipping_threshold')) {
+      sets.push('free_shipping_threshold = ?');
+      vals.push(z.free_shipping_threshold === '' || z.free_shipping_threshold == null ? null : Number(z.free_shipping_threshold));
+    }
+    if (!sets.length) return res.json(cur);
+    sets.push("updated_at = datetime('now')");
+    vals.push(req.params.id);
+    db.prepare(`UPDATE shipping_zones SET ${sets.join(', ')} WHERE id = ?`).run(...vals);
+    const out = db.prepare('SELECT * FROM shipping_zones WHERE id = ?').get(req.params.id);
+    try { out.governorates = JSON.parse(out.governorates || '[]'); } catch { out.governorates = []; }
+    res.json(out);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+app.delete('/api/shipping/zones/:id', (req, res) => {
+  try {
+    const using = db.prepare("SELECT COUNT(*) AS n FROM shipments WHERE zone_id = ?").get(req.params.id).n;
+    if (using > 0) return res.status(400).json({ error: `zone is used by ${using} shipment(s); set active=0 instead` });
+    const info = db.prepare('DELETE FROM shipping_zones WHERE id = ?').run(req.params.id);
+    if (!info.changes) return res.status(404).json({ error: 'not found' });
+    res.json({ ok: true });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// ─── COURIERS CRUD ──────────────────────────────────────────────────────────
+app.get('/api/shipping/couriers', (req, res) => {
+  try {
+    const all = req.query.all === '1';
+    const sql = all
+      ? 'SELECT * FROM couriers ORDER BY sort_order, name'
+      : 'SELECT * FROM couriers WHERE active = 1 ORDER BY sort_order, name';
+    const rows = db.prepare(sql).all().map(c => {
+      try { c.zone_ids = JSON.parse(c.zone_ids || '[]'); } catch { c.zone_ids = []; }
+      return c;
+    });
+    res.json(rows);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+app.post('/api/shipping/couriers', (req, res) => {
+  try {
+    const c = req.body || {};
+    if (!c.name) return res.status(400).json({ error: 'name required' });
+    const id = c.id || `cou_${Date.now().toString(36)}_${Math.random().toString(36).slice(2,5)}`;
+    const maxOrder = db.prepare("SELECT COALESCE(MAX(sort_order), 0) AS m FROM couriers").get().m;
+    db.prepare(`
+      INSERT INTO couriers
+        (id, name, description, logo_path, contact_name, contact_phone, contact_email,
+         tracking_url_template, internal_notes, is_default, active, zone_ids, sort_order)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+    `).run(
+      id, c.name, c.description || null, c.logo_path || null,
+      c.contact_name || null, c.contact_phone || null, c.contact_email || null,
+      c.tracking_url_template || null, c.internal_notes || null,
+      c.is_default ? 1 : 0, c.active ? 1 : 0,
+      JSON.stringify(Array.isArray(c.zone_ids) ? c.zone_ids : []),
+      (maxOrder || 0) + 1,
+    );
+    // Enforce single-default invariant if this row was set as default.
+    if (c.is_default) db.prepare("UPDATE couriers SET is_default = 0 WHERE id != ?").run(id);
+    const out = db.prepare('SELECT * FROM couriers WHERE id = ?').get(id);
+    try { out.zone_ids = JSON.parse(out.zone_ids || '[]'); } catch { out.zone_ids = []; }
+    res.json(out);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+app.patch('/api/shipping/couriers/:id', (req, res) => {
+  try {
+    const cur = db.prepare('SELECT * FROM couriers WHERE id = ?').get(req.params.id);
+    if (!cur) return res.status(404).json({ error: 'not found' });
+    const c = req.body || {};
+    const sets = []; const vals = [];
+    ['name','description','logo_path','contact_name','contact_phone','contact_email',
+     'tracking_url_template','internal_notes','active','is_default','sort_order'].forEach(k => {
+      if (Object.prototype.hasOwnProperty.call(c, k)) {
+        let v = c[k];
+        if (k === 'active' || k === 'is_default') v = v ? 1 : 0;
+        sets.push(`${k} = ?`); vals.push(v);
+      }
+    });
+    if (Object.prototype.hasOwnProperty.call(c, 'zone_ids')) {
+      sets.push('zone_ids = ?');
+      vals.push(JSON.stringify(Array.isArray(c.zone_ids) ? c.zone_ids : []));
+    }
+    if (!sets.length) return res.json(cur);
+    vals.push(req.params.id);
+    db.prepare(`UPDATE couriers SET ${sets.join(', ')} WHERE id = ?`).run(...vals);
+    if (c.is_default) db.prepare("UPDATE couriers SET is_default = 0 WHERE id != ?").run(req.params.id);
+    const out = db.prepare('SELECT * FROM couriers WHERE id = ?').get(req.params.id);
+    try { out.zone_ids = JSON.parse(out.zone_ids || '[]'); } catch { out.zone_ids = []; }
+    res.json(out);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+app.delete('/api/shipping/couriers/:id', (req, res) => {
+  try {
+    const using = db.prepare("SELECT COUNT(*) AS n FROM shipments WHERE courier_id = ?").get(req.params.id).n;
+    if (using > 0) return res.status(400).json({ error: `courier is used by ${using} shipment(s); set active=0 instead` });
+    const info = db.prepare('DELETE FROM couriers WHERE id = ?').run(req.params.id);
+    if (!info.changes) return res.status(404).json({ error: 'not found' });
+    res.json({ ok: true });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// ─── Shipping fee calculator (storefront + admin preview) ──────────────────
+app.get('/api/shipping/calculate', (req, res) => {
+  try {
+    const { governorate, total, weight } = req.query;
+    const zone = matchZoneByGovernorate(governorate);
+    const w    = weight != null ? Number(weight) : 0;
+    const t    = total  != null ? Number(total)  : 0;
+    const quote = computeShippingFee(zone, w, t, getGlobalFreeThreshold());
+    res.json({ zone: zone ? { id: zone.id, name_ar: zone.name_ar, min_days: zone.min_days, max_days: zone.max_days } : null, ...quote });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// ─── SHIPMENTS ──────────────────────────────────────────────────────────────
+// GET /api/shipments — list with filters + pagination envelope. Spec section
+// B/E tabs/filters land here. Heavy aggregations go to /aggregates below.
+app.get('/api/shipments', (req, res) => {
+  try {
+    const { status, q, courier_id, zone_id, from, to, sort, page = '1', perPage = '25' } = req.query;
+    let sql = `
+      SELECT s.*, o.order_number, o.name AS customer_name, o.phone AS customer_phone, o.total AS order_total,
+             c.name AS courier_name, c.logo_path AS courier_logo,
+             z.name_ar AS zone_name
+      FROM shipments s
+      LEFT JOIN orders   o ON o.id = s.order_id
+      LEFT JOIN couriers c ON c.id = s.courier_id
+      LEFT JOIN shipping_zones z ON z.id = s.zone_id
+      WHERE 1=1`;
+    const params = [];
+    if (status && status !== 'all') { sql += ' AND s.status = ?'; params.push(status); }
+    if (courier_id) { sql += ' AND s.courier_id = ?'; params.push(courier_id); }
+    if (zone_id)    { sql += ' AND s.zone_id = ?';    params.push(zone_id); }
+    if (from)       { sql += ' AND DATE(s.created_at) >= ?'; params.push(from); }
+    if (to)         { sql += ' AND DATE(s.created_at) <= ?'; params.push(to); }
+    if (q) {
+      const like = `%${q}%`;
+      sql += ` AND (s.awb_number LIKE ? OR s.order_id LIKE ? OR o.order_number LIKE ?
+                OR o.name LIKE ? OR o.phone LIKE ?)`;
+      params.push(like, like, like, like, like);
+    }
+    if (sort === 'late') sql += ' ORDER BY (s.status = "shipped" AND DATE(s.expected_delivery_date) < DATE("now")) DESC, s.created_at DESC';
+    else if (sort === 'heavy') sql += ' ORDER BY s.weight_kg DESC';
+    else sql += ' ORDER BY s.created_at DESC';
+
+    const total = db.prepare(`SELECT COUNT(*) AS c FROM (${sql})`).get(...params).c;
+    const lim = Math.max(1, Math.min(200, parseInt(perPage, 10) || 25));
+    const off = (Math.max(1, parseInt(page, 10) || 1) - 1) * lim;
+    sql += ' LIMIT ? OFFSET ?'; params.push(lim, off);
+    const rows = db.prepare(sql).all(...params);
+    res.json({ rows, total, page: Number(page), perPage: lim });
+  } catch (e) { console.error('GET /api/shipments', e); res.status(500).json({ error: e.message }); }
+});
+
+// /aggregates — feeds spec section B (5 KPI cards) + section C (margin insight)
+// + tab counters. One round-trip for the list page.
+app.get('/api/shipments/aggregates', (_req, res) => {
+  try {
+    const all = db.prepare('SELECT * FROM shipments').all();
+    const byStatus = (s) => all.filter(r => r.status === s);
+    const counts = {
+      total:     all.length,
+      ready:     byStatus('ready').length,
+      shipped:   byStatus('shipped').length,
+      delivered: byStatus('delivered').length,
+      returned:  byStatus('returned').length,
+      cancelled: byStatus('cancelled').length,
+    };
+    // Current-month + previous-month delivered counts for % change card.
+    const now = new Date();
+    const ym  = (d) => `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}`;
+    const cur = ym(now);
+    const prevDate = new Date(now.getFullYear(), now.getMonth() - 1, 1);
+    const prev = ym(prevDate);
+    const delivered = byStatus('delivered');
+    const deliveredCurrent = delivered.filter(d => (d.delivered_at || '').startsWith(cur)).length;
+    const deliveredPrev    = delivered.filter(d => (d.delivered_at || '').startsWith(prev)).length;
+    const deliveredChangePct = deliveredPrev > 0
+      ? Math.round(((deliveredCurrent - deliveredPrev) / deliveredPrev) * 100)
+      : (deliveredCurrent > 0 ? 100 : 0);
+
+    // Average delivery time (days) over all delivered shipments where we
+    // recorded both shipped_at and delivered_at.
+    let avgDeliveryDays = null;
+    const settled = delivered.filter(d => d.shipped_at && d.delivered_at);
+    if (settled.length) {
+      const totMs = settled.reduce((s, d) => s + (new Date((d.delivered_at||'').replace(' ','T')+'Z').getTime() - new Date((d.shipped_at||'').replace(' ','T')+'Z').getTime()), 0);
+      avgDeliveryDays = Math.round((totMs / settled.length / 86400000) * 10) / 10;
+    }
+
+    // On-time % — delivered shipments whose delivered_at <= expected_delivery_date.
+    let onTimePct = null;
+    const withExpected = delivered.filter(d => d.expected_delivery_date && d.delivered_at);
+    if (withExpected.length) {
+      const onTime = withExpected.filter(d => (d.delivered_at || '').slice(0,10) <= d.expected_delivery_date).length;
+      onTimePct = Math.round((onTime / withExpected.length) * 1000) / 10;
+    }
+
+    // Current-month courier-cost total + customer-paid-shipping total (margin).
+    const monthRows = all.filter(s => (s.created_at || '').startsWith(cur));
+    const courierCostMonth   = monthRows.reduce((s, r) => s + (Number(r.courier_cost)           || 0), 0);
+    const customerPaidMonth  = monthRows.reduce((s, r) => s + (Number(r.customer_paid_shipping) || 0), 0);
+    const shippingMargin     = customerPaidMonth - courierCostMonth;
+
+    res.json({
+      counts,
+      delivered_current_month: deliveredCurrent,
+      delivered_change_pct:    deliveredChangePct,
+      avg_delivery_days:       avgDeliveryDays,
+      on_time_pct:             onTimePct,
+      courier_cost_month:      Math.round(courierCostMonth),
+      customer_paid_month:     Math.round(customerPaidMonth),
+      shipping_margin_month:   Math.round(shippingMargin),
+    });
+  } catch (e) { console.error('GET /api/shipments/aggregates', e); res.status(500).json({ error: e.message }); }
+});
+
+// GET single shipment (by AWB or internal id).
+app.get('/api/shipments/:key', (req, res) => {
+  try {
+    const k = req.params.key;
+    const row = (k.startsWith('AWB-')
+      ? db.prepare('SELECT * FROM shipments WHERE awb_number = ?').get(k)
+      : db.prepare('SELECT * FROM shipments WHERE id = ?').get(k));
+    if (!row) return res.status(404).json({ error: 'not found' });
+    res.json(hydrateShipment(row));
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// POST /api/shipments — admin clicks "شحن الطلب" on an order. Auto-allocates
+// AWB, auto-computes weight + zone if not provided, sets status='ready'.
+// Body shape:
+//   { order_id, courier_id?, weight_kg?, courier_cost?, customer_paid_shipping?,
+//     customer_paid_cod?, expected_delivery_date?, signature_required?,
+//     special_instructions?, internal_notes?, actor_id?, actor_name? }
+app.post('/api/shipments', (req, res) => {
+  try {
+    const b = req.body || {};
+    if (!b.order_id) return res.status(400).json({ error: 'order_id required' });
+    // Block duplicate active shipments per order (one shipment at a time).
+    const existing = db.prepare("SELECT id, awb_number, status FROM shipments WHERE order_id = ? AND status NOT IN ('cancelled','returned')").get(b.order_id);
+    if (existing) return res.status(409).json({ error: 'order already has an active shipment', existing });
+
+    const order = db.prepare('SELECT * FROM orders WHERE id = ?').get(b.order_id);
+    if (!order) return res.status(404).json({ error: 'order not found' });
+    let items = [];
+    try { items = JSON.parse(order.items || '[]'); } catch {}
+
+    // Resolve zone from explicit body or by matching the order's city/governorate.
+    let zone = null;
+    if (b.zone_id) zone = db.prepare('SELECT * FROM shipping_zones WHERE id = ?').get(b.zone_id) || null;
+    if (!zone) zone = matchZoneByGovernorate(order.city);
+
+    // Compute weight (admin can override).
+    const defaultWeight = (() => {
+      try {
+        const r = db.prepare("SELECT value FROM settings WHERE key='store'").get();
+        const s = r ? JSON.parse(r.value || '{}') : {};
+        const v = Number(s.shipping_default_product_weight);
+        return Number.isFinite(v) && v > 0 ? v : 0.3;
+      } catch { return 0.3; }
+    })();
+    const weight = b.weight_kg != null ? Number(b.weight_kg) : computeOrderWeight(items, { defaultWeight });
+
+    // Courier — body wins, else the default courier.
+    let courierId = b.courier_id || null;
+    if (!courierId) {
+      const def = db.prepare("SELECT id FROM couriers WHERE is_default = 1 AND active = 1 LIMIT 1").get();
+      if (def) courierId = def.id;
+    }
+
+    // Expected delivery — body wins, else today + zone.max_days + processing.
+    let expectedDate = b.expected_delivery_date || null;
+    if (!expectedDate) {
+      let processing = 0;
+      try {
+        const r = db.prepare("SELECT value FROM settings WHERE key='store'").get();
+        const s = r ? JSON.parse(r.value || '{}') : {};
+        processing = Number(s.shipping_processing_days) || 0;
+      } catch {}
+      const days = (zone ? Number(zone.max_days) || 3 : 3) + processing;
+      const d = new Date(); d.setDate(d.getDate() + days);
+      expectedDate = d.toISOString().slice(0, 10);
+    }
+
+    // Customer-paid shipping defaults to order.shipping_cost; COD defaults
+    // to order.total only when payment_method=cash and not yet paid.
+    const customerPaidShipping = b.customer_paid_shipping != null
+      ? Number(b.customer_paid_shipping)
+      : (Number(order.shipping_cost) || 0);
+    const customerPaidCod = b.customer_paid_cod != null
+      ? Number(b.customer_paid_cod)
+      : (order.payment_method === 'cash' && order.payment_status !== 'paid' ? Number(order.total) || 0 : 0);
+
+    const id  = `sh_${Date.now().toString(36)}_${Math.random().toString(36).slice(2,5)}`;
+    const awb = allocateAwbNumber();
+    db.prepare(`
+      INSERT INTO shipments
+        (id, awb_number, order_id, courier_id, zone_id, weight_kg, courier_cost,
+         customer_paid_shipping, customer_paid_cod, status,
+         expected_delivery_date, signature_required, special_instructions, internal_notes)
+      VALUES (?,?,?,?,?,?,?,?,?, 'ready', ?,?,?,?)
+    `).run(
+      id, awb, b.order_id, courierId, zone ? zone.id : null, weight,
+      Number(b.courier_cost) || 0,
+      customerPaidShipping, customerPaidCod,
+      expectedDate,
+      b.signature_required ? 1 : 0,
+      b.special_instructions || null,
+      b.internal_notes || null,
+    );
+    logShipmentHistory({
+      shipment_id: id, from_status: null, to_status: 'ready',
+      notes: 'تم إنشاء الشحنة', actor_id: b.actor_id, actor_name: b.actor_name,
+    });
+    res.json({ ok: true, id, awb_number: awb, zone_id: zone ? zone.id : null, weight_kg: weight, expected_delivery_date: expectedDate });
+  } catch (e) { console.error('POST /api/shipments', e); res.status(500).json({ error: e.message }); }
+});
+
+// PATCH /api/shipments/:key — status transitions, cost updates, courier
+// reassignment, notes. Status changes auto-stamp shipped_at/delivered_at
+// and log the transition. When status flips to 'delivered', the parent
+// order auto-transitions to 'مكتمل' if not already (Phase 3 ties this in
+// more tightly with the order audit log).
+app.patch('/api/shipments/:key', (req, res) => {
+  try {
+    const k = req.params.key;
+    const cur = (k.startsWith('AWB-')
+      ? db.prepare('SELECT * FROM shipments WHERE awb_number = ?').get(k)
+      : db.prepare('SELECT * FROM shipments WHERE id = ?').get(k));
+    if (!cur) return res.status(404).json({ error: 'not found' });
+    const b = req.body || {};
+    if (b.status && !SHIPMENT_STATUSES.has(b.status)) {
+      return res.status(400).json({ error: `status must be one of ${Array.from(SHIPMENT_STATUSES).join(',')}` });
+    }
+    const sets = []; const vals = [];
+    ['courier_id','zone_id','weight_kg','courier_cost','customer_paid_shipping','customer_paid_cod',
+     'tracking_number','expected_delivery_date','signature_required','special_instructions','internal_notes'].forEach(f => {
+      if (Object.prototype.hasOwnProperty.call(b, f)) {
+        let v = b[f];
+        if (f === 'signature_required') v = v ? 1 : 0;
+        sets.push(`${f} = ?`); vals.push(v);
+      }
+    });
+    if (b.status && b.status !== cur.status) {
+      sets.push('status = ?'); vals.push(b.status);
+      if (b.status === 'shipped'   && !cur.shipped_at)   sets.push("shipped_at = datetime('now')");
+      if (b.status === 'delivered' && !cur.delivered_at) sets.push("delivered_at = datetime('now')");
+    }
+    if (!sets.length) return res.json({ ok: true, noop: true });
+    sets.push("updated_at = datetime('now')");
+    vals.push(cur.id);
+    db.prepare(`UPDATE shipments SET ${sets.join(', ')} WHERE id = ?`).run(...vals);
+
+    if (b.status && b.status !== cur.status) {
+      logShipmentHistory({
+        shipment_id: cur.id, from_status: cur.status, to_status: b.status,
+        notes: b.notes || null,
+        actor_id: b.actor_id || null, actor_name: b.actor_name || null,
+      });
+      // Auto-progress parent order on delivery.
+      if (b.status === 'delivered' && cur.order_id) {
+        try {
+          const o = db.prepare('SELECT status FROM orders WHERE id = ?').get(cur.order_id);
+          if (o && o.status !== 'مكتمل' && o.status !== 'ملغي') {
+            db.prepare("UPDATE orders SET status = 'مكتمل' WHERE id = ?").run(cur.order_id);
+            // The PATCH /api/orders auto-flip rules already set payment_status
+            // on completion; calling that here would require re-implementing
+            // its body. Phase 2 will route shipment-delivery through the
+            // existing order PATCH instead.
+          }
+        } catch {}
+      }
+    }
+    const fresh = db.prepare('SELECT * FROM shipments WHERE id = ?').get(cur.id);
+    res.json(hydrateShipment(fresh));
+  } catch (e) { console.error('PATCH /api/shipments', e); res.status(500).json({ error: e.message }); }
+});
+
+// POST /api/shipments/:key/notes — append to internal_notes (timestamped).
+app.post('/api/shipments/:key/notes', (req, res) => {
+  try {
+    const k = req.params.key;
+    const cur = (k.startsWith('AWB-')
+      ? db.prepare('SELECT * FROM shipments WHERE awb_number = ?').get(k)
+      : db.prepare('SELECT * FROM shipments WHERE id = ?').get(k));
+    if (!cur) return res.status(404).json({ error: 'not found' });
+    const note   = ((req.body && req.body.note) || '').trim();
+    const author = ((req.body && req.body.author) || 'admin');
+    if (!note) return res.status(400).json({ error: 'note required' });
+    const stamp = new Date().toISOString().slice(0, 16).replace('T', ' ');
+    const line  = `[${stamp} · ${author}] ${note}`;
+    const merged = cur.internal_notes ? `${cur.internal_notes}\n${line}` : line;
+    db.prepare("UPDATE shipments SET internal_notes = ?, updated_at = datetime('now') WHERE id = ?").run(merged, cur.id);
+    res.json({ ok: true, internal_notes: merged });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
