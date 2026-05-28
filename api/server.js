@@ -906,6 +906,37 @@ const TEST_MARKER = '__NAWRA_TEST__';
     const info = db.prepare("DELETE FROM return_items WHERE product_name LIKE ?").run(`%${TEST_MARKER}%`);
     if (info.changes > 0) { console.log(`[nawra-api] test-data purge: return_items.product_name → removed ${info.changes}`); total += info.changes; }
   } catch {}
+  // Shipping tables — cascade-aware. Drop shipments referencing marker'd
+  // couriers/zones first, then the history rows, then the marker rows
+  // themselves. Without this, the courier/zone DELETE endpoints refuse to
+  // remove a row that's still referenced by a (cancelled) shipment.
+  try {
+    const orphanShipIds = db.prepare(`
+      SELECT s.id FROM shipments s
+      LEFT JOIN couriers c ON c.id = s.courier_id
+      LEFT JOIN shipping_zones z ON z.id = s.zone_id
+      WHERE (c.name LIKE ? OR z.name_ar LIKE ?)
+    `).all(`%${TEST_MARKER}%`, `%${TEST_MARKER}%`).map(r => r.id);
+    if (orphanShipIds.length) {
+      const placeholders = orphanShipIds.map(() => '?').join(',');
+      try {
+        const h = db.prepare(`DELETE FROM shipment_status_history WHERE shipment_id IN (${placeholders})`).run(...orphanShipIds);
+        if (h.changes > 0) { console.log(`[nawra-api] test-data purge cascade: shipment_status_history → removed ${h.changes}`); total += h.changes; }
+      } catch {}
+      try {
+        const s = db.prepare(`DELETE FROM shipments WHERE id IN (${placeholders})`).run(...orphanShipIds);
+        if (s.changes > 0) { console.log(`[nawra-api] test-data purge cascade: shipments → removed ${s.changes}`); total += s.changes; }
+      } catch {}
+    }
+  } catch {}
+  // Now safe to remove the marker'd parent rows.
+  ['couriers', 'shipping_zones'].forEach((t) => {
+    const field = t === 'couriers' ? 'name' : 'name_ar';
+    try {
+      const info = db.prepare(`DELETE FROM ${t} WHERE ${field} LIKE ?`).run(`%${TEST_MARKER}%`);
+      if (info.changes > 0) { console.log(`[nawra-api] test-data purge: ${t}.${field} → removed ${info.changes}`); total += info.changes; }
+    } catch (err) { console.warn(`[nawra-api] test-data purge skipped for ${t}: ${err.message}`); }
+  });
   if (total === 0) console.log('[nawra-api] test-data purge: nothing to remove');
 })();
 
