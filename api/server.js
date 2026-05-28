@@ -2847,8 +2847,13 @@ app.patch('/api/returns/:id', (req, res) => {
     }
     // Inspection: 'good' returns units to stock_available; 'damaged' adds
     // to stock_damaged AND creates a "damaged" expense for the cost.
+    // Test-data isolation: skip ALL real-product side-effects for is_test
+    // returns — otherwise the smoke would bump real products' stock,
+    // creating cumulative drift in inventory_value across runs.
     let inspectionApplied = false;
-    if (r.inspection_status && ['good','damaged'].includes(r.inspection_status) && !cur.stock_settled) {
+    if (cur.is_test) {
+      // No-op: don't mutate real product stock from a test return.
+    } else if (r.inspection_status && ['good','damaged'].includes(r.inspection_status) && !cur.stock_settled) {
       sets.push('inspection_status = ?'); vals.push(r.inspection_status);
       sets.push('inspected_at = datetime(\'now\')');
       sets.push('stock_settled = 1');
@@ -2908,8 +2913,11 @@ app.patch('/api/returns/:id', (req, res) => {
     const sideEffects = { restocked: [], expense_id: null, store_credit: null };
     if (newStatus === 'refunded' && cur.status !== 'refunded') {
       // -- 2a. Inventory restock per return_item.restock_action --
+      // is_test guard so smoke returns don't bump real products' stock.
       try {
-        const items = db.prepare('SELECT * FROM return_items WHERE return_id = ?').all(cur.id);
+        const items = cur.is_test
+          ? []
+          : db.prepare('SELECT * FROM return_items WHERE return_id = ?').all(cur.id);
         items.forEach(it => {
           if (!it.product_id || !it.restock_action || it.restock_action === 'pending') return;
           const product = db.prepare('SELECT * FROM products WHERE id = ?').get(it.product_id);
@@ -2976,7 +2984,8 @@ app.patch('/api/returns/:id', (req, res) => {
       }
 
       // -- 2c. Store credit: when refund_method='store_credit' --
-      if ((cur.refund_method || r.refund_method) === 'store_credit') {
+      // is_test guard so smoke returns don't credit real customers' wallets.
+      if (!cur.is_test && (cur.refund_method || r.refund_method) === 'store_credit') {
         try {
           // Read bonus % from settings.store.returns.store_credit_bonus_pct (default 5).
           let bonusPct = 5;
