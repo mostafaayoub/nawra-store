@@ -7054,6 +7054,7 @@ function AdminDash({ go }) {
                   <ShipmentDetailsModal
                     ship={shipDetail}
                     awbKey={shipDetailAwb}
+                    sender={storeCfg}
                     onClose={() => setShipDetailAwb(null)}
                     onPatch={patchShipment}
                     onAppendNote={async (note) => {
@@ -11680,13 +11681,198 @@ function printReturnSlip(ret) {
   win.document.open(); win.document.write(html); win.document.close();
 }
 
+// ─── AWB PDF generation (Phase 3 slice 1) ────────────────────────────────────
+// Builds an A6 portrait PDF for one shipment with sender + recipient blocks,
+// items count, weight, COD amount, and a CODE128 barcode of the AWB number.
+// Strategy: render a hidden HTML label (native browser RTL Arabic shaping +
+// bwip-js barcode canvas) → snapshot with html2canvas → wrap in jsPDF.
+// All three libs are dynamically imported so they only load when an admin
+// clicks the print button. Pass `bulk = [ship1, ship2, ...]` (overrides ship)
+// for multi-page output. Returns the jsPDF doc instance so callers can choose
+// .save() or .output('bloburl').
+async function generateAwbPdf({ ship, bulk, sender, action = "save" } = {}) {
+  const ships = Array.isArray(bulk) && bulk.length ? bulk : (ship ? [ship] : []);
+  if (!ships.length) throw new Error("no shipment provided");
+
+  // Lazy-load heavy deps once per click.
+  const [jsPdfMod, h2cMod, bwipMod] = await Promise.all([
+    import("jspdf"),
+    import("html2canvas"),
+    import("bwip-js"),
+  ]);
+  const jsPDF      = jsPdfMod.jsPDF;
+  const html2canvas = h2cMod.default || h2cMod;
+  const bwipjs     = bwipMod.default || bwipMod;
+
+  // Off-screen host so html2canvas can lay out flow content reliably.
+  const host = document.createElement("div");
+  host.style.cssText = "position:fixed;left:-99999px;top:0;background:#fff;direction:rtl;";
+  document.body.appendChild(host);
+
+  const doc = new jsPDF({ orientation: "portrait", unit: "mm", format: "a6", compress: true });
+  const pageW = 105, pageH = 148;
+
+  try {
+    for (let i = 0; i < ships.length; i++) {
+      const s = ships[i] || {};
+      const o = s.order || {};
+      const items = Array.isArray(o.items) ? o.items : [];
+      const totalQty = items.reduce((sum, it) => sum + (Number(it.qty) || 0), 0);
+      const codAmount = (s.payment_method === "cod" || o.payment_method === "cod")
+        ? (Number(s.customer_paid_cod) || Number(o.total) || 0)
+        : 0;
+      const senderName  = (sender && sender.shipping_sender_name)       || (sender && sender.name) || "نوّرَة Nawra Skincare";
+      const senderPhone = (sender && sender.shipping_sender_phone)      || (sender && sender.whatsapp) || "";
+      const senderAddr  = (sender && sender.shipping_warehouse_address) || (sender && sender.address) || "";
+
+      // Build the label DOM. Width = 105mm matches A6 page width.
+      const label = document.createElement("div");
+      label.style.cssText = `
+        width:105mm;min-height:148mm;background:#fff;color:#000;
+        font-family:'Cairo','Noto Naskh Arabic',sans-serif;
+        direction:rtl;padding:5mm 5mm 5mm 5mm;box-sizing:border-box;
+      `;
+      label.innerHTML = `
+        <div style="display:flex;align-items:flex-start;justify-content:space-between;border-bottom:1.2px solid #000;padding-bottom:2mm;margin-bottom:2.5mm;">
+          <div>
+            <div style="font-size:14pt;font-weight:700;line-height:1.1;">نوّرَة</div>
+            <div style="font-size:7pt;color:#444;letter-spacing:.5px;">NAWRA SKINCARE</div>
+          </div>
+          <div style="text-align:left;">
+            <div style="font-size:7pt;color:#555;">رقم البوليصة</div>
+            <div style="font-family:monospace;font-size:11pt;font-weight:700;">${escAttr(s.awb_number || "")}</div>
+            <div style="font-size:7pt;color:#555;margin-top:.5mm;">${escAttr((s.created_at || "").slice(0, 10))}</div>
+          </div>
+        </div>
+        <div style="text-align:center;margin-bottom:2.5mm;">
+          <canvas id="bc-${i}" style="max-width:100%;height:auto;"></canvas>
+        </div>
+        <div style="border:0.6px solid #000;border-radius:1.5mm;padding:2mm 2.5mm;margin-bottom:2mm;">
+          <div style="font-size:7.5pt;color:#555;margin-bottom:1mm;">المرسل</div>
+          <div style="font-size:10pt;font-weight:600;">${escAttr(senderName)}</div>
+          ${senderAddr ? `<div style="font-size:8.5pt;line-height:1.35;margin-top:.5mm;">${escAttr(senderAddr)}</div>` : ""}
+          ${senderPhone ? `<div style="font-family:monospace;font-size:8.5pt;margin-top:.5mm;">${escAttr(senderPhone)}</div>` : ""}
+        </div>
+        <div style="border:1.2px solid #000;border-radius:1.5mm;padding:2.5mm 2.5mm;margin-bottom:2mm;background:#f7f7f7;">
+          <div style="font-size:7.5pt;color:#555;margin-bottom:1mm;">المستلم</div>
+          <div style="font-size:12pt;font-weight:700;line-height:1.25;">${escAttr(o.name || "—")}</div>
+          ${o.phone ? `<div style="font-family:monospace;font-size:10pt;font-weight:600;margin-top:1mm;">${escAttr(o.phone)}</div>` : ""}
+          <div style="font-size:9.5pt;line-height:1.4;margin-top:1.5mm;">
+            ${o.city ? `<b>${escAttr(o.city)}</b> — ` : ""}${escAttr(o.address || "—")}
+          </div>
+          ${s.zone && s.zone.name_ar ? `<div style="font-size:8pt;color:#555;margin-top:1mm;">المنطقة: ${escAttr(s.zone.name_ar)}</div>` : ""}
+        </div>
+        <table style="width:100%;border-collapse:collapse;font-size:8.5pt;margin-bottom:2mm;">
+          <tr>
+            <td style="border:0.5px solid #000;padding:1.5mm 2mm;width:50%;">
+              <div style="color:#555;font-size:7pt;">الشركة</div>
+              <div style="font-weight:600;">${escAttr((s.courier && s.courier.name) || "—")}</div>
+            </td>
+            <td style="border:0.5px solid #000;padding:1.5mm 2mm;">
+              <div style="color:#555;font-size:7pt;">الوزن</div>
+              <div style="font-weight:600;">${(Number(s.weight_kg) || 0).toFixed(2)} كجم</div>
+            </td>
+          </tr>
+          <tr>
+            <td style="border:0.5px solid #000;padding:1.5mm 2mm;">
+              <div style="color:#555;font-size:7pt;">عدد القطع</div>
+              <div style="font-weight:600;">${totalQty || items.length || 0}</div>
+            </td>
+            <td style="border:0.5px solid #000;padding:1.5mm 2mm;">
+              <div style="color:#555;font-size:7pt;">طريقة الدفع</div>
+              <div style="font-weight:600;">${codAmount > 0 ? "الدفع عند الاستلام (COD)" : "مدفوع مسبقاً"}</div>
+            </td>
+          </tr>
+          ${codAmount > 0 ? `
+          <tr>
+            <td colspan="2" style="border:0.8px solid #000;padding:2mm 2.5mm;background:#FFF7E6;">
+              <div style="display:flex;align-items:center;justify-content:space-between;">
+                <span style="font-size:9pt;font-weight:600;">المبلغ المطلوب تحصيله</span>
+                <span style="font-family:monospace;font-size:13pt;font-weight:700;">${codAmount.toLocaleString()} ج</span>
+              </div>
+            </td>
+          </tr>` : ""}
+          ${s.expected_delivery_date ? `
+          <tr>
+            <td colspan="2" style="border:0.5px solid #000;padding:1.5mm 2mm;">
+              <div style="color:#555;font-size:7pt;">تاريخ التسليم المتوقع</div>
+              <div style="font-weight:600;font-family:monospace;">${escAttr(s.expected_delivery_date)}</div>
+            </td>
+          </tr>` : ""}
+        </table>
+        ${s.internal_notes ? `
+          <div style="border-top:0.5px dashed #999;padding-top:1.5mm;font-size:8pt;line-height:1.35;color:#333;">
+            <b style="color:#000;">ملاحظات:</b> ${escAttr(s.internal_notes)}
+          </div>` : ""}
+        <div style="position:absolute;bottom:5mm;left:5mm;right:5mm;font-size:7pt;color:#777;text-align:center;border-top:0.3px solid #ccc;padding-top:1mm;">
+          شكراً لاختياركم نوّرَة • للاستفسار اتصل ${escAttr(senderPhone || "—")}
+        </div>
+      `;
+      host.appendChild(label);
+
+      // Draw barcode after the label is in the DOM so the canvas exists.
+      const canvas = label.querySelector(`#bc-${i}`);
+      if (canvas && s.awb_number) {
+        try {
+          bwipjs.toCanvas(canvas, {
+            bcid:        "code128",
+            text:        String(s.awb_number),
+            scale:       3,
+            height:      12,
+            includetext: true,
+            textxalign:  "center",
+            textsize:    9,
+            backgroundcolor: "FFFFFF",
+          });
+        } catch (e) { console.warn("[awb] barcode draw failed", e); }
+      }
+
+      // Snapshot the label → image → PDF page.
+      const snap = await html2canvas(label, { scale: 2, backgroundColor: "#FFFFFF", logging: false, useCORS: true });
+      const png  = snap.toDataURL("image/png");
+      if (i > 0) doc.addPage("a6", "portrait");
+      doc.addImage(png, "PNG", 0, 0, pageW, pageH, undefined, "FAST");
+
+      host.removeChild(label);
+    }
+  } finally {
+    if (host.parentNode) host.parentNode.removeChild(host);
+  }
+
+  if (action === "open") {
+    const url = doc.output("bloburl");
+    window.open(url, "_blank");
+  } else {
+    const name = ships.length === 1
+      ? `${ships[0].awb_number || "AWB"}.pdf`
+      : `AWB-bulk-${new Date().toISOString().slice(0,10)}-${ships.length}.pdf`;
+    doc.save(name);
+  }
+  return doc;
+}
+
+// Minimal HTML attribute escape — used by the AWB label template literal.
+function escAttr(s) {
+  return String(s == null ? "" : s)
+    .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+}
+
 // ─── ShipmentDetailsModal — module-scope to keep input focus on every keystroke ───
 // Renders a modal for a single hydrated shipment from /api/shipments/:awb.
 // Phase 2 wires: status transitions, courier reassignment, cost edits,
-// notes, customer contact links. Phase 3 will wire AWB PDF print + manifest.
-function ShipmentDetailsModal({ ship, awbKey, onClose, onPatch, onAppendNote, isSuper, ui, mob }) {
+// notes, customer contact links. Phase 3 slice 1 wires AWB PDF print.
+function ShipmentDetailsModal({ ship, awbKey, onClose, onPatch, onAppendNote, isSuper, ui, mob, sender }) {
   const [noteDraft, setNoteDraft] = useState("");
   const [noteBusy,  setNoteBusy]  = useState(false);
+  const [pdfBusy,   setPdfBusy]   = useState(false);
+  const printAwb = async () => {
+    if (!ship) return;
+    setPdfBusy(true);
+    try { await generateAwbPdf({ ship, sender, action: "save" }); }
+    catch (e) { console.error("[awb] generate failed", e); window.alert("تعذّر إنشاء البوليصة: " + (e.message || e)); }
+    finally { setPdfBusy(false); }
+  };
   if (!ship) {
     return (
       <div onClick={onClose}
@@ -11742,9 +11928,9 @@ function ShipmentDetailsModal({ ship, awbKey, onClose, onPatch, onAppendNote, is
               style={{background:"transparent",border:"none",cursor:"pointer",color:ui.textSub,fontSize:13,padding:0}}>📋</button>
           </div>
           <div style={{display:"flex",gap:6,alignItems:"center"}}>
-            <button disabled title="سيتم تفعيل بوليصة PDF في المرحلة الثالثة (jsPDF + bwip-js)"
-              style={{padding:"6px 11px",background:ui.cardBg,color:ui.textSub,border:ui.border,borderRadius:5,fontSize:11.5,cursor:"not-allowed",fontFamily:ui.fontBody,opacity:0.6}}>
-              🖨️ طباعة بوليصة
+            <button onClick={printAwb} disabled={pdfBusy} title="تحميل بوليصة PDF (A6) للطباعة"
+              style={{padding:"6px 11px",background:pdfBusy?"#9CA3AF":ui.text,color:"#fff",border:"none",borderRadius:5,fontSize:11.5,cursor:pdfBusy?"wait":"pointer",fontFamily:ui.fontBody}}>
+              {pdfBusy ? "جاري التحضير..." : "🖨️ طباعة بوليصة"}
             </button>
             {order && order.phone && (
               <a href={`https://wa.me/2${(order.phone || "").replace(/[^\d]/g,"")}`} target="_blank" rel="noreferrer"
