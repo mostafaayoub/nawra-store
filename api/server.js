@@ -3490,12 +3490,16 @@ app.post('/api/expenses', (req, res) => {
     const budgetOverrun = !!(budgetEval && budgetEval.alertsEnabled && budgetEval.state === 'overrun');
     if (budgetOverrun) status = 'pending_budget_approval';
 
+    // payment_date is the ACTUAL cash-out date (admin-entered, distinct from
+    // the entry-date `date`). NULL = approved-but-unpaid (Payable); set = paid
+    // (counts in Cash Out). Format expected: 'YYYY-MM-DD' string or null.
+    const paymentDate = (e.payment_date && /^\d{4}-\d{2}-\d{2}/.test(e.payment_date)) ? e.payment_date.slice(0, 10) : null;
     db.prepare(`
       INSERT INTO expenses (
         id, category, category_id, description, quantity, unit_price, amount, date, notes,
         type, supplier_id, beneficiary_type, payment_method, receipt_path, is_recurring,
-        status, approved_by, approved_at, rejection_reason, created_by, source_ref
-      ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        status, approved_by, approved_at, rejection_reason, created_by, source_ref, payment_date
+      ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
     `).run(
       id, cat.key, cat.id, e.description||null, qty, unit, amt, date, e.notes||null,
       type, beneficiaryId, benType, pm, e.receipt_path || null, e.is_recurring ? 1 : 0,
@@ -3505,6 +3509,7 @@ app.post('/api/expenses', (req, res) => {
       null,
       e.created_by || null,
       e.source_ref || null,
+      paymentDate,
     );
 
     // Inbox routing — three mutually exclusive paths:
@@ -3605,6 +3610,24 @@ app.put('/api/expenses/:id', (req, res) => {
       }
     }
 
+    // payment_date — explicit. Three states the caller can express:
+    //   key absent           → leave existing payment_date untouched
+    //   value = null/''      → CLEAR (mark as unpaid)
+    //   value = 'YYYY-MM-DD' → SET to that date (mark as paid then)
+    // Implemented with a sentinel because the COALESCE pattern can't
+    // distinguish "not provided" from "explicit null" in a single column.
+    let paymentDateClause = '';
+    const pdArgs = [];
+    if (Object.prototype.hasOwnProperty.call(e, 'payment_date')) {
+      const v = e.payment_date;
+      if (v === null || v === '') {
+        paymentDateClause = ', payment_date = NULL';
+      } else if (typeof v === 'string' && /^\d{4}-\d{2}-\d{2}/.test(v)) {
+        paymentDateClause = ', payment_date = ?';
+        pdArgs.push(v.slice(0, 10));
+      }
+    }
+
     db.prepare(`
       UPDATE expenses SET
         category         = ?,
@@ -3620,6 +3643,7 @@ app.put('/api/expenses/:id', (req, res) => {
         receipt_path     = COALESCE(?, receipt_path),
         is_recurring     = COALESCE(?, is_recurring),
         updated_at       = datetime('now')
+        ${paymentDateClause}
       WHERE id = ?
     `).run(
       catKey, catId,
@@ -3627,6 +3651,7 @@ app.put('/api/expenses/:id', (req, res) => {
       e.date ?? null, e.notes ?? null,
       type, supplierId, benType, pm, e.receipt_path ?? null,
       e.is_recurring === undefined ? null : (e.is_recurring ? 1 : 0),
+      ...pdArgs,
       req.params.id
     );
 

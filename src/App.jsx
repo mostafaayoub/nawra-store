@@ -1437,6 +1437,8 @@ function AdminDash({ go }) {
     type:"variable", supplier_id:"", payment_method:"cash",
     receipt_path:"", is_recurring:false, notes:"",
     category_key:"",
+    // payment_date: distinct from `date`. NULL/'' = unpaid; YYYY-MM-DD = paid on that date.
+    payment_date:"",
   });
   const [expEditingId, setExpEditingId] = useState(null);
   const [expEditDraft, setExpEditDraft] = useState(null);
@@ -1556,6 +1558,8 @@ function AdminDash({ go }) {
           beneficiary_name: expDraft._supplierTyped || null,
           beneficiary_type: expDraft.beneficiary_type || "supplier",
           payment_method: expDraft.payment_method || "cash",
+          // payment_date — empty string maps to NULL (unpaid) on the server.
+          payment_date: expDraft.payment_date || null,
           receipt_path: expDraft.receipt_path || null,
           is_recurring: !!expDraft.is_recurring,
           created_by: (authUser && authUser.email) || null,
@@ -1578,6 +1582,7 @@ function AdminDash({ go }) {
           receipt_path:"", is_recurring:false, notes:"",
           category_key: expCatTab === "all" ? "" : expCatTab,
           beneficiary_type: "supplier",
+          payment_date:"",
         });
         refreshExpenses();
         refreshExpTrend();
@@ -1716,12 +1721,28 @@ function AdminDash({ go }) {
   };
 
   // ── Finance ────────────────────────────────────────────────────────────────
-  const [finRange, setFinRange] = useState("month"); // today | month | 3months | custom
-  const [finFrom, setFinFrom] = useState("");
-  const [finTo, setFinTo] = useState("");
-  const [finSummary, setFinSummary] = useState(null);
-  const [finChart, setFinChart] = useState([]);
+  const [finRange,    setFinRange]    = useState("month"); // today | month | 3months | 6months | year | custom
+  const [finFrom,     setFinFrom]     = useState("");
+  const [finTo,       setFinTo]       = useState("");
+  const [finCompare,  setFinCompare]  = useState("period"); // period | yoy
+  const [finSummary,  setFinSummary]  = useState(null);
+  const [finChart,    setFinChart]    = useState([]);
   const [finExpBreakdown, setFinExpBreakdown] = useState({ rows: [], total: 0, revenue: 0 });
+  // Phase 2 additions — one piece of state per new endpoint.
+  const [finCashFlow,     setFinCashFlow]     = useState(null);
+  const [finReceivables,  setFinReceivables]  = useState(null);
+  const [finPayables,     setFinPayables]     = useState(null);
+  const [finProfitByCategory, setFinProfitByCategory] = useState({ rows: [] });
+  const [finKeyMetrics,   setFinKeyMetrics]   = useState(null);
+  const [finBreakEven,    setFinBreakEven]    = useState(null);
+  // Filter chips — collapsed dropdown panel toggled by a chip button.
+  // payment_method/product_category server-side filtering isn't wired yet
+  // (Phase-1 backend didn't add those query params); these affect only
+  // client-side visualization filtering in Phase 2.
+  const [finFilters, setFinFilters] = useState({ payment_methods: [], product_categories: [] });
+  const [finFiltersOpen, setFinFiltersOpen] = useState(false);
+  // Top-products tab toggle (revenue vs profit).
+  const [finTopTab, setFinTopTab] = useState("revenue"); // revenue | profit
 
   const resolveFinRange = () => {
     const today = new Date();
@@ -1729,6 +1750,8 @@ function AdminDash({ go }) {
     if (finRange === "today")    return { from: iso(today), to: iso(today) };
     if (finRange === "month")    { const f = new Date(today.getFullYear(), today.getMonth(), 1); return { from: iso(f), to: iso(today) }; }
     if (finRange === "3months")  { const f = new Date(today); f.setMonth(f.getMonth() - 3); return { from: iso(f), to: iso(today) }; }
+    if (finRange === "6months")  { const f = new Date(today); f.setMonth(f.getMonth() - 6); return { from: iso(f), to: iso(today) }; }
+    if (finRange === "year")     { const f = new Date(today.getFullYear(), 0, 1);          return { from: iso(f), to: iso(today) }; }
     if (finRange === "custom" && finFrom && finTo) return { from: finFrom, to: finTo };
     return { from: iso(new Date(today.getFullYear(), today.getMonth(), 1)), to: iso(today) };
   };
@@ -1736,15 +1759,27 @@ function AdminDash({ go }) {
   const refreshFinance = async () => {
     const { from, to } = resolveFinRange();
     try {
-      const [s, c, b] = await Promise.all([
-        fetch(`/api/finance/summary?from=${from}&to=${to}`).then(r => r.ok ? r.json() : null),
+      const compareQS = finCompare === "yoy" ? "&comparison=yoy" : "";
+      // One round-trip per logical concern. Parallel so the UI doesn't wait
+      // on the slowest endpoint serially.
+      const [s, c, b, cf, rcv, pay, pbc, km, be] = await Promise.all([
+        fetch(`/api/finance/summary?from=${from}&to=${to}${compareQS}`).then(r => r.ok ? r.json() : null),
         fetch(`/api/finance/chart?from=${from}&to=${to}`).then(r => r.ok ? r.json() : []),
         fetch(`/api/finance/expenses?from=${from}&to=${to}`).then(r => r.ok ? r.json() : { rows:[], total:0, revenue:0 }),
+        fetch(`/api/finance/cash-flow?from=${from}&to=${to}`).then(r => r.ok ? r.json() : null),
+        fetch(`/api/finance/receivables`).then(r => r.ok ? r.json() : null),
+        fetch(`/api/finance/payables`).then(r => r.ok ? r.json() : null),
+        fetch(`/api/finance/profit-by-category?from=${from}&to=${to}`).then(r => r.ok ? r.json() : { rows:[] }),
+        fetch(`/api/finance/key-metrics?from=${from}&to=${to}`).then(r => r.ok ? r.json() : null),
+        fetch(`/api/finance/break-even`).then(r => r.ok ? r.json() : null),
       ]);
       setFinSummary(s); setFinChart(c || []); setFinExpBreakdown(b || { rows:[], total:0, revenue:0 });
+      setFinCashFlow(cf); setFinReceivables(rcv); setFinPayables(pay);
+      setFinProfitByCategory(pbc || { rows:[] });
+      setFinKeyMetrics(km); setFinBreakEven(be);
     } catch {}
   };
-  useEffect(() => { if (tab === "finance") refreshFinance(); }, [tab, finRange, finFrom, finTo]); // eslint-disable-line
+  useEffect(() => { if (tab === "finance") refreshFinance(); }, [tab, finRange, finFrom, finTo, finCompare]); // eslint-disable-line
 
   const resolveApproval = async (id, status, note = "") => {
     try {
@@ -5463,8 +5498,8 @@ function AdminDash({ go }) {
                     <thead>
                       <tr style={{background:ui.sideBg,borderBottom:"0.5px solid #E5E5E5"}}>
                         {(expCatTab === "all"
-                          ? ["الوصف","الفئة","النوع","الكمية","سعر الوحدة","الإجمالي","الجهة المستفيدة","الدفع","التاريخ","الحالة","ملاحظات",""]
-                          : ["الوصف","النوع","الكمية","سعر الوحدة","الإجمالي","الجهة المستفيدة","الدفع","التاريخ","الحالة","ملاحظات",""]
+                          ? ["الوصف","الفئة","النوع","الكمية","سعر الوحدة","الإجمالي","الجهة المستفيدة","الدفع","التاريخ","حالة الدفع","الحالة","ملاحظات",""]
+                          : ["الوصف","النوع","الكمية","سعر الوحدة","الإجمالي","الجهة المستفيدة","الدفع","التاريخ","حالة الدفع","الحالة","ملاحظات",""]
                         ).map(h => (
                           <th key={h} style={{padding:"11px 12px",textAlign:"right",fontSize:11.5,color:ui.textSub,fontWeight:500,whiteSpace:"nowrap"}}>{h}</th>
                         ))}
@@ -5472,7 +5507,7 @@ function AdminDash({ go }) {
                     </thead>
                     <tbody>
                       {sorted.length === 0 ? (
-                        <tr><td colSpan={expCatTab === "all" ? 12 : 11} style={{padding:"26px 14px",textAlign:"center",color:ui.textSub,fontSize:12.5,fontFamily:ui.fontBody}}>
+                        <tr><td colSpan={expCatTab === "all" ? 13 : 12} style={{padding:"26px 14px",textAlign:"center",color:ui.textSub,fontSize:12.5,fontFamily:ui.fontBody}}>
                           {expenses.length === 0
                             ? `لا توجد مصروفات لشهر ${months.find(m=>m.v===expMonth)?.l} ${expYear} — أضف أول سطر من الأسفل ↓`
                             : "لا توجد نتائج تطابق الفلاتر — جرّب توسيع المعايير"}
@@ -5615,13 +5650,47 @@ function AdminDash({ go }) {
                                 </span>
                               )}
                             </td>
-                            {/* Date */}
+                            {/* Date (entry date — read-only after creation) */}
                             <td style={{...tdCell,whiteSpace:"nowrap",color:ui.textSub,fontSize:11.5}}>
                               {editing
                                 ? <input type="date" style={{...inputSm,padding:"5px 9px"}} value={editVal.date || ""} onChange={ev=>setExpEditDraft({...editVal, date:ev.target.value})}/>
                                 : (e.date || "—")}
                             </td>
-                            {/* Status badge (always read-only) */}
+                            {/* Payment status (مدفوع / غير مدفوع) — drives Cash Out aggregates.
+                                In edit mode: checkbox toggles payment_date between today and NULL,
+                                with a date picker shown when paid. */}
+                            <td style={tdCell}>
+                              {editing ? (
+                                <div style={{display:"flex",alignItems:"center",gap:4,whiteSpace:"nowrap"}}>
+                                  <label style={{display:"flex",alignItems:"center",gap:4,fontSize:11,color:ui.text,cursor:"pointer"}}>
+                                    <input type="checkbox"
+                                      checked={!!editVal.payment_date}
+                                      onChange={ev => setExpEditDraft({
+                                        ...editVal,
+                                        payment_date: ev.target.checked ? (editVal.payment_date || new Date().toISOString().slice(0,10)) : "",
+                                      })}
+                                      style={{accentColor:ui.text,cursor:"pointer"}}/>
+                                    تم الدفع
+                                  </label>
+                                  {!!editVal.payment_date && (
+                                    <input type="date" style={{...inputSm,padding:"4px 7px",width:118}} value={editVal.payment_date || ""}
+                                      onChange={ev=>setExpEditDraft({...editVal, payment_date:ev.target.value})}/>
+                                  )}
+                                </div>
+                              ) : e.payment_date ? (
+                                <span style={{fontSize:10.5,padding:"3px 9px",borderRadius:20,background:"#DCFCE7",color:"#15803D",whiteSpace:"nowrap"}}
+                                  title={`دُفع في ${e.payment_date}`}>
+                                  مدفوع
+                                  <span style={{marginInlineStart:5,fontSize:9.5,color:"#166534",fontFamily:"monospace"}}>{String(e.payment_date).slice(0,10)}</span>
+                                </span>
+                              ) : (
+                                <span style={{fontSize:10.5,padding:"3px 9px",borderRadius:20,background:"#FEF3C7",color:"#92400E",whiteSpace:"nowrap"}}
+                                  title="هذا المصروف موافق عليه لكن لم يُدفع بعد — يظهر في الذمم">
+                                  غير مدفوع
+                                </span>
+                              )}
+                            </td>
+                            {/* Status badge — approval workflow (always read-only) */}
                             <td style={tdCell}>
                               <span style={{fontSize:10.5,padding:"3px 9px",borderRadius:20,background:stat.bg,color:stat.fg,whiteSpace:"nowrap"}}
                                 title={stat.tip || e.rejection_reason || e.budget_override_reason || ""}>{stat.t}</span>
@@ -5767,6 +5836,26 @@ function AdminDash({ go }) {
                           <input type="date" style={{...inputSm, padding:"5px 9px"}} value={expDraft.date}
                             onChange={e=>setExpDraft({...expDraft, date:e.target.value})}/>
                         </td>
+                        {/* Payment status — toggle "تم الدفع" reveals a date picker.
+                            Default off (creates as Payable). When toggled on, defaults to today. */}
+                        <td style={{padding:"9px 12px"}}>
+                          <div style={{display:"flex",alignItems:"center",gap:4,whiteSpace:"nowrap"}}>
+                            <label style={{display:"flex",alignItems:"center",gap:3,fontSize:11,color:ui.text,fontFamily:ui.fontBody,cursor:"pointer"}}>
+                              <input type="checkbox"
+                                checked={!!expDraft.payment_date}
+                                onChange={e=>setExpDraft({
+                                  ...expDraft,
+                                  payment_date: e.target.checked ? (expDraft.payment_date || new Date().toISOString().slice(0,10)) : "",
+                                })}
+                                style={{accentColor:ui.text,cursor:"pointer"}}/>
+                              تم الدفع
+                            </label>
+                            {!!expDraft.payment_date && (
+                              <input type="date" style={{...inputSm,padding:"4px 7px",width:118}} value={expDraft.payment_date}
+                                onChange={e=>setExpDraft({...expDraft, payment_date:e.target.value})}/>
+                            )}
+                          </div>
+                        </td>
                         <td style={{padding:"9px 12px"}}>
                           {/* Receipt + recurring controls live here in the add-row's status slot */}
                           <div style={{display:"flex",alignItems:"center",gap:6}}>
@@ -5911,39 +6000,54 @@ function AdminDash({ go }) {
 
           {/* ─── FINANCE ─────────────────────────────────────────────────── */}
           {tab === "finance" && (() => {
-            const s = finSummary || { revenue:0, cogs:0, gross_profit:0, expenses_total:0, net_profit:0, margin_pct:0, order_count:0, top_products:[], change:null };
+            // ── Phase 2 finance dashboard — 12 sections per spec.
+            // Source of truth comes from refreshFinance() above, which fans
+            // out to 9 backend endpoints in parallel and stashes results in
+            // finSummary / finChart / finExpBreakdown / finCashFlow / finReceivables
+            // / finPayables / finProfitByCategory / finKeyMetrics / finBreakEven.
+            // Phase 3 deferred: dedicated print-PDF view + nightly cron.
+            const s = finSummary || { revenue:0, cogs:0, gross_profit:0, gross_margin_pct:0, expenses_total:0, net_profit:0, margin_pct:0, net_margin_pct:0, cash_flow:0, cash_in:0, cash_out:0, order_count:0, top_products:[], top_by_revenue:[], top_by_profit:[], profit_by_category:[], cogs_warning_count:0, cogs_warning_products:[], forecast:null, comparison_mode:"period", change:null };
             const catLabel = (k) => (EXPENSE_CATEGORIES.find(c=>c.key===k) || {l:k}).l;
             const catColor = (k) => (EXPENSE_CATEGORIES.find(c=>c.key===k) || {color:"#6B7280"}).color;
             const fmt = (n) => Math.round(Number(n)||0).toLocaleString();
             const inputSm = { padding:"6px 10px", border:ui.border, borderRadius:6, background:ui.cardBg,
               fontFamily:ui.fontBody, fontSize:12, color:ui.text, outline:"none", direction:"ltr", boxSizing:"border-box" };
+            const compareLabel = finCompare === "yoy" ? "السنة الماضية" : "الفترة السابقة";
 
-            const kpis = [
-              { l:"الإيرادات",       v: fmt(s.revenue),        change: s.change?.revenue,        accent:"#16A34A" },
-              { l:"تكلفة البضاعة",   v: fmt(s.cogs),           change: s.change?.cogs,           accent:"#F97316", inverted:true },
-              { l:"إجمالي الربح",    v: fmt(s.gross_profit),   change: s.change?.gross_profit,   accent:"#3B82F6" },
+            // Section 1 — 8 KPI cards (4 profitability + 4 operations).
+            // `inverted` flips the change-direction color: a rising COGS or
+            // expense bar is BAD (red), whereas rising revenue/profit is GOOD (green).
+            const kpisRow1 = [
+              { l:"الإيرادات",            v: fmt(s.revenue),          change: s.change?.revenue,          accent:"#16A34A" },
+              { l:"تكلفة البضاعة (COGS)", v: fmt(s.cogs),             change: s.change?.cogs,             accent:"#F97316", inverted:true },
+              { l:"إجمالي الربح",         v: fmt(s.gross_profit),     change: s.change?.gross_profit,     accent:"#3B82F6" },
+              { l:"هامش الربح الإجمالي",   v: `${s.gross_margin_pct}%`,change: s.change?.gross_margin_pct, accent:"#0EA5E9", isPct:true },
+            ];
+            const kpisRow2 = [
               { l:"إجمالي المصروفات", v: fmt(s.expenses_total), change: s.change?.expenses_total, accent:"#EC4899", inverted:true },
               { l:"صافي الربح",      v: fmt(s.net_profit),     change: s.change?.net_profit,     accent:"#534AB7" },
-              { l:"هامش الربح",      v: `${s.margin_pct}%`,    change: s.change?.margin_pct,     accent:"#0EA5E9", isPct:true },
+              { l:"هامش صافي الربح", v: `${s.net_margin_pct}%`,change: s.change?.net_margin_pct, accent:"#9333EA", isPct:true },
+              { l:"التدفق النقدي",   v: fmt(s.cash_flow),      change: s.change?.cash_flow,      accent: s.cash_flow >= 0 ? "#16A34A" : "#DC2626" },
             ];
 
-            // Compute forecast: average of last 3 months' net profit
-            const last3 = finChart.slice(-3);
-            const forecast = last3.length
-              ? Math.round(last3.reduce((s,m)=>s + (Number(m.net)||0), 0) / last3.length)
-              : 0;
-
-            // Chart max for scaling
-            const chartMax = Math.max(1, ...finChart.map(m => Math.max(Number(m.revenue)||0, Number(m.expenses)||0)));
-            const netMax   = Math.max(1, ...finChart.map(m => Math.abs(Number(m.net)||0)));
-
-            // Export helpers
+            // CSV export — every visible section
             const exportFinanceCsv = () => {
-              const head = ["الفئة","المؤشر","القيمة (ج)"];
+              const head = ["القسم","البند","القيمة"];
               const lines = [head.join(",")];
-              kpis.forEach(k => lines.push(["مؤشرات", k.l, String(k.v)].join(",")));
-              finExpBreakdown.rows.forEach(r => lines.push(["مصروفات", catLabel(r.category), String(Math.round(r.amount))].join(",")));
-              (s.top_products||[]).forEach(p => lines.push(["أفضل المنتجات", p.name, String(Math.round(p.revenue))].join(",")));
+              [...kpisRow1, ...kpisRow2].forEach(k => lines.push(["مؤشرات", k.l, String(k.v)].join(",")));
+              if (finCashFlow) {
+                lines.push(["التدفق النقدي", "كاش مستلم", String(finCashFlow.in_breakdown.cash)].join(","));
+                lines.push(["التدفق النقدي", "تحويلات بنكية", String(finCashFlow.in_breakdown.transfer)].join(","));
+                lines.push(["التدفق النقدي", "محافظ", String(finCashFlow.in_breakdown.wallet)].join(","));
+                lines.push(["التدفق النقدي", "فيزا", String(finCashFlow.in_breakdown.visa)].join(","));
+                lines.push(["التدفق النقدي", "مصروفات مدفوعة", String(finCashFlow.out_breakdown.expenses)].join(","));
+                lines.push(["التدفق النقدي", "مرتجعات مسترجعة", String(finCashFlow.out_breakdown.refunds)].join(","));
+                lines.push(["التدفق النقدي", "مشتريات مخزون", String(finCashFlow.out_breakdown.purchases)].join(","));
+              }
+              finExpBreakdown.rows.forEach(r => lines.push(["مصروفات بالفئة", catLabel(r.category), String(Math.round(r.amount))].join(",")));
+              (s.top_by_revenue||[]).forEach(p => lines.push(["أفضل المنتجات (إيراد)", p.name, String(Math.round(p.revenue))].join(",")));
+              (s.top_by_profit||[]).forEach(p => lines.push(["أفضل المنتجات (ربح)", p.name, String(Math.round(p.profit||0))].join(",")));
+              (finProfitByCategory.rows||[]).forEach(r => lines.push(["ربح بفئة المنتج", r.category, String(Math.round(r.profit||0))].join(",")));
               const blob = new Blob(["﻿" + lines.join("\n")], { type:"text/csv;charset=utf-8;" });
               const url = URL.createObjectURL(blob);
               const a = document.createElement("a");
@@ -5952,9 +6056,9 @@ function AdminDash({ go }) {
               document.body.appendChild(a); a.click(); a.remove();
               URL.revokeObjectURL(url);
             };
+            // Phase 2 print — reuses the existing print-mode CSS. Dedicated
+            // PDF report view ships in Phase 3.
             const exportFinancePdf = () => {
-              // Open a print-friendly view that uses the same print stylesheet —
-              // user can "Save as PDF" from the browser print dialog.
               injectPrintStyles();
               document.body.classList.add("nawra-print-mode");
               const cleanup = () => { document.body.classList.remove("nawra-print-mode"); window.removeEventListener("afterprint", cleanup); };
@@ -5963,15 +6067,101 @@ function AdminDash({ go }) {
               window.print();
             };
 
+            // Tone tokens reused below
+            const cardStyle = { background:ui.cardBg, border:ui.border, borderRadius:ui.radius };
+            const sectionTitle = { fontSize:13, fontWeight:600, color:ui.text, fontFamily:ui.fontBody, padding:"12px 14px", borderBottom:"0.5px solid #EEE" };
+
+            // Render KPI helper (used by both rows of section 1)
+            const KpiCard = ({ k }) => {
+              const ch = k.change;
+              const showChange = ch !== undefined && ch !== null;
+              const isGood = k.inverted ? (ch < 0) : (ch > 0);
+              return (
+                <div style={{...cardStyle, padding:"14px 16px", borderTop:`3px solid ${k.accent}`}}>
+                  <div style={{fontSize:11.5,color:ui.textSub,fontFamily:ui.fontBody,marginBottom:6}}>{k.l}</div>
+                  <div style={{fontSize:mob?17:21,color:ui.text,fontFamily:ui.fontHead,fontWeight:500,lineHeight:1.1}}>
+                    {k.v}{!k.isPct && <span style={{fontSize:11.5,color:ui.textSub,marginInlineStart:5,fontFamily:ui.fontBody}}>ج</span>}
+                  </div>
+                  {showChange && (
+                    <div style={{display:"flex",alignItems:"center",gap:4,marginTop:5,fontSize:11,fontFamily:ui.fontBody,
+                      color: ch === 0 ? ui.textSub : (isGood ? "#16A34A" : "#DC2626")}}>
+                      {ch !== 0 && <AdmIcon name={ch > 0 ? "arrow-up" : "arrow-down"} size={11}/>}
+                      <span>{Math.abs(ch)}{k.isPct ? " نقطة" : "%"} مقارنة بـ{compareLabel}</span>
+                    </div>
+                  )}
+                </div>
+              );
+            };
+
+            // Section 4 — chart data preparation
+            const revenueValues = finChart.map(m => Number(m.revenue) || 0);
+            const expenseValues = finChart.map(m => Number(m.expenses) || 0);
+            const netValues     = finChart.map(m => Number(m.net) || 0);
+            const labels        = finChart.map(m => m.label);
+            // Trend (simple moving 2-point avg) for the net-profit bar chart
+            const netTrend = netValues.map((_, i, arr) => {
+              if (i === 0) return arr[0];
+              return (arr[i] + arr[i-1]) / 2;
+            });
+
+            // Section 5 — pie data
+            const pieSlices = (finExpBreakdown.rows || []).map(r => ({
+              label: catLabel(r.category), value: r.amount, color: catColor(r.category),
+            }));
+
+            // Section 6 — top products list per active tab
+            const topList = finTopTab === "revenue" ? (s.top_by_revenue || []) : (s.top_by_profit || []);
+
+            // Section 7 — profit-by-category rows
+            const profitCategoryRows = (finProfitByCategory.rows || []).slice(0, 8).map(r => ({
+              label: r.category || "غير مصنف", value: r.profit || 0, color: "#534AB7",
+            }));
+
+            // Section 11 — payment methods donut (from cash-flow in_breakdown)
+            const paymentSlices = finCashFlow ? [
+              { label:"كاش",          value: finCashFlow.in_breakdown.cash,     color:"#16A34A" },
+              { label:"تحويل بنكي",   value: finCashFlow.in_breakdown.transfer, color:"#3B82F6" },
+              { label:"محفظة",        value: finCashFlow.in_breakdown.wallet,   color:"#9333EA" },
+              { label:"فيزا",         value: finCashFlow.in_breakdown.visa,     color:"#F97316" },
+            ].filter(sl => sl.value > 0) : [];
+
+            // Section 8 — break-even progress tone
+            const beTone = finBreakEven == null ? "#9CA3AF"
+              : finBreakEven.pct_of_break_even == null ? "#9CA3AF"
+              : finBreakEven.pct_of_break_even >= 100 ? "#16A34A"
+              : finBreakEven.pct_of_break_even >= 80  ? "#F59E0B"
+              : "#DC2626";
+
+            // Section 10 — forecast
+            const fc = s.forecast;
+
             return (
               <div className="order-print-overlay" style={{padding:0}}>
                 <div className="order-print-card" style={{background:"transparent"}}>
-                  {/* Top filter bar */}
-                  <div className="no-print" style={{background:ui.cardBg,border:ui.border,borderRadius:ui.radius,padding:"12px 14px",marginBottom:12,
-                    display:"grid",gridTemplateColumns:mob?"1fr":"1fr auto auto",gap:10,alignItems:"end"}}>
+
+                  {/* TOP BAR — title + date pills + YoY toggle + filter chips + export */}
+                  <div className="no-print" style={{display:"flex",alignItems:"flex-start",justifyContent:"space-between",flexWrap:"wrap",gap:10,marginBottom:12}}>
                     <div>
+                      <h2 style={{fontSize:18,fontWeight:600,color:ui.text,fontFamily:ui.fontBody,margin:0}}>المالية</h2>
+                      <div style={{fontSize:12,color:ui.textSub,fontFamily:ui.fontBody,marginTop:2}}>تحليل مالي شامل وتدفق نقدي</div>
+                    </div>
+                    <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
+                      <button onClick={exportFinanceCsv}
+                        style={{padding:"8px 14px",background:ui.cardBg,color:ui.text,border:ui.border,borderRadius:6,fontSize:12.5,cursor:"pointer",fontFamily:ui.fontBody}}>
+                        تصدير CSV
+                      </button>
+                      <button onClick={exportFinancePdf}
+                        style={{padding:"8px 14px",background:ui.text,color:"#fff",border:"none",borderRadius:6,fontSize:12.5,cursor:"pointer",fontFamily:ui.fontBody}}>
+                        طباعة تقرير
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* Section 12 — Filter bar (sticky pills row) */}
+                  <div className="no-print" style={{...cardStyle,padding:"10px 14px",marginBottom:12}}>
+                    <div style={{display:"flex",gap:14,flexWrap:"wrap",alignItems:"center"}}>
                       <div style={{display:"flex",gap:4,flexWrap:"wrap"}}>
-                        {[["today","اليوم"],["month","هذا الشهر"],["3months","آخر 3 أشهر"],["custom","مخصص"]].map(([k,l])=>(
+                        {[["today","اليوم"],["month","هذا الشهر"],["3months","آخر 3 أشهر"],["6months","آخر 6 أشهر"],["year","هذا العام"],["custom","مخصص"]].map(([k,l])=>(
                           <button key={k} onClick={()=>setFinRange(k)}
                             style={{padding:"5px 12px",borderRadius:14,fontSize:11.5,fontFamily:ui.fontBody,cursor:"pointer",
                               background: finRange===k ? ui.text : "transparent",
@@ -5979,177 +6169,308 @@ function AdminDash({ go }) {
                               border: finRange===k ? "none" : ui.border}}>{l}</button>
                         ))}
                       </div>
-                      {finRange === "custom" && (
-                        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:6,marginTop:8}}>
-                          <input type="date" value={finFrom} onChange={e=>setFinFrom(e.target.value)} style={{...inputSm, padding:"6px 10px"}}/>
-                          <input type="date" value={finTo}   onChange={e=>setFinTo(e.target.value)}   style={{...inputSm, padding:"6px 10px"}}/>
+                      <div style={{display:"flex",gap:4,alignItems:"center"}}>
+                        <span style={{fontSize:11.5,color:ui.textSub,fontFamily:ui.fontBody}}>مقارنة بـ</span>
+                        {[["period","الفترة السابقة"],["yoy","نفس الفترة العام الماضي"]].map(([k,l])=>(
+                          <button key={k} onClick={()=>setFinCompare(k)}
+                            style={{padding:"5px 11px",borderRadius:14,fontSize:11,fontFamily:ui.fontBody,cursor:"pointer",
+                              background: finCompare===k ? "#534AB7" : "transparent",
+                              color: finCompare===k ? "#fff" : ui.textSub,
+                              border: finCompare===k ? "none" : ui.border}}>{l}</button>
+                        ))}
+                      </div>
+                      <button onClick={()=>setFinFiltersOpen(o=>!o)}
+                        style={{padding:"5px 11px",borderRadius:14,fontSize:11,fontFamily:ui.fontBody,cursor:"pointer",
+                          background: (finFilters.payment_methods.length||finFilters.product_categories.length) ? "#0EA5E9" : "transparent",
+                          color: (finFilters.payment_methods.length||finFilters.product_categories.length) ? "#fff" : ui.textSub,
+                          border:ui.border}}>
+                        فلاتر متقدمة {(finFilters.payment_methods.length||finFilters.product_categories.length) ? `(${finFilters.payment_methods.length + finFilters.product_categories.length})` : ""}
+                      </button>
+                    </div>
+                    {finRange === "custom" && (
+                      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:6,marginTop:8,maxWidth:340}}>
+                        <input type="date" value={finFrom} onChange={e=>setFinFrom(e.target.value)} style={{...inputSm, padding:"6px 10px"}}/>
+                        <input type="date" value={finTo}   onChange={e=>setFinTo(e.target.value)}   style={{...inputSm, padding:"6px 10px"}}/>
+                      </div>
+                    )}
+                    {finFiltersOpen && (
+                      <div style={{marginTop:10,paddingTop:10,borderTop:"0.5px dashed #EEE",display:"grid",gridTemplateColumns:mob?"1fr":"1fr 1fr",gap:14}}>
+                        <div>
+                          <div style={{fontSize:11.5,color:ui.textSub,fontFamily:ui.fontBody,marginBottom:6}}>طريقة الدفع</div>
+                          <div style={{display:"flex",gap:6,flexWrap:"wrap"}}>
+                            {[["cash","كاش"],["transfer","تحويل"],["wallet","محفظة"],["card","فيزا"]].map(([k,l])=>{
+                              const on = finFilters.payment_methods.includes(k);
+                              return (
+                                <button key={k} onClick={()=>setFinFilters(f=>({...f,payment_methods: on ? f.payment_methods.filter(x=>x!==k) : [...f.payment_methods,k]}))}
+                                  style={{padding:"4px 11px",borderRadius:14,fontSize:11,fontFamily:ui.fontBody,cursor:"pointer",
+                                    background: on ? ui.text : "transparent", color: on ? "#fff" : ui.textSub, border: on ? "none" : ui.border}}>{l}</button>
+                              );
+                            })}
+                          </div>
                         </div>
+                        <div>
+                          <div style={{fontSize:11.5,color:ui.textSub,fontFamily:ui.fontBody,marginBottom:6}}>فئة المنتج</div>
+                          <div style={{display:"flex",gap:6,flexWrap:"wrap"}}>
+                            {(profitCategoryRows.length ? profitCategoryRows : [{label:"—"}]).map(r => {
+                              const on = finFilters.product_categories.includes(r.label);
+                              return (
+                                <button key={r.label} onClick={()=>setFinFilters(f=>({...f,product_categories: on ? f.product_categories.filter(x=>x!==r.label) : [...f.product_categories,r.label]}))}
+                                  style={{padding:"4px 11px",borderRadius:14,fontSize:11,fontFamily:ui.fontBody,cursor:"pointer",
+                                    background: on ? ui.text : "transparent", color: on ? "#fff" : ui.textSub, border: on ? "none" : ui.border}}>{r.label}</button>
+                              );
+                            })}
+                          </div>
+                          <div style={{fontSize:10.5,color:ui.textSub,fontFamily:ui.fontBody,marginTop:6,fontStyle:"italic"}}>
+                            ⚙ فلتر طريقة الدفع وفئة المنتج يؤثر على العرض (Phase 3 يدعمهما على الخادم).
+                          </div>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Warning banners — products with cost=0, negative cash flow */}
+                  {s.cogs_warning_count > 0 && (
+                    <div className="no-print" style={{padding:"10px 14px",background:"#FFFBEB",border:"1px solid #FDE68A",color:"#92400E",borderRadius:6,marginBottom:10,fontSize:12.5,fontFamily:ui.fontBody}}>
+                      ⚠ <b>{s.cogs_warning_count}</b> منتج لا يحتوي على تكلفة محددة — تقدير الربح غير دقيق
+                      {s.cogs_warning_products && s.cogs_warning_products.length > 0 && (
+                        <span style={{color:ui.textSub,fontSize:11.5,marginInlineStart:6}}>({s.cogs_warning_products.join(" · ")})</span>
                       )}
                     </div>
-                    <button onClick={exportFinanceCsv}
-                      style={{display:"flex",alignItems:"center",gap:5,background:ui.text,color:"#fff",border:"none",padding:"8px 14px",cursor:"pointer",fontFamily:ui.fontBody,fontSize:12,borderRadius:6}}>
-                      تصدير CSV
-                    </button>
-                    <button onClick={exportFinancePdf}
-                      style={{display:"flex",alignItems:"center",gap:5,background:ui.cardBg,color:ui.text,border:ui.border,padding:"8px 14px",cursor:"pointer",fontFamily:ui.fontBody,fontSize:12,borderRadius:6}}>
-                      PDF / طباعة
-                    </button>
+                  )}
+                  {(s.cash_flow || 0) < 0 && (
+                    <div className="no-print" style={{padding:"10px 14px",background:"#FEF2F2",border:"1px solid #FCA5A5",color:"#B91C1C",borderRadius:6,marginBottom:10,fontSize:12.5,fontFamily:ui.fontBody}}>
+                      ⚠ تدفق نقدي سلبي — راجع المصروفات
+                    </div>
+                  )}
+
+                  {/* SECTION 1 — KPI cards (8) in two rows of 4 */}
+                  <div style={{display:"grid",gridTemplateColumns:mob?"1fr 1fr":"repeat(4,1fr)",gap:10,marginBottom:10}}>
+                    {kpisRow1.map((k,i) => <KpiCard key={`r1-${i}`} k={k}/>)}
+                  </div>
+                  <div style={{display:"grid",gridTemplateColumns:mob?"1fr 1fr":"repeat(4,1fr)",gap:10,marginBottom:12}}>
+                    {kpisRow2.map((k,i) => <KpiCard key={`r2-${i}`} k={k}/>)}
                   </div>
 
-                  {/* 6 KPI cards */}
-                  <div style={{display:"grid",gridTemplateColumns:mob?"1fr 1fr":"repeat(3,1fr) ",gap:10,marginBottom:12}}>
-                    {kpis.map((k,i) => {
-                      const ch = k.change;
-                      const showChange = ch !== undefined && ch !== null;
-                      // For "inverted" KPIs (cogs/expenses), a rise is bad → red
-                      const isGood = k.inverted ? (ch < 0) : (ch > 0);
-                      return (
-                        <div key={i} style={{background:ui.cardBg,border:ui.border,borderRadius:ui.radius,padding:"14px 16px",borderTop:`3px solid ${k.accent}`}}>
-                          <div style={{fontSize:11.5,color:ui.textSub,fontFamily:ui.fontBody,marginBottom:6}}>{k.l}</div>
-                          <div style={{fontSize:mob?18:22,color:ui.text,fontFamily:ui.fontHead,fontWeight:500,lineHeight:1.1}}>
-                            {k.v}{!k.isPct && <span style={{fontSize:11.5,color:ui.textSub,marginInlineStart:5,fontFamily:ui.fontBody}}>ج</span>}
+                  {/* SECTION 2 — Cash flow breakdown */}
+                  <div style={{...cardStyle,marginBottom:12}}>
+                    <div style={sectionTitle}>التدفق النقدي</div>
+                    <div style={{padding:"12px 14px",display:"grid",gridTemplateColumns:mob?"1fr":"1fr 1fr",gap:18}}>
+                      <div>
+                        <div style={{fontSize:11.5,color:ui.textSub,fontFamily:ui.fontBody,marginBottom:8,fontWeight:600}}>تدفق داخل (Cash In)</div>
+                        {[
+                          ["كاش مستلم",        finCashFlow?.in_breakdown?.cash     || 0, "#16A34A"],
+                          ["تحويلات بنكية",    finCashFlow?.in_breakdown?.transfer || 0, "#3B82F6"],
+                          ["محافظ إلكترونية",  finCashFlow?.in_breakdown?.wallet   || 0, "#9333EA"],
+                          ["مدفوعات فيزا",     finCashFlow?.in_breakdown?.visa     || 0, "#F97316"],
+                        ].map(([lbl,val,col]) => (
+                          <div key={lbl} style={{display:"flex",justifyContent:"space-between",fontFamily:ui.fontBody,fontSize:12.5,color:ui.text,padding:"5px 0"}}>
+                            <span style={{display:"inline-flex",alignItems:"center",gap:6}}>
+                              <span style={{width:8,height:8,borderRadius:2,background:col}}/>{lbl}
+                            </span>
+                            <span style={{fontFamily:"monospace"}}>{fmt(val)} ج</span>
                           </div>
-                          {showChange && (
-                            <div style={{display:"flex",alignItems:"center",gap:4,marginTop:5,fontSize:11,fontFamily:ui.fontBody,
-                              color: ch === 0 ? ui.textSub : (isGood ? "#16A34A" : "#DC2626")}}>
-                              {ch !== 0 && <AdmIcon name={ch > 0 ? "arrow-up" : "arrow-down"} size={11}/>}
-                              <span>{Math.abs(ch)}{k.isPct ? " نقطة" : "%"} مقارنة بالفترة السابقة</span>
-                            </div>
-                          )}
+                        ))}
+                        <div style={{display:"flex",justifyContent:"space-between",fontFamily:ui.fontBody,fontSize:13,color:ui.text,fontWeight:700,paddingTop:8,marginTop:6,borderTop:"1px dashed #E5E5E5"}}>
+                          <span>الإجمالي الداخل</span>
+                          <span style={{fontFamily:"monospace",color:"#16A34A"}}>{fmt(finCashFlow?.cash_in || 0)} ج</span>
                         </div>
-                      );
-                    })}
+                      </div>
+                      <div>
+                        <div style={{fontSize:11.5,color:ui.textSub,fontFamily:ui.fontBody,marginBottom:8,fontWeight:600}}>تدفق خارج (Cash Out)</div>
+                        {[
+                          ["مصروفات مدفوعة",  finCashFlow?.out_breakdown?.expenses  || 0, "#EC4899"],
+                          ["مرتجعات مسترجعة", finCashFlow?.out_breakdown?.refunds   || 0, "#F97316"],
+                          ["مشتريات مخزون",   finCashFlow?.out_breakdown?.purchases || 0, "#0EA5E9"],
+                        ].map(([lbl,val,col]) => (
+                          <div key={lbl} style={{display:"flex",justifyContent:"space-between",fontFamily:ui.fontBody,fontSize:12.5,color:ui.text,padding:"5px 0"}}>
+                            <span style={{display:"inline-flex",alignItems:"center",gap:6}}>
+                              <span style={{width:8,height:8,borderRadius:2,background:col}}/>{lbl}
+                            </span>
+                            <span style={{fontFamily:"monospace"}}>{fmt(val)} ج</span>
+                          </div>
+                        ))}
+                        <div style={{display:"flex",justifyContent:"space-between",fontFamily:ui.fontBody,fontSize:13,color:ui.text,fontWeight:700,paddingTop:8,marginTop:6,borderTop:"1px dashed #E5E5E5"}}>
+                          <span>الإجمالي الخارج</span>
+                          <span style={{fontFamily:"monospace",color:"#DC2626"}}>{fmt(finCashFlow?.cash_out || 0)} ج</span>
+                        </div>
+                      </div>
+                    </div>
+                    <div style={{padding:"12px 14px",borderTop:"0.5px solid #EEE",display:"flex",justifyContent:"space-between",alignItems:"center",background:"#FAFAFA"}}>
+                      <span style={{fontSize:13,color:ui.text,fontFamily:ui.fontBody,fontWeight:600}}>صافي التدفق النقدي</span>
+                      <span style={{fontSize:16,fontFamily:ui.fontHead,fontWeight:700,color: (finCashFlow?.net_cash || 0) >= 0 ? "#16A34A" : "#DC2626"}}>
+                        {(finCashFlow?.net_cash || 0) >= 0 ? "↑" : "↓"} {fmt(finCashFlow?.net_cash || 0)} <span style={{fontSize:11,color:ui.textSub,fontFamily:ui.fontBody,fontWeight:400}}>ج</span>
+                      </span>
+                    </div>
                   </div>
 
-                  {/* Charts: revenue vs expenses (bars) + net profit (line) */}
+                  {/* SECTION 3 — Receivables + Payables */}
                   <div style={{display:"grid",gridTemplateColumns:mob?"1fr":"1fr 1fr",gap:10,marginBottom:12}}>
-                    {/* Bar chart */}
-                    <div style={{background:ui.cardBg,border:ui.border,borderRadius:ui.radius,padding:"14px 16px"}}>
-                      <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:10}}>
-                        <h3 style={{fontSize:13,fontWeight:500,color:ui.text,margin:0,fontFamily:ui.fontBody}}>الإيرادات مقابل المصروفات (شهرياً)</h3>
-                        <div style={{display:"flex",gap:10,fontSize:10.5,fontFamily:ui.fontBody}}>
-                          <span style={{display:"flex",alignItems:"center",gap:4,color:ui.textSub}}>
-                            <span style={{width:8,height:8,background:"#16A34A",borderRadius:2}}/>إيرادات
-                          </span>
-                          <span style={{display:"flex",alignItems:"center",gap:4,color:ui.textSub}}>
-                            <span style={{width:8,height:8,background:"#EC4899",borderRadius:2}}/>مصروفات
-                          </span>
+                    <div style={cardStyle}>
+                      <div style={sectionTitle}>ذمم العملاء (Receivables)</div>
+                      <div style={{padding:"12px 14px"}}>
+                        <div style={{fontSize:24,color:ui.text,fontFamily:ui.fontHead,fontWeight:600}}>
+                          {fmt(finReceivables?.total || 0)} <span style={{fontSize:12,color:ui.textSub,fontFamily:ui.fontBody}}>ج</span>
                         </div>
-                      </div>
-                      <div style={{display:"flex",alignItems:"flex-end",gap:6,height:140,paddingTop:8,direction:"ltr"}}>
-                        {finChart.map((m,i) => {
-                          const hR = Math.max(2, Math.round(((Number(m.revenue) ||0)/chartMax)*100));
-                          const hE = Math.max(2, Math.round(((Number(m.expenses)||0)/chartMax)*100));
-                          return (
-                            <div key={i} style={{flex:1,display:"flex",flexDirection:"column",alignItems:"center",gap:5}}>
-                              <div style={{display:"flex",alignItems:"flex-end",gap:2,width:"100%",height:"90%",justifyContent:"center"}}>
-                                <div title={`إيرادات: ${fmt(m.revenue)} ج`}
-                                  style={{flex:1,maxWidth:14,background:"#16A34A",height:`${hR}%`,borderRadius:"2px 2px 0 0"}}/>
-                                <div title={`مصروفات: ${fmt(m.expenses)} ج`}
-                                  style={{flex:1,maxWidth:14,background:"#EC4899",height:`${hE}%`,borderRadius:"2px 2px 0 0"}}/>
-                              </div>
-                              {finChart.length <= 12 && <span style={{fontSize:9.5,color:ui.textSub,fontFamily:ui.fontBody,whiteSpace:"nowrap"}}>{m.label}</span>}
-                            </div>
-                          );
-                        })}
+                        <div style={{marginTop:10,fontSize:12.5,color:ui.text,fontFamily:ui.fontBody,display:"flex",flexDirection:"column",gap:6}}>
+                          <div style={{display:"flex",justifyContent:"space-between"}}>
+                            <span>طلبات COD لم يتم استلامها</span>
+                            <span style={{fontFamily:"monospace"}}>{fmt(finReceivables?.cod_pending?.amount || 0)} ج <span style={{color:ui.textSub,fontSize:11}}>({finReceivables?.cod_pending?.count || 0})</span></span>
+                          </div>
+                          <div style={{display:"flex",justifyContent:"space-between"}}>
+                            <span>أونلاين قيد التسوية</span>
+                            <span style={{fontFamily:"monospace"}}>{fmt(finReceivables?.online_pending?.amount || 0)} ج <span style={{color:ui.textSub,fontSize:11}}>({finReceivables?.online_pending?.count || 0})</span></span>
+                          </div>
+                        </div>
+                        <a href="#admin" onClick={(e)=>{e.preventDefault(); setTab("orders");}}
+                          style={{display:"inline-block",marginTop:10,fontSize:12,color:"#1D4ED8",textDecoration:"none",fontFamily:ui.fontBody}}>عرض الطلبات ←</a>
                       </div>
                     </div>
-
-                    {/* Line chart for net profit (SVG) */}
-                    <div style={{background:ui.cardBg,border:ui.border,borderRadius:ui.radius,padding:"14px 16px"}}>
-                      <h3 style={{fontSize:13,fontWeight:500,color:ui.text,margin:"0 0 10px",fontFamily:ui.fontBody}}>صافي الربح الشهري</h3>
-                      <div style={{height:140,direction:"ltr",position:"relative"}}>
-                        {finChart.length > 1 ? (
-                          <svg viewBox="0 0 100 100" preserveAspectRatio="none" style={{width:"100%",height:"100%"}}>
-                            <line x1="0" y1="50" x2="100" y2="50" stroke="#E5E5E5" strokeWidth="0.3" strokeDasharray="1,1"/>
-                            <polyline fill="none" stroke="#534AB7" strokeWidth="0.8"
-                              points={finChart.map((m,i) => {
-                                const x = (i / (finChart.length - 1)) * 100;
-                                const y = 50 - ((Number(m.net)||0) / netMax) * 45;
-                                return `${x.toFixed(2)},${y.toFixed(2)}`;
-                              }).join(" ")}/>
-                            {finChart.map((m,i) => {
-                              const x = (i / (finChart.length - 1)) * 100;
-                              const y = 50 - ((Number(m.net)||0) / netMax) * 45;
-                              return <circle key={i} cx={x} cy={y} r="1.2" fill="#534AB7">
-                                <title>{`${m.label}: ${fmt(m.net)} ج`}</title>
-                              </circle>;
-                            })}
-                          </svg>
-                        ) : (
-                          <div style={{display:"flex",alignItems:"center",justifyContent:"center",height:"100%",color:ui.textSub,fontSize:12.5,fontFamily:ui.fontBody}}>
-                            تحتاج شهرين على الأقل لرسم الاتجاه
+                    <div style={cardStyle}>
+                      <div style={sectionTitle}>ذمم الموردين (Payables)</div>
+                      <div style={{padding:"12px 14px"}}>
+                        <div style={{fontSize:24,color:ui.text,fontFamily:ui.fontHead,fontWeight:600}}>
+                          {fmt(finPayables?.total || 0)} <span style={{fontSize:12,color:ui.textSub,fontFamily:ui.fontBody}}>ج</span>
+                        </div>
+                        <div style={{marginTop:10,fontSize:12.5,color:ui.text,fontFamily:ui.fontBody,display:"flex",flexDirection:"column",gap:6}}>
+                          <div style={{display:"flex",justifyContent:"space-between"}}>
+                            <span>فواتير معلقة (غير مدفوعة)</span>
+                            <span style={{fontFamily:"monospace"}}>{fmt(finPayables?.pending_invoices?.amount || 0)} ج <span style={{color:ui.textSub,fontSize:11}}>({finPayables?.pending_invoices?.count || 0})</span></span>
                           </div>
-                        )}
-                      </div>
-                      <div style={{display:"flex",justifyContent:"space-between",fontSize:10,color:ui.textSub,fontFamily:ui.fontBody,marginTop:6,direction:"ltr"}}>
-                        {finChart.length > 0 && <span>{finChart[0].label}</span>}
-                        {finChart.length > 1 && <span>{finChart[finChart.length-1].label}</span>}
+                          <div style={{display:"flex",justifyContent:"space-between"}}>
+                            <span>دفعات مجدولة هذا الشهر</span>
+                            <span style={{fontFamily:"monospace"}}>{fmt(finPayables?.scheduled_this_month?.amount || 0)} ج <span style={{color:ui.textSub,fontSize:11}}>({finPayables?.scheduled_this_month?.count || 0})</span></span>
+                          </div>
+                        </div>
+                        <a href="#admin" onClick={(e)=>{e.preventDefault(); setTab("expenses");}}
+                          style={{display:"inline-block",marginTop:10,fontSize:12,color:"#1D4ED8",textDecoration:"none",fontFamily:ui.fontBody}}>عرض المصروفات ←</a>
                       </div>
                     </div>
                   </div>
 
-                  {/* Expense breakdown */}
-                  <div style={{background:ui.cardBg,border:ui.border,borderRadius:ui.radius,marginBottom:12,overflow:"hidden"}}>
-                    <div style={{padding:"12px 14px",borderBottom:"0.5px solid #EEE",fontSize:13,fontWeight:600,color:ui.text,fontFamily:ui.fontBody}}>
-                      تفصيل المصروفات حسب الفئة
+                  {/* SECTION 4 — 2 charts in one row */}
+                  <div style={{display:"grid",gridTemplateColumns:mob?"1fr":"1fr 1fr",gap:10,marginBottom:12}}>
+                    <div style={cardStyle}>
+                      <div style={{...sectionTitle,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                        <span>الإيرادات مقابل المصروفات</span>
+                        <div style={{display:"flex",gap:8,fontSize:10.5,fontFamily:ui.fontBody,fontWeight:400}}>
+                          <span style={{display:"inline-flex",alignItems:"center",gap:4,color:ui.textSub}}>
+                            <span style={{width:10,height:2,background:"#16A34A",display:"inline-block"}}/>إيرادات
+                          </span>
+                          <span style={{display:"inline-flex",alignItems:"center",gap:4,color:ui.textSub}}>
+                            <span style={{width:10,height:2,background:"#EC4899",display:"inline-block"}}/>مصروفات
+                          </span>
+                          <span style={{display:"inline-flex",alignItems:"center",gap:4,color:ui.textSub}}>
+                            <span style={{width:10,height:2,background:"#534AB7",display:"inline-block",borderTop:"1px dashed #534AB7"}}/>صافي الربح
+                          </span>
+                        </div>
+                      </div>
+                      <div style={{padding:"12px 14px"}}>
+                        <MultiLineChart
+                          series={[
+                            { label:"الإيرادات", color:"#16A34A", values: revenueValues },
+                            { label:"المصروفات", color:"#EC4899", values: expenseValues },
+                            { label:"صافي الربح", color:"#534AB7", values: netValues, dashed: true },
+                          ]}
+                          xLabels={labels}
+                          height={160}
+                          ui={ui}
+                        />
+                      </div>
+                    </div>
+                    <div style={cardStyle}>
+                      <div style={sectionTitle}>تطور صافي الربح</div>
+                      <div style={{padding:"12px 14px"}}>
+                        <BarChartSigned values={netValues} labels={labels} trendValues={netTrend} height={160} ui={ui}/>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* SECTION 5 — Expenses breakdown (pie + table) */}
+                  <div style={{...cardStyle,marginBottom:12}}>
+                    <div style={sectionTitle}>تفصيل المصروفات حسب الفئة</div>
+                    {finExpBreakdown.rows.length === 0 ? (
+                      <div style={{padding:"24px",textAlign:"center",color:ui.textSub,fontSize:12.5,fontFamily:ui.fontBody}}>لا توجد مصروفات في النطاق المحدد</div>
+                    ) : (
+                      <div style={{padding:"14px",display:"grid",gridTemplateColumns:mob?"1fr":"180px 1fr",gap:16,alignItems:"center"}}>
+                        <div style={{display:"flex",justifyContent:"center"}}>
+                          <PieChart slices={pieSlices} size={170} ui={ui}/>
+                        </div>
+                        <div style={{overflowX:"auto"}}>
+                          <table style={{width:"100%",borderCollapse:"collapse",direction:"rtl",fontFamily:ui.fontBody,minWidth:480}}>
+                            <thead>
+                              <tr style={{background:ui.sideBg,borderBottom:"0.5px solid #E5E5E5"}}>
+                                {["الفئة","المبلغ","% من الإيرادات","% من الإجمالي",`مقارنة بـ${compareLabel}`].map(h => (
+                                  <th key={h} style={{padding:"9px 11px",textAlign:"right",fontSize:11,color:ui.textSub,fontWeight:500,whiteSpace:"nowrap"}}>{h}</th>
+                                ))}
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {finExpBreakdown.rows.map(r => {
+                                const pctOfTotal = finExpBreakdown.total ? Math.round((r.amount / finExpBreakdown.total) * 1000) / 10 : 0;
+                                return (
+                                  <tr key={r.category} style={{borderTop:"0.5px solid #EEE"}}>
+                                    <td style={{padding:"8px 11px",fontSize:12.5,color:ui.text}}>
+                                      <span style={{display:"inline-flex",alignItems:"center",gap:6}}>
+                                        <span style={{width:8,height:8,borderRadius:"50%",background:catColor(r.category)}}/>
+                                        {catLabel(r.category)}
+                                      </span>
+                                    </td>
+                                    <td style={{padding:"8px 11px",fontSize:12.5,color:ui.text,fontWeight:500,whiteSpace:"nowrap"}}>{fmt(r.amount)} ج</td>
+                                    <td style={{padding:"8px 11px",fontSize:11.5,color:ui.textSub,whiteSpace:"nowrap"}}>{r.pct_of_revenue}%</td>
+                                    <td style={{padding:"8px 11px",fontSize:11.5,color:ui.textSub,whiteSpace:"nowrap"}}>{pctOfTotal}%</td>
+                                    <td style={{padding:"8px 11px",fontSize:11,whiteSpace:"nowrap",
+                                      color: r.change_pct == null ? ui.textSub : r.change_pct > 0 ? "#DC2626" : r.change_pct < 0 ? "#16A34A" : ui.textSub}}>
+                                      {r.change_pct == null ? "—" : `${r.change_pct > 0 ? "↑+" : "↓"}${Math.abs(r.change_pct)}%`}
+                                    </td>
+                                  </tr>
+                                );
+                              })}
+                            </tbody>
+                          </table>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+
+                  {/* SECTION 6 — Top products (tabs + thumbnails + cost/profit columns) */}
+                  <div style={{...cardStyle,marginBottom:12}}>
+                    <div style={{...sectionTitle,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                      <span>أفضل المنتجات (Top 5)</span>
+                      <div style={{display:"flex",gap:4}}>
+                        {[["revenue","الأكثر إيراداً"],["profit","الأكثر ربحية"]].map(([k,l])=>(
+                          <button key={k} onClick={()=>setFinTopTab(k)}
+                            style={{padding:"4px 11px",borderRadius:12,fontSize:11,fontFamily:ui.fontBody,cursor:"pointer",
+                              background: finTopTab===k ? ui.text : "transparent",
+                              color: finTopTab===k ? "#fff" : ui.textSub,
+                              border: finTopTab===k ? "none" : ui.border, fontWeight:400}}>{l}</button>
+                        ))}
+                      </div>
                     </div>
                     <div style={{overflowX:"auto"}}>
-                      <table style={{width:"100%",borderCollapse:"collapse",direction:"rtl",fontFamily:ui.fontBody,minWidth:560}}>
+                      <table style={{width:"100%",borderCollapse:"collapse",direction:"rtl",fontFamily:ui.fontBody,minWidth:640}}>
                         <thead>
-                          <tr style={{background:ui.sideBg,borderBottom:`0.5px solid #E5E5E5`}}>
-                            {["الفئة","المبلغ","% من الإيرادات","مقارنة بالفترة السابقة"].map(h=>(
-                              <th key={h} style={{padding:"10px 12px",textAlign:"right",fontSize:11.5,color:ui.textSub,fontWeight:500,whiteSpace:"nowrap"}}>{h}</th>
+                          <tr style={{background:ui.sideBg,borderBottom:"0.5px solid #E5E5E5"}}>
+                            {["","المنتج","المبيعات","الإيراد","التكلفة","الربح","هامش %"].map(h => (
+                              <th key={h} style={{padding:"9px 11px",textAlign:"right",fontSize:11,color:ui.textSub,fontWeight:500,whiteSpace:"nowrap"}}>{h}</th>
                             ))}
                           </tr>
                         </thead>
                         <tbody>
-                          {finExpBreakdown.rows.length === 0 ? (
-                            <tr><td colSpan={4} style={{padding:"20px",textAlign:"center",color:ui.textSub,fontSize:12.5}}>لا توجد مصروفات في النطاق المحدد</td></tr>
-                          ) : finExpBreakdown.rows.map(r => (
-                            <tr key={r.category} style={{borderTop:"0.5px solid #EEE"}}>
-                              <td style={{padding:"10px 12px",fontSize:13,color:ui.text,fontFamily:ui.fontBody}}>
-                                <span style={{display:"inline-flex",alignItems:"center",gap:8}}>
-                                  <span style={{width:8,height:8,borderRadius:"50%",background: catColor(r.category)}}/>
-                                  {catLabel(r.category)}
+                          {topList.length === 0 ? (
+                            <tr><td colSpan={7} style={{padding:"20px",textAlign:"center",color:ui.textSub,fontSize:12.5}}>لا توجد طلبات في النطاق</td></tr>
+                          ) : topList.map((p,i) => (
+                            <tr key={i} style={{borderTop:"0.5px solid #EEE"}}>
+                              <td style={{padding:"7px 11px"}}>
+                                <span style={{width:30,height:30,display:"inline-block",borderRadius:5,background:"#F3F4F6",overflow:"hidden",verticalAlign:"middle",border:"0.5px solid #EEE"}}>
+                                  {p.image && <img src={p.image} alt="" style={{width:"100%",height:"100%",objectFit:"cover"}}/>}
                                 </span>
                               </td>
-                              <td style={{padding:"10px 12px",fontSize:13,color:ui.text,fontWeight:500,whiteSpace:"nowrap"}}>{fmt(r.amount)} ج</td>
-                              <td style={{padding:"10px 12px",fontSize:12.5,color:ui.textSub,whiteSpace:"nowrap"}}>{r.pct_of_revenue}%</td>
-                              <td style={{padding:"10px 12px",fontSize:11.5,whiteSpace:"nowrap",
-                                color: r.change_pct == null ? ui.textSub : r.change_pct > 0 ? "#DC2626" : r.change_pct < 0 ? "#16A34A" : ui.textSub}}>
-                                {r.change_pct == null ? "—" : `${r.change_pct > 0 ? "+" : ""}${r.change_pct}%`}
-                              </td>
-                            </tr>
-                          ))}
-                        </tbody>
-                      </table>
-                    </div>
-                  </div>
-
-                  {/* Best-selling products */}
-                  <div style={{background:ui.cardBg,border:ui.border,borderRadius:ui.radius,marginBottom:12,overflow:"hidden"}}>
-                    <div style={{padding:"12px 14px",borderBottom:"0.5px solid #EEE",fontSize:13,fontWeight:600,color:ui.text,fontFamily:ui.fontBody}}>
-                      أفضل المنتجات أداءً (Top 5)
-                    </div>
-                    <div style={{overflowX:"auto"}}>
-                      <table style={{width:"100%",borderCollapse:"collapse",direction:"rtl",fontFamily:ui.fontBody,minWidth:560}}>
-                        <thead>
-                          <tr style={{background:ui.sideBg,borderBottom:`0.5px solid #E5E5E5`}}>
-                            {["المنتج","المبيعات","الإيراد","هامش الربح %"].map(h=>(
-                              <th key={h} style={{padding:"10px 12px",textAlign:"right",fontSize:11.5,color:ui.textSub,fontWeight:500,whiteSpace:"nowrap"}}>{h}</th>
-                            ))}
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {(s.top_products || []).length === 0 ? (
-                            <tr><td colSpan={4} style={{padding:"20px",textAlign:"center",color:ui.textSub,fontSize:12.5}}>لا توجد طلبات في النطاق</td></tr>
-                          ) : (s.top_products || []).map((p,i) => (
-                            <tr key={i} style={{borderTop:"0.5px solid #EEE"}}>
-                              <td style={{padding:"10px 12px",fontSize:13,color:ui.text,fontWeight:500,fontFamily:ui.fontBody}}>{p.name}</td>
-                              <td style={{padding:"10px 12px",fontSize:12.5,color:ui.textSub}}>{p.qty} قطعة</td>
-                              <td style={{padding:"10px 12px",fontSize:13,color:ui.text,whiteSpace:"nowrap"}}>{fmt(p.revenue)} ج</td>
-                              <td style={{padding:"10px 12px",fontSize:12.5,fontWeight:500,
+                              <td style={{padding:"7px 11px",fontSize:12.5,color:ui.text,fontWeight:500}}>{p.name}</td>
+                              <td style={{padding:"7px 11px",fontSize:12,color:ui.textSub}}>{p.qty} قطعة</td>
+                              <td style={{padding:"7px 11px",fontSize:12.5,color:ui.text,whiteSpace:"nowrap"}}>{fmt(p.revenue)} ج</td>
+                              <td style={{padding:"7px 11px",fontSize:12,color:ui.textSub,whiteSpace:"nowrap"}}>{fmt(p.cost)} ج</td>
+                              <td style={{padding:"7px 11px",fontSize:12.5,color: (p.profit||0) >= 0 ? "#16A34A" : "#DC2626",fontWeight:500,whiteSpace:"nowrap"}}>{fmt(p.profit||0)} ج</td>
+                              <td style={{padding:"7px 11px",fontSize:12,fontWeight:500,whiteSpace:"nowrap",
                                 color: p.margin_pct > 30 ? "#16A34A" : p.margin_pct > 10 ? "#F97316" : "#DC2626"}}>
                                 {p.margin_pct}%
                               </td>
@@ -6160,21 +6481,133 @@ function AdminDash({ go }) {
                     </div>
                   </div>
 
-                  {/* Forecast */}
-                  <div style={{background: "linear-gradient(135deg,#FAF7F2,#F0EBE3)",border:ui.border,borderRadius:ui.radius,padding:"16px 18px"}}>
-                    <div style={{fontSize:11.5,color:ui.textSub,fontFamily:ui.fontBody,marginBottom:6,letterSpacing:".04em"}}>توقع</div>
-                    <div style={{display:"flex",alignItems:"baseline",justifyContent:"space-between",flexWrap:"wrap",gap:10}}>
-                      <div>
-                        <div style={{fontSize:14,color:ui.text,fontWeight:600,fontFamily:ui.fontBody,marginBottom:6}}>صافي ربح الشهر القادم (متوقع)</div>
-                        <div style={{fontSize:24,color: forecast >= 0 ? "#16A34A" : "#DC2626", fontFamily:ui.fontHead, fontWeight:600}}>
-                          {forecast.toLocaleString()} <span style={{fontSize:13,color:ui.textSub,fontFamily:ui.fontBody}}>ج</span>
+                  {/* SECTION 7 — Profit by product category */}
+                  <div style={{...cardStyle,marginBottom:12}}>
+                    <div style={sectionTitle}>الأرباح حسب فئة المنتج</div>
+                    <div style={{padding:"14px"}}>
+                      <HBarChart rows={profitCategoryRows} ui={ui}/>
+                    </div>
+                  </div>
+
+                  {/* SECTION 8 — Break-even analysis */}
+                  <div style={{...cardStyle,marginBottom:12}}>
+                    <div style={sectionTitle}>نقطة التعادل الشهرية</div>
+                    <div style={{padding:"14px"}}>
+                      {finBreakEven == null ? (
+                        <div style={{color:ui.textSub,fontSize:12.5,fontFamily:ui.fontBody}}>جاري التحميل…</div>
+                      ) : (
+                        <>
+                          <div style={{display:"grid",gridTemplateColumns:mob?"1fr 1fr":"repeat(3,1fr)",gap:12,marginBottom:14}}>
+                            <div>
+                              <div style={{fontSize:11,color:ui.textSub,fontFamily:ui.fontBody,marginBottom:3}}>المصروفات الثابتة الشهرية</div>
+                              <div style={{fontSize:16,color:ui.text,fontFamily:ui.fontHead,fontWeight:500}}>{fmt(finBreakEven.fixed_monthly_expenses)} <span style={{fontSize:11,color:ui.textSub,fontFamily:ui.fontBody}}>ج</span></div>
+                            </div>
+                            <div>
+                              <div style={{fontSize:11,color:ui.textSub,fontFamily:ui.fontBody,marginBottom:3}}>هامش الربح الإجمالي</div>
+                              <div style={{fontSize:16,color:ui.text,fontFamily:ui.fontHead,fontWeight:500}}>{finBreakEven.gross_margin_pct}%</div>
+                            </div>
+                            <div>
+                              <div style={{fontSize:11,color:ui.textSub,fontFamily:ui.fontBody,marginBottom:3}}>نقطة التعادل (إيراد)</div>
+                              <div style={{fontSize:16,color:ui.text,fontFamily:ui.fontHead,fontWeight:500}}>
+                                {finBreakEven.break_even_revenue == null ? "—" : `${fmt(finBreakEven.break_even_revenue)} ج`}
+                              </div>
+                            </div>
+                          </div>
+                          {finBreakEven.break_even_revenue != null && (
+                            <>
+                              <div style={{fontSize:12.5,color:ui.text,fontFamily:ui.fontBody,marginBottom:8}}>
+                                تحتاج إلى مبيعات بقيمة <b>{fmt(finBreakEven.break_even_revenue)} ج</b> شهرياً لتغطية المصروفات الثابتة.
+                              </div>
+                              <div style={{display:"flex",justifyContent:"space-between",fontSize:11.5,color:ui.textSub,fontFamily:ui.fontBody,marginBottom:5}}>
+                                <span>الإيرادات الفعلية حالياً: {fmt(finBreakEven.current_revenue)} ج</span>
+                                <span>{finBreakEven.pct_of_break_even}%</span>
+                              </div>
+                              <div style={{height:10,background:"#F3F4F6",borderRadius:5,overflow:"hidden",marginBottom:8}}>
+                                <div style={{width: `${Math.min(100, finBreakEven.pct_of_break_even || 0)}%`, height:"100%", background: beTone, transition:"width .35s ease"}}/>
+                              </div>
+                              <div style={{fontSize:11.5,color:ui.textSub,fontFamily:ui.fontBody}}>
+                                باقي {finBreakEven.days_remaining} يوم في الشهر · توقّع نهاية الشهر: <b style={{color:ui.text}}>{fmt(finBreakEven.projected_revenue)} ج</b>
+                              </div>
+                            </>
+                          )}
+                        </>
+                      )}
+                    </div>
+                  </div>
+
+                  {/* SECTION 9 — Key metrics (AOV / Inv Turnover / CAC / CLV) with sparklines */}
+                  <div style={{display:"grid",gridTemplateColumns:mob?"1fr 1fr":"repeat(4,1fr)",gap:10,marginBottom:12}}>
+                    {[
+                      { l:"متوسط قيمة الطلب (AOV)", v: fmt(finKeyMetrics?.aov?.value || 0), suf:"ج", spark: finKeyMetrics?.aov?.sparkline || [], col:"#16A34A" },
+                      { l:"معدل دوران المخزون (سنوي)", v: finKeyMetrics?.inventory_turnover?.value ?? 0, suf:"×", spark: finKeyMetrics?.inventory_turnover?.sparkline || [], col:"#3B82F6" },
+                      { l:"تكلفة جذب العميل (CAC)", v: fmt(finKeyMetrics?.cac?.value || 0), suf:"ج", spark: finKeyMetrics?.cac?.sparkline || [], col:"#F97316" },
+                      { l:"قيمة العميل (CLV)", v: fmt(finKeyMetrics?.clv?.value || 0), suf:"ج", spark: finKeyMetrics?.clv?.sparkline || [], col:"#9333EA" },
+                    ].map((m,i) => (
+                      <div key={i} style={{...cardStyle, padding:"12px 14px"}}>
+                        <div style={{fontSize:11,color:ui.textSub,fontFamily:ui.fontBody,marginBottom:5}}>{m.l}</div>
+                        <div style={{display:"flex",alignItems:"baseline",justifyContent:"space-between",gap:8}}>
+                          <div style={{fontSize:mob?16:18,color:ui.text,fontFamily:ui.fontHead,fontWeight:500}}>
+                            {m.v}<span style={{fontSize:11,color:ui.textSub,fontFamily:ui.fontBody,marginInlineStart:3}}>{m.suf}</span>
+                          </div>
+                          <Sparkline values={m.spark} color={m.col}/>
                         </div>
                       </div>
-                      <div style={{fontSize:11.5,color:ui.textSub,fontFamily:ui.fontBody,maxWidth:260,lineHeight:1.7}}>
-                        محسوب من متوسط صافي الربح في آخر {last3.length || 0} {last3.length === 1 ? "شهر" : "أشهر"} من البيانات الفعلية.
+                    ))}
+                  </div>
+
+                  {/* SECTION 10 — Forecast (3 scenarios) */}
+                  <div style={{background:"linear-gradient(135deg,#FAF7F2,#F0EBE3)",border:ui.border,borderRadius:ui.radius,padding:"16px 18px",marginBottom:12}}>
+                    <div style={{fontSize:11.5,color:ui.textSub,fontFamily:ui.fontBody,marginBottom:6,letterSpacing:".04em"}}>توقع الفترة القادمة</div>
+                    {fc ? (
+                      <>
+                        <div style={{display:"grid",gridTemplateColumns:mob?"1fr":"repeat(3,1fr)",gap:14,marginTop:8}}>
+                          {[
+                            { l:"متشائم", v: fc.pessimistic, col:"#DC2626" },
+                            { l:"واقعي",  v: fc.realistic,   col:"#534AB7" },
+                            { l:"متفائل", v: fc.optimistic,  col:"#16A34A" },
+                          ].map((sc,i) => (
+                            <div key={i} style={{padding:"10px 14px",background:ui.cardBg,borderRadius:6,border:`0.5px solid ${sc.col}33`}}>
+                              <div style={{fontSize:11,color:ui.textSub,fontFamily:ui.fontBody,marginBottom:4}}>{sc.l}</div>
+                              <div style={{fontSize:18,color:sc.col,fontFamily:ui.fontHead,fontWeight:600}}>
+                                {sc.v.toLocaleString()} <span style={{fontSize:11,color:ui.textSub,fontFamily:ui.fontBody,fontWeight:400}}>ج</span>
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                        <div style={{marginTop:12,display:"flex",justifyContent:"space-between",alignItems:"center",fontSize:11.5,color:ui.textSub,fontFamily:ui.fontBody}}>
+                          <span>{fc.method}</span>
+                          <Sparkline values={fc.history} color="#534AB7" width={100} height={28}/>
+                        </div>
+                      </>
+                    ) : (
+                      <div style={{fontSize:12.5,color:ui.textSub,fontFamily:ui.fontBody,lineHeight:1.7,maxWidth:480}}>
+                        التوقع يتطلب 3 أشهر على الأقل من البيانات. كلما توفّرت بيانات أكثر، كلما أصبح التوقع أدق.
+                      </div>
+                    )}
+                  </div>
+
+                  {/* SECTION 11 — Payment methods donut */}
+                  <div style={{...cardStyle,marginBottom:12}}>
+                    <div style={sectionTitle}>الإيرادات حسب طريقة الدفع</div>
+                    <div style={{padding:"14px",display:"grid",gridTemplateColumns:mob?"1fr":"180px 1fr",gap:16,alignItems:"center"}}>
+                      <div style={{display:"flex",justifyContent:"center"}}>
+                        <PieChart slices={paymentSlices} size={170} innerRadiusPct={55} ui={ui}/>
+                      </div>
+                      <div style={{display:"flex",flexDirection:"column",gap:6}}>
+                        {paymentSlices.length === 0 ? (
+                          <div style={{fontSize:12.5,color:ui.textSub,fontFamily:ui.fontBody}}>لا توجد مدفوعات مستلمة بعد</div>
+                        ) : paymentSlices.map(sl => (
+                          <div key={sl.label} style={{display:"flex",justifyContent:"space-between",alignItems:"center",fontFamily:ui.fontBody,fontSize:12.5,color:ui.text}}>
+                            <span style={{display:"inline-flex",alignItems:"center",gap:6}}>
+                              <span style={{width:10,height:10,borderRadius:2,background:sl.color}}/>{sl.label}
+                            </span>
+                            <span style={{fontFamily:"monospace"}}>{fmt(sl.value)} ج</span>
+                          </div>
+                        ))}
                       </div>
                     </div>
                   </div>
+
                 </div>
               </div>
             );
@@ -10142,6 +10575,183 @@ function ProductForm({
 // product thumbnails, price breakdown, customer notes, activity timeline,
 // action buttons (WhatsApp, email invoice, PDF, print, copy), sticky bottom
 // status bar, and a separate Cancel button with confirmation modal.
+// ─── SVG chart helpers ───────────────────────────────────────────────────────
+// All charts are hand-rolled SVG (zero deps). They're presentation-only:
+// the parent computes the data + handles tooltips via <title> children.
+// viewBox='0 0 100 H' with preserveAspectRatio='none' means callers size
+// the container and the chart scales to fit.
+
+// Multi-line chart — N series sharing a single Y scale. Each series is
+// { label, color, values: number[] }. xLabels is parallel to values[].
+// Used by section 4-A (revenue/expenses/net profit).
+function MultiLineChart({ series, xLabels, height = 160, ui }) {
+  const allValues = series.flatMap(s => s.values || []);
+  if (!allValues.length) return <div style={{height,display:"flex",alignItems:"center",justifyContent:"center",color:ui.textSub,fontFamily:ui.fontBody,fontSize:12.5}}>لا توجد بيانات</div>;
+  const min = Math.min(0, ...allValues);
+  const max = Math.max(...allValues);
+  const range = (max - min) || 1;
+  const n = Math.max(2, xLabels.length);
+  const yScale = (v) => 95 - ((v - min) / range) * 85;
+  const xScale = (i) => 3 + (i / (n - 1)) * 94;
+  // Zero baseline if the data straddles it
+  const zeroY = min < 0 && max > 0 ? yScale(0) : null;
+  return (
+    <div style={{position:"relative"}}>
+      <svg viewBox="0 0 100 100" preserveAspectRatio="none" style={{width:"100%",height,direction:"ltr"}}>
+        <line x1="0" y1="95" x2="100" y2="95" stroke="#E5E5E5" strokeWidth="0.2"/>
+        {zeroY != null && <line x1="0" y1={zeroY} x2="100" y2={zeroY} stroke="#9CA3AF" strokeWidth="0.2" strokeDasharray="0.6,0.6"/>}
+        {series.map((s) => {
+          const pts = (s.values || []).map((v, i) => `${xScale(i).toFixed(2)},${yScale(v).toFixed(2)}`).join(" ");
+          return (
+            <g key={s.label}>
+              <polyline fill="none" stroke={s.color} strokeWidth="0.9" strokeDasharray={s.dashed ? "1.6,1" : undefined} points={pts}/>
+              {(s.values || []).map((v, i) => (
+                <circle key={i} cx={xScale(i)} cy={yScale(v)} r="0.9" fill={s.color}>
+                  <title>{`${s.label} — ${xLabels[i]}: ${Math.round(v).toLocaleString()} ج`}</title>
+                </circle>
+              ))}
+            </g>
+          );
+        })}
+      </svg>
+      {/* x-axis labels — outside the SVG so they don't get scaled awkwardly */}
+      <div style={{display:"flex",justifyContent:"space-between",fontSize:9.5,color:ui.textSub,fontFamily:ui.fontBody,marginTop:4,direction:"ltr"}}>
+        {xLabels.length > 0 && <span>{xLabels[0]}</span>}
+        {xLabels.length > 1 && <span>{xLabels[xLabels.length - 1]}</span>}
+      </div>
+    </div>
+  );
+}
+
+// Bar chart where positive bars are green and negative bars are red,
+// optionally with a trend overlay. Used by section 4-B (net profit per period).
+function BarChartSigned({ values, labels, trendValues, height = 160, ui, posColor = "#16A34A", negColor = "#DC2626", trendColor = "#534AB7" }) {
+  if (!values.length) return <div style={{height,display:"flex",alignItems:"center",justifyContent:"center",color:ui.textSub,fontFamily:ui.fontBody,fontSize:12.5}}>لا توجد بيانات</div>;
+  const max = Math.max(0, ...values, ...(trendValues || []));
+  const min = Math.min(0, ...values, ...(trendValues || []));
+  const range = (max - min) || 1;
+  const zeroY = 95 - ((0 - min) / range) * 85;
+  const yScale = (v) => 95 - ((v - min) / range) * 85;
+  const n = values.length;
+  const barW = Math.min(8, 80 / n);
+  const xCenter = (i) => 3 + (i / (n - 1 || 1)) * 94;
+  return (
+    <div>
+      <svg viewBox="0 0 100 100" preserveAspectRatio="none" style={{width:"100%",height,direction:"ltr"}}>
+        <line x1="0" y1={zeroY} x2="100" y2={zeroY} stroke="#9CA3AF" strokeWidth="0.2"/>
+        {values.map((v, i) => {
+          const y = yScale(v);
+          const top = Math.min(y, zeroY);
+          const h = Math.abs(y - zeroY);
+          return (
+            <rect key={i} x={xCenter(i) - barW/2} y={top} width={barW} height={Math.max(0.6, h)}
+              fill={v >= 0 ? posColor : negColor} rx="0.4">
+              <title>{`${labels[i]}: ${Math.round(v).toLocaleString()} ج`}</title>
+            </rect>
+          );
+        })}
+        {Array.isArray(trendValues) && trendValues.length === n && (
+          <polyline fill="none" stroke={trendColor} strokeWidth="0.7" strokeDasharray="1.2,0.8"
+            points={trendValues.map((v, i) => `${xCenter(i).toFixed(2)},${yScale(v).toFixed(2)}`).join(" ")}/>
+        )}
+      </svg>
+      <div style={{display:"flex",justifyContent:"space-between",fontSize:9.5,color:ui.textSub,fontFamily:ui.fontBody,marginTop:4,direction:"ltr"}}>
+        {labels.length > 0 && <span>{labels[0]}</span>}
+        {labels.length > 1 && <span>{labels[labels.length - 1]}</span>}
+      </div>
+    </div>
+  );
+}
+
+// SVG path for a single pie/donut slice. (cx,cy) center, r outer radius,
+// rInner inner radius (0 = pie). startAngle/endAngle in radians, clockwise
+// from 12 o'clock.
+function arcPath(cx, cy, rOuter, rInner, startAngle, endAngle) {
+  const polar = (r, a) => [cx + r * Math.sin(a), cy - r * Math.cos(a)];
+  const [x1, y1] = polar(rOuter, startAngle);
+  const [x2, y2] = polar(rOuter, endAngle);
+  const [x3, y3] = polar(rInner, endAngle);
+  const [x4, y4] = polar(rInner, startAngle);
+  const large = (endAngle - startAngle) > Math.PI ? 1 : 0;
+  if (rInner <= 0) {
+    return `M ${cx} ${cy} L ${x1} ${y1} A ${rOuter} ${rOuter} 0 ${large} 1 ${x2} ${y2} Z`;
+  }
+  return `M ${x1} ${y1} A ${rOuter} ${rOuter} 0 ${large} 1 ${x2} ${y2} L ${x3} ${y3} A ${rInner} ${rInner} 0 ${large} 0 ${x4} ${y4} Z`;
+}
+
+// Pie / donut chart from {label, value, color} slices. innerRadiusPct = 0 → pie.
+function PieChart({ slices, size = 160, innerRadiusPct = 0, ui }) {
+  const total = slices.reduce((s, sl) => s + (Number(sl.value) || 0), 0);
+  if (total <= 0) return <div style={{width:size,height:size,display:"flex",alignItems:"center",justifyContent:"center",color:ui.textSub,fontFamily:ui.fontBody,fontSize:12.5}}>لا توجد بيانات</div>;
+  const cx = 50, cy = 50, rO = 48, rI = (innerRadiusPct / 100) * rO;
+  let angle = 0;
+  return (
+    <svg viewBox="0 0 100 100" style={{width:size,height:size,display:"block",direction:"ltr"}}>
+      {slices.map((sl, i) => {
+        const v = Number(sl.value) || 0;
+        if (v <= 0) return null;
+        const start = angle;
+        const end = start + (v / total) * Math.PI * 2;
+        angle = end;
+        const pct = Math.round((v / total) * 1000) / 10;
+        return (
+          <path key={i} d={arcPath(cx, cy, rO, rI, start, end)} fill={sl.color} stroke="#fff" strokeWidth="0.3">
+            <title>{`${sl.label}: ${Math.round(v).toLocaleString()} ج (${pct}%)`}</title>
+          </path>
+        );
+      })}
+      {rI > 0 && (
+        <text x={cx} y={cy + 1} textAnchor="middle" dominantBaseline="middle" style={{fontSize:7,fill:ui.textSub,fontFamily:ui.fontBody}}>
+          {Math.round(total).toLocaleString()} ج
+        </text>
+      )}
+    </svg>
+  );
+}
+
+// Horizontal bar chart used by section 7 (profit by product category).
+function HBarChart({ rows, height = 22, ui, color = "#534AB7" }) {
+  if (!rows.length) return <div style={{padding:"24px",color:ui.textSub,fontFamily:ui.fontBody,fontSize:12.5,textAlign:"center"}}>لا توجد بيانات</div>;
+  const max = Math.max(1, ...rows.map(r => Math.abs(Number(r.value) || 0)));
+  return (
+    <div style={{display:"flex",flexDirection:"column",gap:6}}>
+      {rows.map((r, i) => {
+        const v = Number(r.value) || 0;
+        const pct = Math.round((Math.abs(v) / max) * 100);
+        const barColor = v < 0 ? "#DC2626" : (r.color || color);
+        return (
+          <div key={i} style={{display:"grid",gridTemplateColumns:"110px 1fr 80px",alignItems:"center",gap:8,fontFamily:ui.fontBody,fontSize:12}}>
+            <span style={{color:ui.text,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}} title={r.label}>{r.label}</span>
+            <div style={{height,background:"#F3F4F6",borderRadius:3,position:"relative",overflow:"hidden"}}>
+              <div style={{width:`${pct}%`,height:"100%",background:barColor,borderRadius:3,transition:"width .35s ease"}}/>
+            </div>
+            <span style={{color:ui.text,fontWeight:500,textAlign:"left",fontFamily:"monospace",fontSize:11.5}}>
+              {Math.round(v).toLocaleString()} ج
+            </span>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+// Tiny sparkline — used inside key-metric cards.
+function Sparkline({ values, color = "#534AB7", width = 80, height = 24 }) {
+  if (!values || values.length < 2) return <div style={{width,height}}/>;
+  const min = Math.min(...values), max = Math.max(...values);
+  const range = (max - min) || 1;
+  const pts = values.map((v, i) => {
+    const x = (i / (values.length - 1)) * 100;
+    const y = 100 - ((v - min) / range) * 100;
+    return `${x.toFixed(1)},${y.toFixed(1)}`;
+  }).join(" ");
+  return (
+    <svg viewBox="0 0 100 100" preserveAspectRatio="none" style={{width,height,display:"block"}}>
+      <polyline fill="none" stroke={color} strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" points={pts}/>
+    </svg>
+  );
+}
+
 // ─── Print a return slip via the browser's window.print() ─────────────────────
 // Opens a new popup window with a styled, self-contained HTML page, gives the
 // browser a beat to render, then triggers print. No new deps — works offline.
