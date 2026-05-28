@@ -550,6 +550,20 @@ ensureColumn('expenses', 'beneficiary_type', "TEXT DEFAULT 'supplier'");        
 ensureColumn('expenses', 'budget_override_reason', 'TEXT');                      // populated when a pending_budget_approval expense is approved
 ensureColumn('expenses', 'payment_date',        'DATETIME');                     // NULL = approved-but-not-yet-paid; set = actual cash-out date (Cash Out calc reads this)
 
+// ── Test-data isolation: is_test column on every smoke-pollutable table ─────
+// Smoke tests set is_test=1 on every row they create. Every business-metric
+// aggregation (Finance, Dashboard, product/customer KPIs) excludes is_test=1
+// rows so synthetic test runs cannot move real numbers. Boot purge below
+// nukes any is_test=1 row left over from a crashed/aborted smoke as a safety
+// net. Default 0 on every row, including legacy data → no migration needed.
+[
+  'orders', 'products', 'users', 'shipments', 'expenses',
+  'returns', 'return_items',
+].forEach((t) => {
+  ensureColumn(t, 'is_test', 'INTEGER DEFAULT 0');
+  try { db.exec(`CREATE INDEX IF NOT EXISTS idx_${t}_is_test ON ${t}(is_test)`); } catch {}
+});
+
 // One-shot per (category, year-month) log used to suppress duplicate 80% budget warnings.
 db.exec(`
   CREATE TABLE IF NOT EXISTS budget_warning_log (
@@ -938,6 +952,50 @@ const TEST_MARKER = '__NAWRA_TEST__';
     } catch (err) { console.warn(`[nawra-api] test-data purge skipped for ${t}: ${err.message}`); }
   });
   if (total === 0) console.log('[nawra-api] test-data purge: nothing to remove');
+})();
+
+// ── Test-data purge by is_test=1 column (Phase B safety net) ────────────────
+// Belt-and-braces: even when a smoke forgets the marker text, any row it
+// created with is_test=1 gets nuked on boot. Same dependency-ordered cascade
+// as the marker-text pass above so referential coherence is maintained.
+(() => {
+  let total = 0;
+  const log = (label, n) => { if (n > 0) { console.log(`[nawra-api] is_test purge: ${label} → removed ${n}`); total += n; } };
+  try {
+    // Cascade: shipment_status_history → shipments (any is_test=1 ship OR ship whose order is_test=1)
+    const polluted = db.prepare(`
+      SELECT id FROM shipments WHERE is_test = 1
+      UNION
+      SELECT s.id FROM shipments s JOIN orders o ON o.id = s.order_id WHERE o.is_test = 1
+    `).all().map(r => r.id);
+    if (polluted.length) {
+      const ph = polluted.map(() => '?').join(',');
+      log('shipment_status_history', db.prepare(`DELETE FROM shipment_status_history WHERE shipment_id IN (${ph})`).run(...polluted).changes);
+      log('shipments',               db.prepare(`DELETE FROM shipments               WHERE id IN (${ph})`).run(...polluted).changes);
+    }
+  } catch (e) { console.warn('[nawra-api] is_test purge shipments cascade:', e.message); }
+
+  try {
+    const retIds = db.prepare("SELECT id FROM returns WHERE is_test = 1").all().map(r => r.id);
+    if (retIds.length) {
+      const ph = retIds.map(() => '?').join(',');
+      log('return_items',        db.prepare(`DELETE FROM return_items        WHERE return_id IN (${ph}) OR is_test = 1`).run(...retIds).changes);
+      log('return_attachments',  db.prepare(`DELETE FROM return_attachments  WHERE return_id IN (${ph})`).run(...retIds).changes);
+      log('return_activity_log', db.prepare(`DELETE FROM return_activity_log WHERE return_id IN (${ph})`).run(...retIds).changes);
+      log('returns',             db.prepare(`DELETE FROM returns             WHERE id IN (${ph})`).run(...retIds).changes);
+    } else {
+      // Still sweep orphan return_items with is_test=1 (parent already deleted)
+      try { log('return_items (orphan)', db.prepare("DELETE FROM return_items WHERE is_test = 1").run().changes); } catch {}
+    }
+  } catch (e) { console.warn('[nawra-api] is_test purge returns cascade:', e.message); }
+
+  ['orders', 'expenses', 'products', 'users'].forEach((t) => {
+    try { log(t, db.prepare(`DELETE FROM ${t} WHERE is_test = 1`).run().changes); }
+    catch (e) { console.warn(`[nawra-api] is_test purge ${t}:`, e.message); }
+  });
+
+  if (total === 0) console.log('[nawra-api] is_test purge: nothing to remove');
+  else              console.log(`[nawra-api] is_test purge: removed ${total} rows total`);
 })();
 
 console.log('[nawra-api] DB ready:', path.join(__dirname, 'orders.db'));
@@ -1415,10 +1473,12 @@ app.post('/api/orders', (req, res) => {
       id, date, name, phone, city, address, items, total, status, lat, lng, userEmail,
       payment_method, payment_status, payment_reference, customer_notes,
       subtotal, shipping_cost, discount_amount, coupon_code,
+      is_test,
     } = req.body;
     if (!id || !name) return res.status(400).json({ error: 'id and name required' });
 
     const orderNumber = allocateOrderNumber();
+    const isTest = is_test ? 1 : 0;
     const history = [{
       status: status || '\u062c\u062f\u064a\u062f',
       at: new Date().toISOString(),
@@ -1431,8 +1491,8 @@ app.post('/api/orders', (req, res) => {
       INSERT OR REPLACE INTO orders (
         id, date, name, phone, city, address, items, total, status, lat, lng, userEmail,
         order_number, payment_method, payment_status, payment_reference, customer_notes,
-        subtotal, shipping_cost, discount_amount, coupon_code, status_history
-      ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        subtotal, shipping_cost, discount_amount, coupon_code, status_history, is_test
+      ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
     `).run(
       String(id), date, name, phone, city, address,
       JSON.stringify(items||[]), Number(total)||0, status||'\u062c\u062f\u064a\u062f',
@@ -1446,11 +1506,15 @@ app.post('/api/orders', (req, res) => {
       shipping_cost != null ? Number(shipping_cost) : null,
       discount_amount != null ? Number(discount_amount) : null,
       coupon_code || null,
-      JSON.stringify(history)
+      JSON.stringify(history),
+      isTest,
     );
 
     if (userEmail) {
       upsertUser.run(userEmail, name||null, phone||null, Number(total)||0);
+      // Propagate the test flag to the auto-upserted user so the user row is
+      // also caught by every is_test=0 aggregation guard.
+      if (isTest) db.prepare('UPDATE users SET is_test = 1 WHERE email = ?').run(userEmail);
       // Ensure registered_at is set for legacy rows where it's NULL.
       db.prepare("UPDATE users SET registered_at = COALESCE(registered_at, firstOrder) WHERE email = ?").run(userEmail);
       recategorizeOne(userEmail);
@@ -1760,16 +1824,18 @@ app.get('/api/users', (req, res) => {
 // GET /api/users/aggregates — KPI summary for the customers list header
 app.get('/api/users/aggregates', (_req, res) => {
   try {
-    const total = db.prepare('SELECT COUNT(*) AS n FROM users').get().n;
+    // is_test guard so smoke users don't move CRM KPIs.
+    const NOT_TEST = '(is_test = 0 OR is_test IS NULL)';
+    const total = db.prepare(`SELECT COUNT(*) AS n FROM users WHERE ${NOT_TEST}`).get().n;
     const now = new Date();
     const startOfThisMonth = new Date(now.getFullYear(), now.getMonth(), 1).toISOString().slice(0,10) + ' 00:00:00';
     const startOfLastMonth = new Date(now.getFullYear(), now.getMonth() - 1, 1).toISOString().slice(0,10) + ' 00:00:00';
-    const newThisMonth = db.prepare('SELECT COUNT(*) AS n FROM users WHERE COALESCE(registered_at, firstOrder) >= ?').get(startOfThisMonth).n;
-    const newLastMonth = db.prepare('SELECT COUNT(*) AS n FROM users WHERE COALESCE(registered_at, firstOrder) >= ? AND COALESCE(registered_at, firstOrder) < ?').get(startOfLastMonth, startOfThisMonth).n;
-    const vip = db.prepare("SELECT COUNT(*) AS n FROM users WHERE category = 'vip'").get().n;
-    const repeatCust = db.prepare('SELECT COUNT(*) AS n FROM users WHERE totalOrders >= 2').get().n;
+    const newThisMonth = db.prepare(`SELECT COUNT(*) AS n FROM users WHERE ${NOT_TEST} AND COALESCE(registered_at, firstOrder) >= ?`).get(startOfThisMonth).n;
+    const newLastMonth = db.prepare(`SELECT COUNT(*) AS n FROM users WHERE ${NOT_TEST} AND COALESCE(registered_at, firstOrder) >= ? AND COALESCE(registered_at, firstOrder) < ?`).get(startOfLastMonth, startOfThisMonth).n;
+    const vip = db.prepare(`SELECT COUNT(*) AS n FROM users WHERE ${NOT_TEST} AND category = 'vip'`).get().n;
+    const repeatCust = db.prepare(`SELECT COUNT(*) AS n FROM users WHERE ${NOT_TEST} AND totalOrders >= 2`).get().n;
     const repeatRate = total ? Math.round((repeatCust / total) * 100) : 0;
-    const totalSpentAll = db.prepare('SELECT COALESCE(SUM(totalSpent), 0) AS s FROM users').get().s;
+    const totalSpentAll = db.prepare(`SELECT COALESCE(SUM(totalSpent), 0) AS s FROM users WHERE ${NOT_TEST}`).get().s;
     const clv = total ? Math.round(totalSpentAll / total) : 0;
     const newChangePct = newLastMonth ? Math.round(((newThisMonth - newLastMonth) / newLastMonth) * 100) : (newThisMonth ? 100 : 0);
     res.json({
@@ -1819,14 +1885,14 @@ app.get('/api/users/:email', (req, res) => {
 // POST /api/users — create a customer manually (no orders yet).
 app.post('/api/users', (req, res) => {
   try {
-    const { email, name, phone, date_of_birth, gender, preferred_lang } = req.body || {};
+    const { email, name, phone, date_of_birth, gender, preferred_lang, is_test } = req.body || {};
     if (!email) return res.status(400).json({ error: 'email required' });
     db.prepare(`
       INSERT INTO users (email, name, phone, registered_at, totalOrders, totalSpent, category,
-                         date_of_birth, gender, preferred_lang)
-      VALUES (?, ?, ?, datetime('now'), 0, 0, 'new', ?, ?, ?)
+                         date_of_birth, gender, preferred_lang, is_test)
+      VALUES (?, ?, ?, datetime('now'), 0, 0, 'new', ?, ?, ?, ?)
       ON CONFLICT(email) DO NOTHING
-    `).run(email, name || null, phone || null, date_of_birth || null, gender || null, preferred_lang || 'ar');
+    `).run(email, name || null, phone || null, date_of_birth || null, gender || null, preferred_lang || 'ar', is_test ? 1 : 0);
     recategorizeOne(email);
     logCustomerActivity(email, 'registered', { manual: true });
     const u = db.prepare('SELECT * FROM users WHERE email = ?').get(email);
@@ -2226,6 +2292,7 @@ app.post('/api/products', (req, res) => {
         usage_text, usage_i18n,
         seo_title_i18n, seo_description_i18n,
         slug, size, publish_at, is_best_seller, has_variants, archived,
+        is_test,
         created_at, updated_at
       ) VALUES (
         ?,?,?,?,?,?,?,?,
@@ -2235,6 +2302,7 @@ app.post('/api/products', (req, res) => {
         ?,?,
         ?,?,
         ?,?,?,?,?,?,
+        ?,
         datetime('now'), datetime('now')
       )
     `).run(
@@ -2253,7 +2321,8 @@ app.post('/api/products', (req, res) => {
       slug, p.size || null, p.publish_at || null,
       p.is_best_seller ? 1 : 0,
       p.has_variants ? 1 : 0,
-      p.archived ? 1 : 0
+      p.archived ? 1 : 0,
+      p.is_test ? 1 : 0,
     );
 
     if (p.has_variants && Array.isArray(p.variants)) replaceVariants(id, p.variants);
@@ -2591,7 +2660,8 @@ app.get('/api/returns', (req, res) => {
 // AGGREGATES — KPI cards + insight cards. One round-trip for the list page.
 app.get('/api/returns/aggregates', (_req, res) => {
   try {
-    const all = db.prepare('SELECT * FROM returns').all();
+    // is_test guard so smoke returns don't move the return-rate KPI.
+    const all = db.prepare('SELECT * FROM returns WHERE (is_test = 0 OR is_test IS NULL)').all();
     const byStatus = (s) => all.filter(r => r.status === s);
     const counts = {
       total:     all.length,
@@ -2601,7 +2671,7 @@ app.get('/api/returns/aggregates', (_req, res) => {
       refunded:  byStatus('refunded').length,
     };
     const refunded_total = byStatus('refunded').reduce((s, r) => s + (Number(r.amount) || 0), 0);
-    const orderCount = db.prepare('SELECT COUNT(*) AS c FROM orders').get().c || 0;
+    const orderCount = db.prepare('SELECT COUNT(*) AS c FROM orders WHERE (is_test = 0 OR is_test IS NULL)').get().c || 0;
     const return_rate_pct = orderCount ? Math.round((all.length / orderCount) * 1000) / 10 : 0;
 
     // avg processing days = mean( (processed_at - requested_at) for refunded rows )
@@ -2620,19 +2690,20 @@ app.get('/api/returns/aggregates', (_req, res) => {
     // falls back to the legacy `product` text column if items table is empty).
     const itemAgg = db.prepare(`
       SELECT product_name AS name, SUM(quantity) AS qty
-      FROM return_items GROUP BY product_name ORDER BY qty DESC LIMIT 1
+      FROM return_items WHERE (is_test = 0 OR is_test IS NULL)
+      GROUP BY product_name ORDER BY qty DESC LIMIT 1
     `).get();
     let topProductName = itemAgg && itemAgg.name;
     let topProductQty  = itemAgg ? Number(itemAgg.qty) || 0 : 0;
     if (!topProductName) {
-      const legacy = db.prepare("SELECT product, COUNT(*) AS c FROM returns WHERE product IS NOT NULL AND product <> '' GROUP BY product ORDER BY c DESC LIMIT 1").get();
+      const legacy = db.prepare("SELECT product, COUNT(*) AS c FROM returns WHERE product IS NOT NULL AND product <> '' AND (is_test = 0 OR is_test IS NULL) GROUP BY product ORDER BY c DESC LIMIT 1").get();
       if (legacy) { topProductName = legacy.product; topProductQty = legacy.c; }
     }
     // Sales count of that product across all orders (rough — sums qty from
     // orders.items[] JSON where item.name matches).
     let topProductSales = 0;
     if (topProductName) {
-      const orders = db.prepare('SELECT items FROM orders').all();
+      const orders = db.prepare('SELECT items FROM orders WHERE (is_test = 0 OR is_test IS NULL)').all();
       orders.forEach(o => {
         try { (JSON.parse(o.items || '[]') || []).forEach(it => { if ((it.name || '') === topProductName) topProductSales += Number(it.qty) || 0; }); }
         catch {}
@@ -2648,6 +2719,7 @@ app.get('/api/returns/aggregates', (_req, res) => {
     const reasonAgg = db.prepare(`
       SELECT COALESCE(reason_id, '') AS rid, reason, COUNT(*) AS c
       FROM returns WHERE (reason_id IS NOT NULL OR reason IS NOT NULL)
+        AND (is_test = 0 OR is_test IS NULL)
       GROUP BY rid, reason ORDER BY c DESC LIMIT 1
     `).get();
     if (reasonAgg) {
@@ -2692,14 +2764,23 @@ app.post('/api/returns', (req, res) => {
       : (Number(r.amount) || 0);
     const requestedAt = r.requested_at || new Date().toISOString().slice(0, 19).replace('T', ' ');
     const customer = r.customer || (r.customer_id ? r.customer_id.split('@')[0] : null);
+    // Inherit is_test from parent order so smoke returns are auto-flagged.
+    // Body can override (e.g. smoke that constructs a return without an order row).
+    let isTest = r.is_test ? 1 : 0;
+    if (!isTest && r.order_id) {
+      try {
+        const o = db.prepare('SELECT is_test FROM orders WHERE id = ?').get(String(r.order_id));
+        if (o && o.is_test) isTest = 1;
+      } catch {}
+    }
 
     db.transaction(() => {
       db.prepare(`
         INSERT INTO returns (id, return_number, order_id, customer, customer_email, customer_id,
                              product, reason, reason_id, customer_notes, amount, status,
                              refund_method, refund_shipping, shipping_refund, discount_refund,
-                             pickup_method, pickup_address, requested_at)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                             pickup_method, pickup_address, requested_at, is_test)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
       `).run(
         id, retNum, r.order_id, customer, r.customer_email || r.customer_id || null,
         r.customer_id || r.customer_email || null,
@@ -2708,13 +2789,13 @@ app.post('/api/returns', (req, res) => {
         computedAmount, r.status || 'pending',
         r.refund_method || null,
         r.refund_shipping ? 1 : 0, Number(r.shipping_refund) || 0, Number(r.discount_refund) || 0,
-        r.pickup_method || 'customer_ships', r.pickup_address || null, requestedAt,
+        r.pickup_method || 'customer_ships', r.pickup_address || null, requestedAt, isTest,
       );
       const insItem = db.prepare(`
         INSERT INTO return_items (id, return_id, order_item_idx, product_id, product_name,
                                   product_image, sku, unit_price, quantity, refund_amount,
-                                  condition, restock_action)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+                                  condition, restock_action, is_test)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
       `);
       itemsIn.forEach((it, i) => {
         const itemId = `ri_${Date.now().toString(36)}_${Math.random().toString(36).slice(2,5)}_${i}`;
@@ -2725,7 +2806,7 @@ app.post('/api/returns', (req, res) => {
           it.product_id || null, it.product_name || null, it.product_image || null, it.sku || null,
           Number(it.unit_price) || 0, qty,
           Number(it.refund_amount) || ((Number(it.unit_price) || 0) * qty),
-          'pending', 'pending',
+          'pending', 'pending', isTest,
         );
       });
     })();
@@ -2817,9 +2898,10 @@ app.patch('/api/returns/:id', (req, res) => {
           if (unitCost > 0) {
             const expId = `ex_${Date.now().toString(36)}_${Math.random().toString(36).slice(2,5)}`;
             db.prepare(`
-              INSERT INTO expenses (id, category, description, quantity, unit_price, amount, date, notes)
-              VALUES (?, 'general', ?, ?, ?, ?, date('now'), ?)
-            `).run(expId, `هالك — ${productRow.name}`, qty, unitCost, unitCost * qty, `مرتجع #${cur.id}`);
+              INSERT INTO expenses (id, category, description, quantity, unit_price, amount, date, notes, is_test)
+              VALUES (?, 'general', ?, ?, ?, ?, date('now'), ?, ?)
+            `).run(expId, `هالك — ${productRow.name}`, qty, unitCost, unitCost * qty, `مرتجع #${cur.id}`,
+              cur.is_test ? 1 : 0);
           }
           recordMovement({
             product_id: productRow.id, product_name: productRow.name,
@@ -2897,8 +2979,8 @@ app.patch('/api/returns/:id', (req, res) => {
           db.prepare(`
             INSERT INTO expenses (id, category, category_id, description, quantity, unit_price, amount,
                                   date, notes, type, payment_method, status,
-                                  approved_by, approved_at, created_by, source_ref)
-            VALUES (?, ?, ?, ?, 1, ?, ?, ?, ?, 'variable', ?, 'approved', ?, datetime('now'), ?, ?)
+                                  approved_by, approved_at, created_by, source_ref, is_test)
+            VALUES (?, ?, ?, ?, 1, ?, ?, ?, ?, 'variable', ?, 'approved', ?, datetime('now'), ?, ?, ?)
           `).run(
             expId, catRow ? catRow.key : 'returns', catRow ? catRow.id : null,
             `استرداد مرتجع ${cur.return_number} — ${cur.customer || cur.customer_email || '—'}`,
@@ -2908,6 +2990,7 @@ app.patch('/api/returns/:id', (req, res) => {
             actor || SUPER_ADMIN_FALLBACK,
             actor || SUPER_ADMIN_FALLBACK,
             `return:${cur.id}`,
+            cur.is_test ? 1 : 0,
           );
           sideEffects.expense_id = expId;
         } catch (e) { console.warn('[nawra-api] refund-as-expense skipped:', e.message); }
@@ -3789,7 +3872,8 @@ app.get('/api/shipments', (req, res) => {
 // + tab counters. One round-trip for the list page.
 app.get('/api/shipments/aggregates', (_req, res) => {
   try {
-    const all = db.prepare('SELECT * FROM shipments').all();
+    // is_test guard so smoke shipments don't move shipping KPIs.
+    const all = db.prepare('SELECT * FROM shipments WHERE (is_test = 0 OR is_test IS NULL)').all();
     const byStatus = (s) => all.filter(r => r.status === s);
     const counts = {
       total:     all.length,
@@ -3930,12 +4014,16 @@ app.post('/api/shipments', (req, res) => {
 
     const id  = `sh_${Date.now().toString(36)}_${Math.random().toString(36).slice(2,5)}`;
     const awb = allocateAwbNumber();
+    // Inherit is_test from the parent order (so a smoke-created order's
+    // shipment is also flagged automatically). Body can override.
+    const isTest = b.is_test != null ? (b.is_test ? 1 : 0) : (order.is_test ? 1 : 0);
     db.prepare(`
       INSERT INTO shipments
         (id, awb_number, order_id, courier_id, zone_id, weight_kg, courier_cost,
          customer_paid_shipping, customer_paid_cod, status,
-         expected_delivery_date, signature_required, special_instructions, internal_notes)
-      VALUES (?,?,?,?,?,?,?,?,?, 'ready', ?,?,?,?)
+         expected_delivery_date, signature_required, special_instructions, internal_notes,
+         is_test)
+      VALUES (?,?,?,?,?,?,?,?,?, 'ready', ?,?,?,?,?)
     `).run(
       id, awb, orderId, courierId, zone ? zone.id : null, weight,
       Number(b.courier_cost) || 0,
@@ -3944,6 +4032,7 @@ app.post('/api/shipments', (req, res) => {
       b.signature_required ? 1 : 0,
       b.special_instructions || null,
       b.internal_notes || null,
+      isTest,
     );
     logShipmentHistory({
       shipment_id: id, from_status: null, to_status: 'ready',
@@ -4091,6 +4180,7 @@ function evaluateBudget({ category_id, additionalAmount, dateRef, excludeExpense
     WHERE category_id = ? AND status = 'approved'
       AND date >= ? AND date <= ?
       AND (? IS NULL OR id <> ?)
+      AND (is_test = 0 OR is_test IS NULL)
   `).get(category_id, monthStart, monthEnd, excludeExpenseId || null, excludeExpenseId || null);
   const currentSpent = Number(sumRow.s) || 0;
 
@@ -4274,8 +4364,9 @@ app.post('/api/expenses', (req, res) => {
       INSERT INTO expenses (
         id, category, category_id, description, quantity, unit_price, amount, date, notes,
         type, supplier_id, beneficiary_type, payment_method, receipt_path, is_recurring,
-        status, approved_by, approved_at, rejection_reason, created_by, source_ref, payment_date
-      ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        status, approved_by, approved_at, rejection_reason, created_by, source_ref, payment_date,
+        is_test
+      ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
     `).run(
       id, cat.key, cat.id, e.description||null, qty, unit, amt, date, e.notes||null,
       type, beneficiaryId, benType, pm, e.receipt_path || null, e.is_recurring ? 1 : 0,
@@ -4286,6 +4377,7 @@ app.post('/api/expenses', (req, res) => {
       e.created_by || null,
       e.source_ref || null,
       paymentDate,
+      e.is_test ? 1 : 0,
     );
 
     // Inbox routing — three mutually exclusive paths:
@@ -4789,16 +4881,19 @@ function linearRegression(series, xNext) {
 }
 
 function aggregateFinance(fromISO, toISO) {
-  const orders   = db.prepare('SELECT * FROM orders').all();
-  const products = db.prepare('SELECT id, name, cost FROM products').all();
+  // is_test guard: every aggregation excludes synthetic test rows so
+  // smoke runs cannot move real business numbers. Real rows have
+  // is_test = 0 or NULL (legacy); synthetic rows are explicit is_test = 1.
+  const orders   = db.prepare('SELECT * FROM orders WHERE (is_test = 0 OR is_test IS NULL)').all();
+  const products = db.prepare('SELECT id, name, cost FROM products WHERE (is_test = 0 OR is_test IS NULL)').all();
   // Finance reporting only counts settled (approved) expenses. Pending,
   // rejected, and pending_budget_approval rows are excluded from KPIs/charts
   // until a super admin actions them.
   const expenses = db.prepare(
-    "SELECT * FROM expenses WHERE (status = 'approved' OR status IS NULL)"
+    "SELECT * FROM expenses WHERE (status = 'approved' OR status IS NULL) AND (is_test = 0 OR is_test IS NULL)"
     + (fromISO ? ' AND date >= ?' : '')
     + (toISO   ? ' AND date <= ?' : '')).all(...[fromISO, toISO].filter(Boolean));
-  const returnsRows = db.prepare('SELECT * FROM returns WHERE status = ?').all('refunded');
+  const returnsRows = db.prepare('SELECT * FROM returns WHERE status = ? AND (is_test = 0 OR is_test IS NULL)').all('refunded');
 
   // Indexes for resolving line items → product cost/category/image. Lookup
   // by name (legacy) + by id (new orders carry it on items[]).
@@ -4926,10 +5021,13 @@ function aggregateFinance(fromISO, toISO) {
 //            they're naturally included.
 function computeCashFlow(fromISO, toISO) {
   // Cash In, broken down by payment_method
+  // is_test guard: exclude synthetic test orders from Cash In so smoke
+  // runs don't move the real cash position.
   let sql = `
     SELECT COALESCE(payment_method, 'cash') AS pm, COALESCE(SUM(total), 0) AS amount, COUNT(*) AS n
     FROM orders
-    WHERE payment_status = 'paid' AND status != 'ملغي'`;
+    WHERE payment_status = 'paid' AND status != 'ملغي'
+      AND (is_test = 0 OR is_test IS NULL)`;
   const params = [];
   if (fromISO) { sql += ' AND payment_settled_at >= ?'; params.push(fromISO); }
   if (toISO)   { sql += " AND payment_settled_at <= ?"; params.push(toISO + ' 23:59:59'); }
@@ -4939,12 +5037,13 @@ function computeCashFlow(fromISO, toISO) {
   const inByMap = { cash:0, transfer:0, wallet:0, visa:0, card:0 };
   inByMethod.forEach(r => { inByMap[r.pm] = Number(r.amount) || 0; });
 
-  // Cash Out: expenses paid in range
+  // Cash Out: expenses paid in range — also filtered by is_test.
   let outSql = `
     SELECT COALESCE(payment_method,'cash') AS pm, COALESCE(category,'general') AS cat,
            COALESCE(source_ref,'') AS src, COALESCE(SUM(amount),0) AS amount, COUNT(*) AS n
     FROM expenses
-    WHERE status = 'approved' AND payment_date IS NOT NULL`;
+    WHERE status = 'approved' AND payment_date IS NOT NULL
+      AND (is_test = 0 OR is_test IS NULL)`;
   const outParams = [];
   if (fromISO) { outSql += ' AND payment_date >= ?'; outParams.push(fromISO); }
   if (toISO)   { outSql += " AND payment_date <= ?"; outParams.push(toISO + ' 23:59:59'); }
@@ -5161,15 +5260,18 @@ app.get('/api/finance/receivables', (_req, res) => {
   try {
     // COD pending = cash orders that haven't been delivered yet (status is
     // anything except مكتمل or ملغي). Their cash is "expected".
+    // is_test guard so smoke orders don't inflate AR.
     const codRows = db.prepare(`
       SELECT COALESCE(SUM(total),0) AS amount, COUNT(*) AS n
       FROM orders WHERE payment_method = 'cash'
-        AND status NOT IN ('مكتمل','ملغي')`).get();
+        AND status NOT IN ('مكتمل','ملغي')
+        AND (is_test = 0 OR is_test IS NULL)`).get();
     // Online pending = non-cash orders not yet marked paid.
     const onlineRows = db.prepare(`
       SELECT COALESCE(SUM(total),0) AS amount, COUNT(*) AS n
       FROM orders WHERE payment_method != 'cash' AND payment_method IS NOT NULL
-        AND payment_status != 'paid' AND status != 'ملغي'`).get();
+        AND payment_status != 'paid' AND status != 'ملغي'
+        AND (is_test = 0 OR is_test IS NULL)`).get();
     res.json({
       total: Number(codRows.amount) + Number(onlineRows.amount),
       cod_pending:    { amount: Number(codRows.amount)    || 0, count: Number(codRows.n)    || 0 },
@@ -5183,15 +5285,18 @@ app.get('/api/finance/receivables', (_req, res) => {
 app.get('/api/finance/payables', (_req, res) => {
   try {
     // Approved expenses with no payment_date set yet = invoice received but not paid.
+    // is_test guard so smoke expenses don't inflate AP.
     const unpaidRows = db.prepare(`
       SELECT COALESCE(SUM(amount),0) AS amount, COUNT(*) AS n
-      FROM expenses WHERE status = 'approved' AND payment_date IS NULL`).get();
+      FROM expenses WHERE status = 'approved' AND payment_date IS NULL
+        AND (is_test = 0 OR is_test IS NULL)`).get();
     // Scheduled-this-month: recurring expenses (is_recurring=1) whose date
     // is in the current month and status='pending'. Lightweight indicator.
     const ym = new Date().toISOString().slice(0,7);
     const scheduledRows = db.prepare(`
       SELECT COALESCE(SUM(amount),0) AS amount, COUNT(*) AS n
-      FROM expenses WHERE is_recurring = 1 AND status = 'pending' AND date LIKE ?`).get(`${ym}%`);
+      FROM expenses WHERE is_recurring = 1 AND status = 'pending' AND date LIKE ?
+        AND (is_test = 0 OR is_test IS NULL)`).get(`${ym}%`);
     res.json({
       total: Number(unpaidRows.amount) + Number(scheduledRows.amount),
       pending_invoices:     { amount: Number(unpaidRows.amount)    || 0, count: Number(unpaidRows.n)    || 0 },
@@ -5221,7 +5326,7 @@ app.get('/api/finance/key-metrics', (req, res) => {
     // Inventory Turnover (annualized): COGS / average inventory value
     // Average inventory value approximated as current value at cost (single
     // snapshot — improved when stock_movements are factored in Phase 3).
-    const invRow = db.prepare("SELECT COALESCE(SUM((COALESCE(stock,0)+COALESCE(stock_reserved,0)) * COALESCE(cost,0)), 0) AS inv FROM products").get();
+    const invRow = db.prepare("SELECT COALESCE(SUM((COALESCE(stock,0)+COALESCE(stock_reserved,0)) * COALESCE(cost,0)), 0) AS inv FROM products WHERE (is_test = 0 OR is_test IS NULL)").get();
     const invValue = Number(invRow.inv) || 0;
     // Annualize the rate by extrapolating the period's COGS — if the period
     // is shorter than a year, multiply by (365 / days). Falls back to raw
@@ -5236,13 +5341,15 @@ app.get('/api/finance/key-metrics', (req, res) => {
       inventoryTurnover = Math.round((cur.cogs * factor / invValue) * 10) / 10;
     }
     // CAC = marketing expenses ÷ new customers in the period.
+    // is_test guards so smoke expenses + users don't move CAC/CLV.
     const mkRow = db.prepare(`
       SELECT COALESCE(SUM(amount),0) AS amount FROM expenses
-      WHERE status = 'approved' AND category = 'marketing'`
+      WHERE status = 'approved' AND category = 'marketing'
+        AND (is_test = 0 OR is_test IS NULL)`
       + (from ? ' AND date >= ?' : '')
       + (to   ? ' AND date <= ?' : '')).get(...[from, to].filter(Boolean));
     const newCustRow = db.prepare(`
-      SELECT COUNT(*) AS n FROM users WHERE 1=1`
+      SELECT COUNT(*) AS n FROM users WHERE (is_test = 0 OR is_test IS NULL)`
       + (from ? ' AND COALESCE(registered_at, firstOrder) >= ?' : '')
       + (to   ? ' AND COALESCE(registered_at, firstOrder) <= ?' : '')).get(...[from, to].filter(Boolean));
     const newCount = Number(newCustRow.n) || 0;
@@ -5251,7 +5358,7 @@ app.get('/api/finance/key-metrics', (req, res) => {
     // CLV = average totalSpent per customer (all-time, simple version).
     const clvRow = db.prepare(`
       SELECT COALESCE(AVG(totalSpent), 0) AS clv, COUNT(*) AS n
-      FROM users WHERE totalOrders > 0`).get();
+      FROM users WHERE totalOrders > 0 AND (is_test = 0 OR is_test IS NULL)`).get();
     const clv = Math.round(Number(clvRow.clv) || 0);
 
     // 6-period sparklines: one value per month going back from `to` (or now).
@@ -5269,7 +5376,8 @@ app.get('/api/finance/key-metrics', (req, res) => {
       sparks.inventory_turnover.push(invValue > 0 ? Math.round((agg.cogs * 12 / invValue) * 10) / 10 : 0);
       const mMk = (agg.expensesByCategory && agg.expensesByCategory.marketing) || 0;
       const mNewRow = db.prepare(`
-        SELECT COUNT(*) AS n FROM users WHERE COALESCE(registered_at, firstOrder) >= ? AND COALESCE(registered_at, firstOrder) <= ?`).get(mFrom, mTo);
+        SELECT COUNT(*) AS n FROM users WHERE (is_test = 0 OR is_test IS NULL)
+          AND COALESCE(registered_at, firstOrder) >= ? AND COALESCE(registered_at, firstOrder) <= ?`).get(mFrom, mTo);
       const mNew = Number(mNewRow.n) || 0;
       sparks.cac.push(mNew > 0 ? Math.round(mMk / mNew) : 0);
       // CLV per month is stable (it's an all-time avg) — store same value
@@ -5303,7 +5411,8 @@ app.get('/api/finance/break-even', (_req, res) => {
 
     const fixedRow = db.prepare(`
       SELECT COALESCE(SUM(amount),0) AS amt FROM expenses
-      WHERE type = 'fixed' AND status = 'approved' AND date >= ? AND date <= ?`).get(mFrom, mTo);
+      WHERE type = 'fixed' AND status = 'approved' AND date >= ? AND date <= ?
+        AND (is_test = 0 OR is_test IS NULL)`).get(mFrom, mTo);
     const fixed = Number(fixedRow.amt) || 0;
 
     const agg = aggregateFinance(mFrom, mTo);
@@ -5384,12 +5493,15 @@ app.post('/api/finance/backfill', (req, res) => {
       const agg = aggregateFinance(mFrom, mTo);
       const cf  = computeCashFlow(mFrom, mTo);
       // customers active in the month = distinct userEmail across non-cancelled orders
+      // is_test guards so synthetic smoke runs can't bump the monthly snapshot.
       const custRow = db.prepare(`
         SELECT COUNT(DISTINCT LOWER(userEmail)) AS n FROM orders
-        WHERE status != 'ملغي' AND created_at >= ? AND created_at <= ?`).get(mFrom, mTo + ' 23:59:59');
+        WHERE status != 'ملغي' AND created_at >= ? AND created_at <= ?
+          AND (is_test = 0 OR is_test IS NULL)`).get(mFrom, mTo + ' 23:59:59');
       const newCustRow = db.prepare(`
         SELECT COUNT(*) AS n FROM users
-        WHERE COALESCE(registered_at, firstOrder) >= ? AND COALESCE(registered_at, firstOrder) <= ?`).get(mFrom, mTo + ' 23:59:59');
+        WHERE (is_test = 0 OR is_test IS NULL)
+          AND COALESCE(registered_at, firstOrder) >= ? AND COALESCE(registered_at, firstOrder) <= ?`).get(mFrom, mTo + ' 23:59:59');
       const id = `fms_${y}_${String(m+1).padStart(2,'0')}`;
       upsert.run(
         id, y, m + 1,
@@ -5494,11 +5606,12 @@ app.post('/api/stock-movements/in', (req, res) => {
     if (unitCost > 0) {
       const expId = `ex_${Date.now().toString(36)}_${Math.random().toString(36).slice(2,5)}`;
       db.prepare(`
-        INSERT INTO expenses (id, category, description, quantity, unit_price, amount, date, notes)
-        VALUES (?, 'general', ?, ?, ?, ?, date('now'), ?)
+        INSERT INTO expenses (id, category, description, quantity, unit_price, amount, date, notes, is_test)
+        VALUES (?, 'general', ?, ?, ?, ?, date('now'), ?, ?)
       `).run(expId,
         `وارد — ${product.name}${b.supplier ? ' (' + b.supplier + ')' : ''}`,
-        qty, unitCost, unitCost * qty, b.notes || `حركة #${mvId}`);
+        qty, unitCost, unitCost * qty, b.notes || `حركة #${mvId}`,
+        product.is_test ? 1 : 0);
     }
 
     res.json({ ok: true, movement_id: mvId, available: newAvail });
