@@ -4163,12 +4163,18 @@ function evaluateBudget({ category_id, additionalAmount, dateRef, excludeExpense
   const monthStart = `${ym}-01`;
   const monthEnd   = `${ym}-31`;
 
+  // NOTE: budget rollup intentionally does NOT filter is_test. Budget
+  // approval is a workflow-internal mechanic (it generates inbox messages
+  // for the admin to action), not a customer-facing or business-reporting
+  // metric. The smoke tests for budget overrun rely on their own test
+  // expenses counting toward the budget — excluding them here would make
+  // the overrun logic untestable. Real-money KPIs (Finance summary, cash
+  // flow, CAC/CLV, AOV) all keep their is_test guards.
   const sumRow = db.prepare(`
     SELECT COALESCE(SUM(amount), 0) AS s FROM expenses
     WHERE category_id = ? AND status = 'approved'
       AND date >= ? AND date <= ?
       AND (? IS NULL OR id <> ?)
-      AND (is_test = 0 OR is_test IS NULL)
   `).get(category_id, monthStart, monthEnd, excludeExpenseId || null, excludeExpenseId || null);
   const currentSpent = Number(sumRow.s) || 0;
 
