@@ -4072,12 +4072,36 @@ function aggregateFinance(fromISO, toISO) {
     refunds += Number(r.amount) || 0;
   });
 
-  // Expenses by category in range
+  // Expenses by category in range.
+  //
+  // ACCOUNTING NOTE — the `purchases` category (مشتريات منتجات) is being
+  // deprecated. Buying inventory is NOT an operating expense — it's
+  // converting cash to an asset. Counting it inflates expense totals and
+  // shows fake losses in Net Profit. So:
+  //   · `expensesTotal` excludes purchases (drives Net Profit)
+  //   · `expensesByCategory` excludes purchases too (drives the breakdown
+  //     table on Finance Dashboard — keeps the table semantically clean)
+  //   · `inventoryPurchasesTotal` tracked separately and surfaced in the
+  //     summary response so the dashboard can show a side-note
+  //   · The cash IS still tracked: computeCashFlow() already buckets
+  //     purchases-with-payment-date under cash_out.purchases, so the
+  //     out-of-business cash movement is accurately reflected.
+  //
+  // Historical purchases rows remain visible on the Expenses admin page
+  // (with a deprecation warning banner) so the admin can review and
+  // reclassify them. Future P3 work: build a proper Purchases/Inventory
+  // module that records purchases as asset acquisitions.
   const expensesByCategory = {};
   let expensesTotal = 0;
+  let inventoryPurchasesTotal = 0;
   expenses.forEach(x => {
-    expensesByCategory[x.category] = (expensesByCategory[x.category] || 0) + (Number(x.amount)||0);
-    expensesTotal += Number(x.amount) || 0;
+    const amt = Number(x.amount) || 0;
+    if (x.category === 'purchases') {
+      inventoryPurchasesTotal += amt;
+      return;
+    }
+    expensesByCategory[x.category] = (expensesByCategory[x.category] || 0) + amt;
+    expensesTotal += amt;
   });
 
   const grossProfit = revenue - cogs;
@@ -4107,6 +4131,7 @@ function aggregateFinance(fromISO, toISO) {
     revenue, cogs, grossProfit, expensesTotal, refunds, netProfit, margin,
     grossMargin, netMargin,
     orderCount, expensesByCategory,
+    inventoryPurchasesTotal,             // deprecated category — surfaced for the dashboard note
     topProducts: topByRevenue,           // legacy field — kept for back-compat
     topByRevenue, topByProfit,
     profitByCategory,
@@ -4242,6 +4267,12 @@ app.get('/api/finance/summary', (req, res) => {
       gross_profit:   cur.grossProfit,
       gross_margin_pct: Math.round(cur.grossMargin * 10) / 10,
       expenses_total: cur.expensesTotal,
+      // Inventory purchases are EXCLUDED from expenses_total per the new
+      // accounting model (deprecated category — buying inventory is asset
+      // conversion, not an operating expense). Frontend renders a side-note
+      // on the Cash Flow card when this is > 0 so the admin sees how much
+      // cash went out as inventory acquisition vs operating spend.
+      inventory_purchases_total: cur.inventoryPurchasesTotal || 0,
       net_profit:     cur.netProfit,
       margin_pct:     Math.round(cur.margin * 10) / 10,   // legacy alias
       net_margin_pct: Math.round(cur.netMargin * 10) / 10, // new (spec card 7)

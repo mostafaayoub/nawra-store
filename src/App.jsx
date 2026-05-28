@@ -5199,6 +5199,18 @@ function AdminDash({ go }) {
             const catLabel = (k) => (catByKey[k] || { l:k }).l;
             const catColor = (k) => (catByKey[k] || { color:"#6B7280" }).color;
             const catById  = Object.fromEntries(effCategories.filter(c=>c.id).map(c=>[c.id, c]));
+            // DEPRECATED categories — hidden from the new-expense dropdown +
+            // tab list, but still kept in catByKey so existing rows render
+            // their proper Arabic label. `purchases` (مشتريات منتجات) is the
+            // first to be deprecated: buying inventory is asset conversion,
+            // not an operating expense, so it's been moved out of /summary's
+            // expensesTotal calculation (see api/server.js aggregateFinance).
+            const DEPRECATED_EXPENSE_KEYS = new Set(["purchases"]);
+            const dropdownCategories = effCategories.filter(c => !DEPRECATED_EXPENSE_KEYS.has(c.key));
+            // Rows in the current view that still use a deprecated category —
+            // surfaces the warning banner + count.
+            const deprecatedRows = expenses.filter(e => DEPRECATED_EXPENSE_KEYS.has(e.category));
+            const deprecatedTotal = deprecatedRows.reduce((s, e) => s + (Number(e.amount) || 0), 0);
 
             // ── Totals (approved only — pending/rejected excluded) ───────
             const approved = expenses.filter(e => (e.status || "approved") === "approved");
@@ -5341,6 +5353,22 @@ function AdminDash({ go }) {
 
             return (
               <div>
+                {/* Deprecated-category banner — surfaces when any expense in
+                    the current view uses a category being phased out (today:
+                    purchases). The Finance Dashboard already excludes these
+                    from operating-expense totals; this banner is the admin's
+                    cue to reclassify them. */}
+                {deprecatedRows.length > 0 && (
+                  <div style={{background:"#FEF2F2",border:"1px solid #FCA5A5",color:"#B91C1C",borderRadius:ui.radius,
+                    padding:"10px 14px",marginBottom:12,display:"flex",alignItems:"flex-start",justifyContent:"space-between",gap:10,flexWrap:"wrap"}}>
+                    <div style={{fontSize:12.5,fontFamily:ui.fontBody,lineHeight:1.7}}>
+                      ⚠ <b>{deprecatedRows.length}</b> مصروف{deprecatedRows.length > 1 ? "ات" : ""} بقيمة <b>{Math.round(deprecatedTotal).toLocaleString()} ج</b> يستخدم{deprecatedRows.length > 1 ? "ون" : ""} فئة <b>"مشتريات منتجات"</b>.
+                      <br/>هذه الفئة ستُلغى — مشتريات المنتجات يجب أن تُسجل في وحدة المخزون، لا في المصروفات.
+                      <br/><span style={{fontSize:11.5,color:"#7F1D1D"}}>تم استبعاد هذه المبالغ بالفعل من حساب صافي الربح في لوحة المالية (تُحسب فقط ضمن التدفق النقدي الخارج).</span>
+                    </div>
+                  </div>
+                )}
+
                 {/* Recurring suggestions banner */}
                 {expSugg.length > 0 && (
                   <div style={{background:"#FFFBEB",border:"1px solid #FDE68A",color:"#92400E",borderRadius:ui.radius,
@@ -5436,7 +5464,10 @@ function AdminDash({ go }) {
                     الكل <span style={{background: expCatTab==="all" ? "rgba(255,255,255,.2)" : "#F3F4F6",
                       color: expCatTab==="all" ? "#fff" : ui.textSub,padding:"1px 7px",borderRadius:9,fontSize:11}}>{tabCounts._all}</span>
                   </button>
-                  {effCategories.map(c => (
+                  {/* Deprecated keys excluded from the tab list — they still
+                      render labels for existing rows via catLabel, but no new
+                      categorization should flow through them. */}
+                  {dropdownCategories.map(c => (
                     <button key={c.key} onClick={()=>setExpCatTab(c.key)}
                       style={{display:"flex",alignItems:"center",gap:6,padding:"7px 12px",border:"none",cursor:"pointer",borderRadius:6,
                         background: expCatTab===c.key ? c.color : "transparent",
@@ -5774,7 +5805,8 @@ function AdminDash({ go }) {
                             <select value={expDraft.category_key} onChange={e=>setExpDraft({...expDraft, category_key:e.target.value})}
                               style={{...inputSm, padding:"6px 8px"}}>
                               <option value="">اختر فئة...</option>
-                              {effCategories.map(c => <option key={c.key} value={c.key}>{c.l}</option>)}
+                              {/* dropdownCategories excludes deprecated keys (e.g., purchases). */}
+                              {dropdownCategories.map(c => <option key={c.key} value={c.key}>{c.l}</option>)}
                             </select>
                           </td>
                         )}
@@ -6231,10 +6263,34 @@ function AdminDash({ go }) {
                   {/* Warning banners — products with cost=0, negative cash flow */}
                   {s.cogs_warning_count > 0 && (
                     <div className="no-print" style={{padding:"10px 14px",background:"#FFFBEB",border:"1px solid #FDE68A",color:"#92400E",borderRadius:6,marginBottom:10,fontSize:12.5,fontFamily:ui.fontBody}}>
-                      ⚠ <b>{s.cogs_warning_count}</b> منتج لا يحتوي على تكلفة محددة — تقدير الربح غير دقيق
+                      ⚠ <b>{s.cogs_warning_count}</b> منتج لا يحتوي على تكلفة محددة — تقدير الربح غير دقيق.
                       {s.cogs_warning_products && s.cogs_warning_products.length > 0 && (
-                        <span style={{color:ui.textSub,fontSize:11.5,marginInlineStart:6}}>({s.cogs_warning_products.join(" · ")})</span>
+                        <span style={{marginInlineStart:6}}>
+                          {s.cogs_warning_products.map((name, i) => (
+                            <React.Fragment key={name}>
+                              {i > 0 && <span style={{color:ui.textSub,marginInlineStart:4,marginInlineEnd:4}}>·</span>}
+                              <a href="#admin" onClick={(e)=>{e.preventDefault(); setTab("products");}}
+                                style={{color:"#92400E",textDecoration:"underline",cursor:"pointer"}}>{name}</a>
+                            </React.Fragment>
+                          ))}
+                        </span>
                       )}
+                      <div style={{fontSize:11.5,color:"#9A3412",marginTop:4}}>
+                        افتح صفحة المنتجات وحدّث حقل "التكلفة" لكل منتج لتظهر هوامش الربح الفعلية.
+                      </div>
+                    </div>
+                  )}
+                  {/* Deprecated-category note — surfaces when there are paid
+                      purchases-category expenses in the period. Shows them
+                      bucketed as inventory cash-out so the admin understands
+                      why operating expenses excludes this number. */}
+                  {(s.inventory_purchases_total || 0) > 0 && (
+                    <div className="no-print" style={{padding:"10px 14px",background:"#EFF6FF",border:"1px solid #93C5FD",color:"#1E40AF",borderRadius:6,marginBottom:10,fontSize:12.5,fontFamily:ui.fontBody}}>
+                      ℹ️ <b>{fmt(s.inventory_purchases_total)} ج</b> مشتريات مخزون مُسجَّلة كمصروفات (فئة مُلغاة) — مُستبعدة من إجمالي المصروفات التشغيلية ومن صافي الربح، لكن تظهر في التدفق النقدي الخارج (مشتريات مخزون).
+                      <a href="#admin" onClick={(e)=>{e.preventDefault(); setTab("expenses");}}
+                        style={{color:"#1D4ED8",textDecoration:"underline",cursor:"pointer",marginInlineStart:6}}>
+                        راجع وأعد التصنيف ←
+                      </a>
                     </div>
                   )}
                   {(s.cash_flow || 0) < 0 && (
