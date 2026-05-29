@@ -5664,6 +5664,381 @@ app.patch('/api/purchases/:key', (req, res) => {
   } catch (e) { console.error('PATCH /api/purchases/:key', e); res.status(500).json({ error: e.message }); }
 });
 
+// ════════════════════════════════════════════════════════════════════════════
+// ── Phase 1 Supplier payments endpoints ─────────────────────────────────────
+// ════════════════════════════════════════════════════════════════════════════
+//
+// POST   /api/supplier-payments              create with allocations[]
+// GET    /api/supplier-payments              list with filters
+// GET    /api/supplier-payments/aggregates   KPI cards
+// GET    /api/supplier-payments/:key         hydrated (id or PAY-XXXX)
+// DELETE /api/supplier-payments/:key         reverses allocations, recomputes invoice status
+
+const PAY_DESTRUCTIVE_ROLES = new Set(['super_admin', 'inventory_admin']);
+
+// POST /api/supplier-payments — record a payment with explicit allocations.
+// Body: { supplier_id, amount, payment_date, payment_method, reference_number,
+//         notes, receipt_path, allocations: [{ purchase_invoice_id, amount_allocated }] }
+// Validation: sum(allocations.amount_allocated) MUST equal amount. Each
+// allocated invoice belongs to the same supplier and isn't fully paid yet
+// (allocating more than (total - amount_paid) returns 400).
+app.post('/api/supplier-payments', (req, res) => {
+  try {
+    const b = req.body || {};
+    if (!b.supplier_id) return res.status(400).json({ error: 'supplier_id required' });
+    const amount = Number(b.amount);
+    if (!Number.isFinite(amount) || amount <= 0) return res.status(400).json({ error: 'amount must be > 0' });
+    const supExists = db.prepare('SELECT id FROM suppliers WHERE id = ?').get(b.supplier_id);
+    if (!supExists) return res.status(400).json({ error: 'supplier not found' });
+
+    const allocations = Array.isArray(b.allocations) ? b.allocations : [];
+    if (!allocations.length) return res.status(400).json({ error: 'at least one allocation required' });
+
+    // Validate each allocation referenced invoice belongs to the same supplier
+    // and isn't fully paid.
+    const enrichedAllocs = [];
+    for (const a of allocations) {
+      const allocAmt = Number(a.amount_allocated);
+      if (!Number.isFinite(allocAmt) || allocAmt <= 0) {
+        return res.status(400).json({ error: 'each allocation needs amount_allocated > 0' });
+      }
+      const inv = db.prepare('SELECT * FROM purchase_invoices WHERE id = ?').get(a.purchase_invoice_id);
+      if (!inv) return res.status(400).json({ error: `invoice not found: ${a.purchase_invoice_id}` });
+      if (inv.supplier_id !== b.supplier_id) {
+        return res.status(400).json({ error: `invoice ${inv.invoice_number} belongs to a different supplier` });
+      }
+      if (inv.status === 'cancelled') {
+        return res.status(400).json({ error: `invoice ${inv.invoice_number} is cancelled` });
+      }
+      const owed = (Number(inv.total) || 0) - (Number(inv.amount_paid) || 0);
+      if (allocAmt > owed + 0.001) {
+        return res.status(400).json({ error: `allocation ${allocAmt} exceeds remaining ${owed} on ${inv.invoice_number}` });
+      }
+      enrichedAllocs.push({ ...a, amount_allocated: allocAmt, invoice: inv });
+    }
+
+    // Sum-validate.
+    const allocSum = enrichedAllocs.reduce((s, a) => s + a.amount_allocated, 0);
+    if (Math.abs(allocSum - amount) > 0.01) {
+      return res.status(400).json({ error: `allocation sum ${allocSum} != payment amount ${amount}` });
+    }
+
+    const id = b.id || `pay_${Date.now().toString(36)}_${Math.random().toString(36).slice(2,5)}`;
+    const paymentNumber = b.payment_number || allocateSupplierPaymentNumber();
+    const payDate = b.payment_date || new Date().toISOString().slice(0, 10);
+    const isTest  = b.is_test ? 1 : 0;
+
+    const tx = db.transaction(() => {
+      db.prepare(`
+        INSERT INTO supplier_payments
+          (id, payment_number, supplier_id, amount, payment_date, payment_method,
+           reference_number, receipt_path, notes, is_test, created_by)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?)
+      `).run(
+        id, paymentNumber, b.supplier_id, amount, payDate,
+        b.payment_method || 'cash', b.reference_number || null,
+        b.receipt_path || null, b.notes || null, isTest, b.created_by || null,
+      );
+
+      for (let i = 0; i < enrichedAllocs.length; i++) {
+        const a = enrichedAllocs[i];
+        const allocId = `alc_${Date.now().toString(36)}_${Math.random().toString(36).slice(2,5)}_${i}`;
+        db.prepare(`
+          INSERT INTO supplier_payment_allocations
+            (id, supplier_payment_id, purchase_invoice_id, amount_allocated, is_test)
+          VALUES (?,?,?,?,?)
+        `).run(allocId, id, a.purchase_invoice_id, a.amount_allocated, isTest);
+        // Bump the invoice's amount_paid + recompute payment_status.
+        db.prepare('UPDATE purchase_invoices SET amount_paid = COALESCE(amount_paid, 0) + ? WHERE id = ?')
+          .run(a.amount_allocated, a.purchase_invoice_id);
+        updateInvoicePaymentStatus(a.purchase_invoice_id);
+        recordPurchaseActivity({
+          purchase_invoice_id: a.purchase_invoice_id,
+          event: 'payment_recorded',
+          notes: `دفعة ${paymentNumber} — ${a.amount_allocated.toLocaleString()} ج`,
+          actor_id: b.actor_id || null, actor_name: b.actor_name || null,
+          metadata: { payment_id: id, payment_number: paymentNumber, amount: a.amount_allocated },
+          is_test: isTest,
+        });
+      }
+    });
+    tx();
+
+    const out = db.prepare('SELECT * FROM supplier_payments WHERE id = ?').get(id);
+    out.allocations = db.prepare(`
+      SELECT a.*, pi.invoice_number, pi.total AS invoice_total
+      FROM supplier_payment_allocations a
+      LEFT JOIN purchase_invoices pi ON pi.id = a.purchase_invoice_id
+      WHERE a.supplier_payment_id = ?
+    `).all(id);
+    res.json({ ok: true, ...out });
+  } catch (e) { console.error('POST /api/supplier-payments', e); res.status(500).json({ error: e.message }); }
+});
+
+// GET /api/supplier-payments — list with filters
+app.get('/api/supplier-payments', (req, res) => {
+  try {
+    const { supplier_id, from, to, page, perPage } = req.query;
+    let sql = `
+      SELECT sp.*, s.name AS supplier_name
+      FROM supplier_payments sp
+      LEFT JOIN suppliers s ON s.id = sp.supplier_id
+      WHERE 1=1`;
+    const params = [];
+    if (supplier_id && supplier_id !== 'all') { sql += ' AND sp.supplier_id = ?'; params.push(supplier_id); }
+    if (from) { sql += ' AND sp.payment_date >= ?'; params.push(from); }
+    if (to)   { sql += ' AND sp.payment_date <= ?'; params.push(to); }
+    sql += ' ORDER BY sp.payment_date DESC, sp.created_at DESC';
+
+    const totalRow = db.prepare(`SELECT COUNT(*) AS c FROM (${sql})`).get(...params);
+    const totalRows = totalRow ? totalRow.c : 0;
+    const perPg = Math.max(1, Math.min(100, Number(perPage) || 25));
+    const pg    = Math.max(1, Number(page) || 1);
+    sql += ' LIMIT ? OFFSET ?';
+    params.push(perPg, (pg - 1) * perPg);
+
+    const rows = db.prepare(sql).all(...params).map(r => {
+      const allocs = db.prepare('SELECT COUNT(*) AS n, COALESCE(SUM(amount_allocated), 0) AS sum_alloc FROM supplier_payment_allocations WHERE supplier_payment_id = ?').get(r.id);
+      r.allocations_count = allocs.n;
+      r.allocations_total = Number(allocs.sum_alloc) || 0;
+      return r;
+    });
+    res.json({ rows, total: totalRows, page: pg, perPage: perPg });
+  } catch (e) { console.error('GET /api/supplier-payments', e); res.status(500).json({ error: e.message }); }
+});
+
+// GET /api/supplier-payments/aggregates — KPI cards
+app.get('/api/supplier-payments/aggregates', (_req, res) => {
+  try {
+    const ym = new Date().toISOString().slice(0, 7);
+    const monthRows = db.prepare(`
+      SELECT COALESCE(SUM(amount), 0) AS sum_amount, COUNT(*) AS cnt
+      FROM supplier_payments
+      WHERE (is_test = 0 OR is_test IS NULL)
+        AND payment_date >= ? AND payment_date <= ?
+    `).get(`${ym}-01`, `${ym}-31`);
+    const avgPayment = monthRows.cnt > 0 ? (Number(monthRows.sum_amount) / monthRows.cnt) : 0;
+    res.json({
+      total_month:   Number(monthRows.sum_amount) || 0,
+      count_month:   Number(monthRows.cnt)        || 0,
+      avg_payment:   Math.round(avgPayment),
+    });
+  } catch (e) { console.error('GET /api/supplier-payments/aggregates', e); res.status(500).json({ error: e.message }); }
+});
+
+// GET /api/supplier-payments/:key — by id or PAY-XXXX, hydrated with allocations
+app.get('/api/supplier-payments/:key', (req, res) => {
+  try {
+    const row = String(req.params.key).startsWith('PAY-')
+      ? db.prepare('SELECT * FROM supplier_payments WHERE payment_number = ?').get(req.params.key)
+      : db.prepare('SELECT * FROM supplier_payments WHERE id = ?').get(req.params.key);
+    if (!row) return res.status(404).json({ error: 'not found' });
+    const sup = db.prepare('SELECT * FROM suppliers WHERE id = ?').get(row.supplier_id);
+    const allocs = db.prepare(`
+      SELECT a.*, pi.invoice_number, pi.invoice_date, pi.total AS invoice_total,
+             pi.amount_paid AS invoice_paid, pi.payment_status AS invoice_payment_status
+      FROM supplier_payment_allocations a
+      LEFT JOIN purchase_invoices pi ON pi.id = a.purchase_invoice_id
+      WHERE a.supplier_payment_id = ?
+    `).all(row.id);
+    res.json({ ...row, supplier: sup, allocations: allocs });
+  } catch (e) { console.error('GET /api/supplier-payments/:key', e); res.status(500).json({ error: e.message }); }
+});
+
+// DELETE /api/supplier-payments/:key — reverse allocations, recompute invoice statuses
+app.delete('/api/supplier-payments/:key', (req, res) => {
+  try {
+    const cur = String(req.params.key).startsWith('PAY-')
+      ? db.prepare('SELECT * FROM supplier_payments WHERE payment_number = ?').get(req.params.key)
+      : db.prepare('SELECT * FROM supplier_payments WHERE id = ?').get(req.params.key);
+    if (!cur) return res.status(404).json({ error: 'not found' });
+    if (!PAY_DESTRUCTIVE_ROLES.has(String((req.body || {}).actor_role || '').toLowerCase())) {
+      return res.status(403).json({ error: 'role not permitted to delete a supplier payment' });
+    }
+
+    const tx = db.transaction(() => {
+      const allocs = db.prepare('SELECT * FROM supplier_payment_allocations WHERE supplier_payment_id = ?').all(cur.id);
+      for (const a of allocs) {
+        db.prepare('UPDATE purchase_invoices SET amount_paid = MAX(0, COALESCE(amount_paid, 0) - ?) WHERE id = ?')
+          .run(a.amount_allocated, a.purchase_invoice_id);
+        updateInvoicePaymentStatus(a.purchase_invoice_id);
+        recordPurchaseActivity({
+          purchase_invoice_id: a.purchase_invoice_id,
+          event: 'payment_recorded',
+          notes: `حذف دفعة ${cur.payment_number} — -${a.amount_allocated.toLocaleString()} ج`,
+          actor_id: (req.body || {}).actor_id || null,
+          actor_name: (req.body || {}).actor_name || null,
+          metadata: { reversed_payment_id: cur.id, amount: -a.amount_allocated },
+          is_test: cur.is_test || 0,
+        });
+      }
+      db.prepare('DELETE FROM supplier_payment_allocations WHERE supplier_payment_id = ?').run(cur.id);
+      db.prepare('DELETE FROM supplier_payments WHERE id = ?').run(cur.id);
+    });
+    tx();
+    res.json({ ok: true });
+  } catch (e) { console.error('DELETE /api/supplier-payments/:key', e); res.status(500).json({ error: e.message }); }
+});
+
+// ════════════════════════════════════════════════════════════════════════════
+// ── Phase 1 Enhanced suppliers endpoints ────────────────────────────────────
+// ════════════════════════════════════════════════════════════════════════════
+//
+// The base CRUD /api/suppliers already exists. These additions feed the
+// Suppliers list KPI cards and the per-supplier details page.
+
+// GET /api/suppliers/aggregates — 4 KPI cards
+app.get('/api/suppliers/aggregates', (_req, res) => {
+  try {
+    const total = db.prepare('SELECT COUNT(*) AS n FROM suppliers').get().n;
+    // Active = ≥1 received invoice in last 90 days
+    const ninety = new Date(Date.now() - 90 * 86400000).toISOString().slice(0, 10);
+    const active = db.prepare(`
+      SELECT COUNT(DISTINCT supplier_id) AS n
+      FROM purchase_invoices
+      WHERE status = 'received'
+        AND (is_test = 0 OR is_test IS NULL)
+        AND invoice_date >= ?
+    `).get(ninety).n;
+    // Total Payables = unpaid remainder across all received invoices
+    const payables = db.prepare(`
+      SELECT COALESCE(SUM(total - COALESCE(amount_paid, 0)), 0) AS amount
+      FROM purchase_invoices
+      WHERE status = 'received'
+        AND payment_status != 'paid'
+        AND supplier_id IS NOT NULL
+        AND (is_test = 0 OR is_test IS NULL)
+    `).get().amount;
+    // Average days-to-settle: payment_date - received_date across fully paid invoices.
+    // Cheap heuristic — uses the last payment per invoice.
+    const settleRows = db.prepare(`
+      SELECT pi.received_date, MAX(sp.payment_date) AS last_pay
+      FROM purchase_invoices pi
+      LEFT JOIN supplier_payment_allocations spa ON spa.purchase_invoice_id = pi.id
+      LEFT JOIN supplier_payments sp ON sp.id = spa.supplier_payment_id
+      WHERE pi.payment_status = 'paid'
+        AND pi.received_date IS NOT NULL
+        AND (pi.is_test = 0 OR pi.is_test IS NULL)
+      GROUP BY pi.id
+      HAVING last_pay IS NOT NULL
+    `).all();
+    let avgDays = null;
+    if (settleRows.length) {
+      const sum = settleRows.reduce((s, r) => {
+        const d1 = new Date(r.received_date).getTime();
+        const d2 = new Date(r.last_pay).getTime();
+        return s + Math.max(0, (d2 - d1) / 86400000);
+      }, 0);
+      avgDays = Math.round((sum / settleRows.length) * 10) / 10;
+    }
+    res.json({
+      total_suppliers: total,
+      active_suppliers: active,
+      total_payables: Number(payables) || 0,
+      avg_payment_days: avgDays,
+    });
+  } catch (e) { console.error('GET /api/suppliers/aggregates', e); res.status(500).json({ error: e.message }); }
+});
+
+// GET /api/suppliers/:id/details — full account view for the supplier details page.
+// Lifetime totals + invoice history + payment history + top products supplied.
+app.get('/api/suppliers/:id/details', (req, res) => {
+  try {
+    const sup = db.prepare('SELECT * FROM suppliers WHERE id = ?').get(req.params.id);
+    if (!sup) return res.status(404).json({ error: 'not found' });
+
+    // Lifetime aggregates (excluding test data).
+    const purSummary = db.prepare(`
+      SELECT
+        COUNT(*) AS count,
+        COALESCE(SUM(total), 0) AS sum_total,
+        COALESCE(SUM(amount_paid), 0) AS sum_paid,
+        MIN(invoice_date) AS first_invoice,
+        MAX(invoice_date) AS last_invoice
+      FROM purchase_invoices
+      WHERE supplier_id = ?
+        AND status != 'cancelled'
+        AND (is_test = 0 OR is_test IS NULL)
+    `).get(req.params.id);
+    const paySummary = db.prepare(`
+      SELECT
+        COUNT(*) AS count,
+        COALESCE(SUM(amount), 0) AS sum_amount,
+        MAX(payment_date) AS last_payment
+      FROM supplier_payments
+      WHERE supplier_id = ?
+        AND (is_test = 0 OR is_test IS NULL)
+    `).get(req.params.id);
+    const balance = (Number(purSummary.sum_total) || 0) - (Number(purSummary.sum_paid) || 0);
+    const avgInvoice = purSummary.count > 0 ? (Number(purSummary.sum_total) / purSummary.count) : 0;
+
+    // Invoice history (newest first).
+    const invoices = db.prepare(`
+      SELECT id, invoice_number, invoice_date, received_date, total, amount_paid, payment_status, status
+      FROM purchase_invoices
+      WHERE supplier_id = ?
+      ORDER BY invoice_date DESC, created_at DESC
+      LIMIT 100
+    `).all(req.params.id);
+
+    // Payment history.
+    const payments = db.prepare(`
+      SELECT id, payment_number, payment_date, amount, payment_method, reference_number
+      FROM supplier_payments
+      WHERE supplier_id = ?
+      ORDER BY payment_date DESC, created_at DESC
+      LIMIT 100
+    `).all(req.params.id);
+
+    // Top products supplied by this supplier.
+    const topProducts = db.prepare(`
+      SELECT
+        p.id, p.name,
+        SUM(pii.quantity) AS qty_total,
+        AVG(pii.effective_unit_cost) AS avg_cost,
+        MAX(pi.received_date) AS last_supplied,
+        (SELECT pii2.effective_unit_cost FROM purchase_invoice_items pii2
+         JOIN purchase_invoices pi2 ON pi2.id = pii2.purchase_invoice_id
+         WHERE pii2.product_id = p.id AND pi2.supplier_id = ?
+           AND pi2.status != 'cancelled'
+         ORDER BY pi2.received_date DESC, pii2.created_at DESC LIMIT 1) AS last_cost
+      FROM purchase_invoice_items pii
+      JOIN purchase_invoices pi ON pi.id = pii.purchase_invoice_id
+      JOIN products p           ON p.id = pii.product_id
+      WHERE pi.supplier_id = ?
+        AND pi.status != 'cancelled'
+        AND (pi.is_test = 0 OR pi.is_test IS NULL)
+      GROUP BY p.id, p.name
+      ORDER BY qty_total DESC
+      LIMIT 10
+    `).all(req.params.id, req.params.id);
+
+    res.json({
+      ...sup,
+      summary: {
+        lifetime_purchases: Number(purSummary.sum_total) || 0,
+        lifetime_payments:  Number(paySummary.sum_amount) || 0,
+        balance,                                       // >0 = you owe him; <0 = he owes you
+        avg_invoice_value:  Math.round(avgInvoice),
+        invoice_count:      Number(purSummary.count) || 0,
+        payment_count:      Number(paySummary.count) || 0,
+        first_invoice:      purSummary.first_invoice,
+        last_invoice:       purSummary.last_invoice,
+        last_payment:       paySummary.last_payment,
+      },
+      invoices,
+      payments,
+      top_products: topProducts.map(p => ({
+        id: p.id, name: p.name,
+        qty_total: Number(p.qty_total) || 0,
+        avg_cost:  Math.round((Number(p.avg_cost) || 0) * 100) / 100,
+        last_cost: Math.round((Number(p.last_cost) || 0) * 100) / 100,
+        last_supplied: p.last_supplied,
+      })),
+    });
+  } catch (e) { console.error('GET /api/suppliers/:id/details', e); res.status(500).json({ error: e.message }); }
+});
+
 // DELETE /api/purchases/:key — hard-delete (draft only). For received invoices,
 // you must cancel first (which reverses stock). Then deletion is allowed.
 app.delete('/api/purchases/:key', (req, res) => {
