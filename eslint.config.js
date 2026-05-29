@@ -30,6 +30,22 @@ export default [
       // ── Rules that catch missing imports / undefined refs ───────────
       'no-undef': 'error',                  // catches bare identifiers
       'react/jsx-no-undef': 'error',        // catches <Component/> where Component isn't in scope (the bug that crashed the customer details page on 2026-05-23)
+      // catches const/let referenced before its declaration — the bug that
+      // took the admin panel down on 2026-05-29 (Phase 2 _t TDZ error).
+      // functions: false → hoisted function decls are allowed
+      // variables: true  → const/let MUST be declared before use
+      // classes: true    → class hoisting is illegal anyway
+      //
+      // Strict across all NEW code. App.jsx has 65 textual-order references
+      // inside callback bodies (hooks declared late in AdminDash, used in
+      // inline functions defined earlier). They are NOT runtime TDZ — the
+      // callbacks only fire after mount, by which point the hooks have run.
+      // The override below relaxes this rule for App.jsx until that file
+      // can be refactored to hoist all hook declarations to top-of-function.
+      // The real defence against runtime TDZ in App.jsx is browser-level
+      // verification (verify_admin_bundle.js — mounts the bundle in real
+      // Chrome after every deploy and reports pageerror immediately).
+      'no-use-before-define': ['error', { functions: false, classes: true, variables: true }],
       // ── React hooks rules per user's request ────────────────────────
       'react-hooks/rules-of-hooks': 'error',
       'react-hooks/exhaustive-deps': 'warn',
@@ -51,6 +67,21 @@ export default [
       'no-empty': ['warn', { allowEmptyCatch: true }],
       // Some inner-loop awaits are intentional (sequential side effects).
       'no-constant-binary-expression': 'warn',
+    },
+  },
+  // ── App.jsx override (temporary) ────────────────────────────────────────
+  // AdminDash declares useState/useCallback/useAuth/useRef late in the
+  // function body, and inline callbacks defined earlier reference those
+  // hooks. Lint sees text-order violations, but runtime is safe (closures
+  // resolve at call time, callbacks only fire after mount). 65 violations
+  // → warn so they stay visible without blocking the build.
+  // TODO: refactor AdminDash to hoist all hooks to top of function, then
+  // delete this override block. Track via the runtime verifier
+  // (verify_admin_bundle.js) which catches the actual TDZ bug class.
+  {
+    files: ['src/App.jsx'],
+    rules: {
+      'no-use-before-define': ['warn', { functions: false, classes: true, variables: true }],
     },
   },
 ];
