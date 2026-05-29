@@ -5227,6 +5227,470 @@ app.delete('/api/suppliers/:id', (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
+// ════════════════════════════════════════════════════════════════════════════
+// ── Phase 1 Purchases endpoints ─────────────────────────────────────────────
+// ════════════════════════════════════════════════════════════════════════════
+//
+// POST   /api/purchases                 create (draft or received)
+// GET    /api/purchases                 list with filters
+// GET    /api/purchases/aggregates      KPI cards
+// GET    /api/purchases/:key            details (id or PUR-XXXX), hydrated
+// PATCH  /api/purchases/:key            update (status transitions, payment, items)
+// DELETE /api/purchases/:key            hard-delete (draft only)
+// POST   /api/purchases/opening-balance shorthand for is_opening_balance flow
+
+// Status flow:
+//   draft → received  → applies WAC + stock + activity
+//   draft → cancelled → just status flip
+//   received → cancelled → reverses stock + recomputes WAC by replay
+//
+// Permission: any admin can create/list/view. Cancel/delete require super_admin
+// or inventory_admin role (مشرف مخزون). Body-level actor_role enforces this
+// soft-check pattern consistent with the rest of the codebase.
+
+const PUR_DESTRUCTIVE_ROLES = new Set(['super_admin', 'inventory_admin']);
+
+// Helper used by POST + PATCH: take a body with items[] + landed-cost fields,
+// recompute the invoice subtotal/total + each item's effective_unit_cost. The
+// caller persists the result; this is pure math.
+function computeInvoiceTotals({ items, shipping_cost, customs_fees, other_costs, landed_basis }) {
+  const ship = Number(shipping_cost) || 0;
+  const cust = Number(customs_fees)  || 0;
+  const oth  = Number(other_costs)   || 0;
+  const enriched = distributeLandedCost(items || [], { shipping_cost: ship, customs_fees: cust, other_costs: oth }, landed_basis || 'value');
+  const subtotal = enriched.reduce((s, it) => s + ((Number(it.unit_cost) || 0) * (Number(it.quantity) || 0)), 0);
+  return {
+    items: enriched.map(it => ({
+      ...it,
+      line_total: (Number(it.unit_cost) || 0) * (Number(it.quantity) || 0),
+    })),
+    subtotal,
+    shipping_cost: ship,
+    customs_fees:  cust,
+    other_costs:   oth,
+    total: subtotal + ship + cust + oth,
+  };
+}
+
+// Apply (or re-apply) every item in an invoice to its product — used when
+// status transitions to 'received'. Runs inside a caller-provided transaction.
+function applyInvoiceItems(invoice, items) {
+  for (const it of items) {
+    applyPurchaseToProduct({
+      product_id:          it.product_id,
+      quantity:            it.quantity,
+      effective_unit_cost: it.effective_unit_cost,
+      invoice,
+      item_id:             it.id,
+    });
+  }
+}
+
+// POST /api/purchases — create a new purchase invoice
+app.post('/api/purchases', (req, res) => {
+  try {
+    const b = req.body || {};
+    const isOpening = !!b.is_opening_balance;
+    if (!isOpening && !b.supplier_id) return res.status(400).json({ error: 'supplier_id required (or set is_opening_balance=1)' });
+    const itemsIn = Array.isArray(b.items) ? b.items : [];
+    if (!itemsIn.length) return res.status(400).json({ error: 'at least one item required' });
+    for (const it of itemsIn) {
+      if (!it.product_id) return res.status(400).json({ error: 'each item needs product_id' });
+      if ((Number(it.quantity) || 0) <= 0) return res.status(400).json({ error: 'each item needs quantity > 0' });
+      if ((Number(it.unit_cost) || 0) < 0) return res.status(400).json({ error: 'unit_cost cannot be negative' });
+    }
+    if (b.supplier_id && !isOpening) {
+      const supExists = db.prepare('SELECT id FROM suppliers WHERE id = ?').get(b.supplier_id);
+      if (!supExists) return res.status(400).json({ error: 'supplier not found' });
+    }
+
+    const computed = computeInvoiceTotals({
+      items: itemsIn,
+      shipping_cost: b.shipping_cost,
+      customs_fees:  b.customs_fees,
+      other_costs:   b.other_costs,
+      landed_basis:  b.landed_basis || 'value',
+    });
+
+    const id = b.id || `pur_${Date.now().toString(36)}_${Math.random().toString(36).slice(2,5)}`;
+    const invoiceNumber = b.invoice_number || allocatePurchaseInvoiceNumber();
+    const status = b.status === 'received' ? 'received' : 'draft';
+    const today = new Date().toISOString().slice(0, 10);
+    const invoiceDate  = b.invoice_date  || today;
+    const receivedDate = status === 'received' ? (b.received_date || new Date().toISOString().slice(0, 19).replace('T', ' ')) : (b.received_date || null);
+    const isTest = b.is_test ? 1 : 0;
+
+    // Payment math. amount_paid arrives optionally; status follows.
+    const amountPaid = Math.max(0, Number(b.amount_paid) || 0);
+    const initialPayStatus = amountPaid <= 0 ? 'unpaid' : (amountPaid >= computed.total ? 'paid' : 'partial');
+
+    const tx = db.transaction(() => {
+      db.prepare(`
+        INSERT INTO purchase_invoices
+          (id, invoice_number, supplier_id, supplier_invoice_ref, is_opening_balance,
+           invoice_date, received_date, due_date,
+           subtotal, shipping_cost, customs_fees, other_costs, total, landed_basis,
+           payment_method, payment_status, amount_paid,
+           status, notes, internal_notes, is_test, created_by)
+        VALUES (?,?,?,?,?, ?,?,?, ?,?,?,?,?,?, ?,?,?, ?,?,?,?,?)
+      `).run(
+        id, invoiceNumber, isOpening ? null : b.supplier_id, b.supplier_invoice_ref || null, isOpening ? 1 : 0,
+        invoiceDate, receivedDate, b.due_date || null,
+        computed.subtotal, computed.shipping_cost, computed.customs_fees, computed.other_costs, computed.total, b.landed_basis || 'value',
+        b.payment_method || (isOpening ? 'opening_balance' : 'cash'),
+        initialPayStatus, amountPaid,
+        status, b.notes || null, b.internal_notes || null, isTest, b.created_by || null,
+      );
+
+      const itemsInserted = [];
+      for (const it of computed.items) {
+        const itemId = it.id || `pii_${Date.now().toString(36)}_${Math.random().toString(36).slice(2,5)}_${itemsInserted.length}`;
+        db.prepare(`
+          INSERT INTO purchase_invoice_items
+            (id, purchase_invoice_id, product_id, quantity, unit_cost,
+             allocated_landed_cost, effective_unit_cost, line_total, notes, is_test)
+          VALUES (?,?,?,?,?,?,?,?,?,?)
+        `).run(
+          itemId, id, String(it.product_id),
+          Number(it.quantity) || 0, Number(it.unit_cost) || 0,
+          Number(it.allocated_landed_cost) || 0, Number(it.effective_unit_cost) || 0,
+          Number(it.line_total) || 0, it.notes || null, isTest,
+        );
+        itemsInserted.push({ ...it, id: itemId });
+      }
+
+      recordPurchaseActivity({
+        purchase_invoice_id: id,
+        event: 'created',
+        notes: isOpening ? 'فاتورة رصيد افتتاحي' : 'تم إنشاء الفاتورة',
+        actor_id: b.actor_id || b.created_by || null,
+        actor_name: b.actor_name || null,
+        metadata: { invoice_number: invoiceNumber, supplier_id: b.supplier_id || null, total: computed.total, is_opening_balance: isOpening },
+        is_test: isTest,
+      });
+
+      // If created directly as 'received' (or opening balance, which is
+      // received-on-create by nature), apply WAC + stock now.
+      if (status === 'received' || isOpening) {
+        const invoiceForApply = {
+          id, invoice_number: invoiceNumber, received_date: receivedDate || invoiceDate,
+          created_by: b.created_by || null,
+        };
+        applyInvoiceItems(invoiceForApply, itemsInserted);
+        if (status !== 'received') {
+          // Opening balance: still mark as received state.
+          db.prepare("UPDATE purchase_invoices SET status = 'received' WHERE id = ?").run(id);
+        }
+        recordPurchaseActivity({
+          purchase_invoice_id: id,
+          event: 'received',
+          notes: 'تم استلام البضاعة وتحديث المخزون',
+          actor_id: b.actor_id || null, actor_name: b.actor_name || null,
+          metadata: { items_count: itemsInserted.length },
+          is_test: isTest,
+        });
+      }
+    });
+    tx();
+
+    const hydrated = hydratePurchaseInvoice(id);
+    res.json({ ok: true, ...hydrated });
+  } catch (e) { console.error('POST /api/purchases', e); res.status(500).json({ error: e.message }); }
+});
+
+// POST /api/purchases/opening-balance — shorthand for setting up initial stock
+// with no associated supplier owed (cash-equivalent injection of inventory).
+// Just delegates to POST /api/purchases with is_opening_balance=1.
+app.post('/api/purchases/opening-balance', (req, res) => {
+  try {
+    const b = req.body || {};
+    req.body = {
+      ...b,
+      is_opening_balance: 1,
+      supplier_id: null,
+      status: 'received',
+      payment_method: 'opening_balance',
+      amount_paid: 0,
+      notes: b.notes || 'رصيد افتتاحي — تأسيس مخزون',
+    };
+    // Reuse the main POST handler.
+    return app._router.handle({ ...req, url: '/api/purchases', method: 'POST' }, res, () => {});
+  } catch (e) { console.error('POST /api/purchases/opening-balance', e); res.status(500).json({ error: e.message }); }
+});
+
+// GET /api/purchases — list with filters
+app.get('/api/purchases', (req, res) => {
+  try {
+    const { q, supplier_id, status, payment_status, from, to, sort, page, perPage } = req.query;
+    let sql = `
+      SELECT pi.*, s.name AS supplier_name
+      FROM purchase_invoices pi
+      LEFT JOIN suppliers s ON s.id = pi.supplier_id
+      WHERE 1=1`;
+    const params = [];
+    if (q) {
+      sql += ` AND (pi.invoice_number LIKE ? OR s.name LIKE ? OR pi.supplier_invoice_ref LIKE ?
+                  OR EXISTS (SELECT 1 FROM purchase_invoice_items i
+                             LEFT JOIN products p ON p.id = i.product_id
+                             WHERE i.purchase_invoice_id = pi.id AND p.name LIKE ?))`;
+      const like = `%${q}%`;
+      params.push(like, like, like, like);
+    }
+    if (supplier_id && supplier_id !== 'all') { sql += ' AND pi.supplier_id = ?'; params.push(supplier_id); }
+    if (status && status !== 'all')           { sql += ' AND pi.status = ?'; params.push(status); }
+    if (payment_status && payment_status !== 'all') { sql += ' AND pi.payment_status = ?'; params.push(payment_status); }
+    if (from) { sql += ' AND pi.invoice_date >= ?'; params.push(from); }
+    if (to)   { sql += ' AND pi.invoice_date <= ?'; params.push(to); }
+
+    // Default newest first.
+    if (sort === 'highest')     sql += ' ORDER BY pi.total DESC, pi.invoice_date DESC';
+    else if (sort === 'due')    sql += ' ORDER BY pi.due_date ASC NULLS LAST, pi.invoice_date DESC';
+    else                        sql += ' ORDER BY pi.invoice_date DESC, pi.created_at DESC';
+
+    const totalRow = db.prepare(`SELECT COUNT(*) AS c FROM (${sql})`).get(...params);
+    const totalRows = totalRow ? totalRow.c : 0;
+
+    const perPg = Math.max(1, Math.min(100, Number(perPage) || 25));
+    const pg    = Math.max(1, Number(page) || 1);
+    sql += ' LIMIT ? OFFSET ?';
+    params.push(perPg, (pg - 1) * perPg);
+
+    const rows = db.prepare(sql).all(...params).map(r => {
+      r.items_count = db.prepare('SELECT COUNT(*) AS n FROM purchase_invoice_items WHERE purchase_invoice_id = ?').get(r.id).n;
+      return r;
+    });
+    res.json({ rows, total: totalRows, page: pg, perPage: perPg });
+  } catch (e) { console.error('GET /api/purchases', e); res.status(500).json({ error: e.message }); }
+});
+
+// GET /api/purchases/aggregates — KPI cards (current month)
+app.get('/api/purchases/aggregates', (_req, res) => {
+  try {
+    const ym = new Date().toISOString().slice(0, 7);
+    const monthRows = db.prepare(`
+      SELECT COALESCE(SUM(total), 0) AS sum_total, COUNT(*) AS cnt
+      FROM purchase_invoices
+      WHERE status != 'cancelled'
+        AND (is_test = 0 OR is_test IS NULL)
+        AND invoice_date >= ? AND invoice_date <= ?
+    `).get(`${ym}-01`, `${ym}-31`);
+
+    const unpaidRows = db.prepare(`
+      SELECT COALESCE(SUM(total - COALESCE(amount_paid, 0)), 0) AS amount, COUNT(*) AS cnt
+      FROM purchase_invoices
+      WHERE status = 'received'
+        AND payment_status != 'paid'
+        AND (is_test = 0 OR is_test IS NULL)
+    `).get();
+
+    const topSupplier = db.prepare(`
+      SELECT pi.supplier_id, s.name, COALESCE(SUM(pi.total), 0) AS total_value
+      FROM purchase_invoices pi
+      LEFT JOIN suppliers s ON s.id = pi.supplier_id
+      WHERE pi.status != 'cancelled'
+        AND pi.supplier_id IS NOT NULL
+        AND (pi.is_test = 0 OR pi.is_test IS NULL)
+        AND pi.invoice_date >= ? AND pi.invoice_date <= ?
+      GROUP BY pi.supplier_id, s.name
+      ORDER BY total_value DESC
+      LIMIT 1
+    `).get(`${ym}-01`, `${ym}-31`);
+
+    const counts = {
+      total:     db.prepare("SELECT COUNT(*) AS n FROM purchase_invoices WHERE (is_test = 0 OR is_test IS NULL)").get().n,
+      draft:     db.prepare("SELECT COUNT(*) AS n FROM purchase_invoices WHERE status = 'draft'     AND (is_test = 0 OR is_test IS NULL)").get().n,
+      received:  db.prepare("SELECT COUNT(*) AS n FROM purchase_invoices WHERE status = 'received'  AND (is_test = 0 OR is_test IS NULL)").get().n,
+      cancelled: db.prepare("SELECT COUNT(*) AS n FROM purchase_invoices WHERE status = 'cancelled' AND (is_test = 0 OR is_test IS NULL)").get().n,
+    };
+    const avgInvoice = monthRows.cnt > 0 ? (Number(monthRows.sum_total) / monthRows.cnt) : 0;
+
+    res.json({
+      counts,
+      total_month:        Number(monthRows.sum_total) || 0,
+      count_month:        Number(monthRows.cnt)       || 0,
+      avg_invoice_month:  Math.round(avgInvoice),
+      unpaid_total:       Number(unpaidRows.amount)   || 0,
+      unpaid_count:       Number(unpaidRows.cnt)      || 0,
+      top_supplier:       topSupplier
+        ? { id: topSupplier.supplier_id, name: topSupplier.name, total: Number(topSupplier.total_value) || 0 }
+        : null,
+    });
+  } catch (e) { console.error('GET /api/purchases/aggregates', e); res.status(500).json({ error: e.message }); }
+});
+
+// GET /api/purchases/:key — details by id or PUR-XXXX
+app.get('/api/purchases/:key', (req, res) => {
+  try {
+    const hydrated = hydratePurchaseInvoice(req.params.key);
+    if (!hydrated) return res.status(404).json({ error: 'not found' });
+    res.json(hydrated);
+  } catch (e) { console.error('GET /api/purchases/:key', e); res.status(500).json({ error: e.message }); }
+});
+
+// PATCH /api/purchases/:key — update notes / payment / status / items
+// Status transitions:
+//   draft → received   : apply items to products
+//   received → cancelled : reverse stock for each item, replay-recompute WAC
+//   * → cancelled (from draft) : just flip
+app.patch('/api/purchases/:key', (req, res) => {
+  try {
+    const cur = (String(req.params.key).startsWith('PUR-')
+      ? db.prepare('SELECT * FROM purchase_invoices WHERE invoice_number = ?').get(req.params.key)
+      : db.prepare('SELECT * FROM purchase_invoices WHERE id = ?').get(req.params.key));
+    if (!cur) return res.status(404).json({ error: 'not found' });
+    const b = req.body || {};
+    const newStatus = b.status;
+    const isCancel  = newStatus === 'cancelled' && cur.status !== 'cancelled';
+    if (isCancel && !PUR_DESTRUCTIVE_ROLES.has(String(b.actor_role || '').toLowerCase())) {
+      return res.status(403).json({ error: 'role not permitted to cancel a purchase invoice' });
+    }
+
+    const sets = [];
+    const vals = [];
+
+    // Editable scalars when status === 'draft' OR when only payment fields change.
+    const isDraft = cur.status === 'draft';
+    if (isDraft) {
+      for (const f of ['supplier_id', 'supplier_invoice_ref', 'invoice_date', 'received_date', 'due_date',
+                       'landed_basis', 'payment_method', 'notes', 'internal_notes']) {
+        if (Object.prototype.hasOwnProperty.call(b, f)) { sets.push(`${f} = ?`); vals.push(b[f]); }
+      }
+    } else {
+      // Post-received: only payment/notes editable.
+      for (const f of ['payment_method', 'notes', 'internal_notes', 'due_date']) {
+        if (Object.prototype.hasOwnProperty.call(b, f)) { sets.push(`${f} = ?`); vals.push(b[f]); }
+      }
+    }
+
+    const tx = db.transaction(() => {
+      // Replace items if provided (draft only).
+      if (isDraft && Array.isArray(b.items)) {
+        db.prepare('DELETE FROM purchase_invoice_items WHERE purchase_invoice_id = ?').run(cur.id);
+        const computed = computeInvoiceTotals({
+          items: b.items,
+          shipping_cost: b.shipping_cost != null ? b.shipping_cost : cur.shipping_cost,
+          customs_fees:  b.customs_fees  != null ? b.customs_fees  : cur.customs_fees,
+          other_costs:   b.other_costs   != null ? b.other_costs   : cur.other_costs,
+          landed_basis:  b.landed_basis  || cur.landed_basis,
+        });
+        for (const it of computed.items) {
+          const itemId = `pii_${Date.now().toString(36)}_${Math.random().toString(36).slice(2,5)}`;
+          db.prepare(`
+            INSERT INTO purchase_invoice_items
+              (id, purchase_invoice_id, product_id, quantity, unit_cost,
+               allocated_landed_cost, effective_unit_cost, line_total, notes, is_test)
+            VALUES (?,?,?,?,?,?,?,?,?,?)
+          `).run(itemId, cur.id, String(it.product_id), Number(it.quantity) || 0, Number(it.unit_cost) || 0,
+                 Number(it.allocated_landed_cost) || 0, Number(it.effective_unit_cost) || 0,
+                 Number(it.line_total) || 0, it.notes || null, cur.is_test ? 1 : 0);
+        }
+        sets.push('subtotal = ?', 'shipping_cost = ?', 'customs_fees = ?', 'other_costs = ?', 'total = ?');
+        vals.push(computed.subtotal, computed.shipping_cost, computed.customs_fees, computed.other_costs, computed.total);
+      }
+
+      if (sets.length) {
+        sets.push("updated_at = datetime('now')");
+        vals.push(cur.id);
+        db.prepare(`UPDATE purchase_invoices SET ${sets.join(', ')} WHERE id = ?`).run(...vals);
+        recordPurchaseActivity({
+          purchase_invoice_id: cur.id, event: 'edited',
+          notes: 'تم تعديل بيانات الفاتورة',
+          actor_id: b.actor_id || null, actor_name: b.actor_name || null,
+          is_test: cur.is_test,
+        });
+      }
+
+      // Now handle status transitions.
+      if (newStatus && newStatus !== cur.status) {
+        if (cur.status === 'draft' && newStatus === 'received') {
+          // Apply.
+          const items = db.prepare('SELECT * FROM purchase_invoice_items WHERE purchase_invoice_id = ?').all(cur.id);
+          const fresh = db.prepare('SELECT * FROM purchase_invoices WHERE id = ?').get(cur.id);
+          const rec = b.received_date || new Date().toISOString().slice(0, 19).replace('T', ' ');
+          db.prepare("UPDATE purchase_invoices SET status = 'received', received_date = COALESCE(?, received_date), updated_at = datetime('now') WHERE id = ?").run(rec, cur.id);
+          applyInvoiceItems({ ...fresh, received_date: rec }, items);
+          recordPurchaseActivity({
+            purchase_invoice_id: cur.id, event: 'received',
+            notes: 'تم استلام البضاعة وتحديث المخزون',
+            actor_id: b.actor_id || null, actor_name: b.actor_name || null,
+            metadata: { items_count: items.length },
+            is_test: cur.is_test,
+          });
+        } else if (newStatus === 'cancelled') {
+          // Reverse if previously received.
+          const items = db.prepare('SELECT * FROM purchase_invoice_items WHERE purchase_invoice_id = ?').all(cur.id);
+          if (cur.status === 'received') {
+            const fresh = db.prepare('SELECT * FROM purchase_invoices WHERE id = ?').get(cur.id);
+            for (const it of items) {
+              reverseStockForPurchaseLine({
+                product_id: it.product_id,
+                quantity:   it.quantity,
+                invoice:    fresh,
+              });
+            }
+          }
+          db.prepare("UPDATE purchase_invoices SET status = 'cancelled', updated_at = datetime('now') WHERE id = ?").run(cur.id);
+          // After cancel, recompute WAC for every affected product.
+          const distinctProductIds = [...new Set(items.map(i => i.product_id))];
+          for (const pid of distinctProductIds) recomputeWacByReplay(pid);
+          recordPurchaseActivity({
+            purchase_invoice_id: cur.id, event: 'cancelled',
+            notes: b.cancel_reason || 'تم إلغاء الفاتورة',
+            actor_id: b.actor_id || null, actor_name: b.actor_name || null,
+            metadata: { affected_products: distinctProductIds.length },
+            is_test: cur.is_test,
+          });
+        }
+      }
+
+      // Payment update (allow on any non-cancelled invoice).
+      if (Object.prototype.hasOwnProperty.call(b, 'amount_paid')) {
+        const amt = Math.max(0, Number(b.amount_paid) || 0);
+        db.prepare('UPDATE purchase_invoices SET amount_paid = ? WHERE id = ?').run(amt, cur.id);
+        updateInvoicePaymentStatus(cur.id);
+        recordPurchaseActivity({
+          purchase_invoice_id: cur.id, event: 'payment_recorded',
+          notes: `تم تسجيل دفعة بقيمة ${amt.toLocaleString()} ج`,
+          actor_id: b.actor_id || null, actor_name: b.actor_name || null,
+          metadata: { amount_paid: amt },
+          is_test: cur.is_test,
+        });
+      }
+    });
+    tx();
+
+    const hydrated = hydratePurchaseInvoice(cur.id);
+    res.json({ ok: true, ...hydrated });
+  } catch (e) { console.error('PATCH /api/purchases/:key', e); res.status(500).json({ error: e.message }); }
+});
+
+// DELETE /api/purchases/:key — hard-delete (draft only). For received invoices,
+// you must cancel first (which reverses stock). Then deletion is allowed.
+app.delete('/api/purchases/:key', (req, res) => {
+  try {
+    const cur = (String(req.params.key).startsWith('PUR-')
+      ? db.prepare('SELECT * FROM purchase_invoices WHERE invoice_number = ?').get(req.params.key)
+      : db.prepare('SELECT * FROM purchase_invoices WHERE id = ?').get(req.params.key));
+    if (!cur) return res.status(404).json({ error: 'not found' });
+    if (!PUR_DESTRUCTIVE_ROLES.has(String((req.body || {}).actor_role || '').toLowerCase())) {
+      return res.status(403).json({ error: 'role not permitted to delete a purchase invoice' });
+    }
+    if (cur.status === 'received') {
+      return res.status(409).json({ error: 'cancel before deleting; received invoices have side-effects on stock' });
+    }
+    const tx = db.transaction(() => {
+      // Allocations should be detached first (rare for drafts but defensive).
+      db.prepare('DELETE FROM supplier_payment_allocations WHERE purchase_invoice_id = ?').run(cur.id);
+      db.prepare('DELETE FROM purchase_invoice_items       WHERE purchase_invoice_id = ?').run(cur.id);
+      db.prepare('DELETE FROM purchase_attachments         WHERE purchase_invoice_id = ?').run(cur.id);
+      db.prepare('DELETE FROM purchase_activity_log        WHERE purchase_invoice_id = ?').run(cur.id);
+      db.prepare('DELETE FROM purchase_invoices            WHERE id = ?').run(cur.id);
+    });
+    tx();
+    res.json({ ok: true });
+  } catch (e) { console.error('DELETE /api/purchases/:key', e); res.status(500).json({ error: e.message }); }
+});
+
 // ── Category budgets (one row per category) ─────────────────────────────────
 app.get('/api/expense-budgets', (req, res) => {
   try {
