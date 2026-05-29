@@ -5234,8 +5234,26 @@ function hydratePurchaseInvoice(key) {
 
 app.get('/api/suppliers', (req, res) => {
   try {
-    const rows = db.prepare('SELECT * FROM suppliers WHERE active = 1 ORDER BY name').all();
-    res.json(rows);
+    // ?all=1 includes inactive suppliers (admin page needs them);
+    // default keeps the old behaviour (active only — used by dropdowns).
+    const includeAll = req.query.all === '1';
+    const sql = includeAll
+      ? `SELECT s.*,
+                (SELECT COUNT(*) FROM purchase_invoices pi
+                  WHERE pi.supplier_id = s.id AND pi.status != 'cancelled'
+                    AND (pi.is_test = 0 OR pi.is_test IS NULL)) AS invoice_count,
+                (SELECT COALESCE(SUM(pi.total), 0) FROM purchase_invoices pi
+                  WHERE pi.supplier_id = s.id AND pi.status != 'cancelled'
+                    AND (pi.is_test = 0 OR pi.is_test IS NULL)) AS total_purchases,
+                (SELECT COALESCE(SUM(pi.total - COALESCE(pi.amount_paid, 0)), 0) FROM purchase_invoices pi
+                  WHERE pi.supplier_id = s.id AND pi.status = 'received' AND pi.payment_status != 'paid'
+                    AND (pi.is_test = 0 OR pi.is_test IS NULL)) AS balance,
+                (SELECT MAX(pi.invoice_date) FROM purchase_invoices pi
+                  WHERE pi.supplier_id = s.id AND pi.status != 'cancelled'
+                    AND (pi.is_test = 0 OR pi.is_test IS NULL)) AS last_invoice_date
+         FROM suppliers s ORDER BY s.name`
+      : 'SELECT * FROM suppliers WHERE active = 1 ORDER BY name';
+    res.json(db.prepare(sql).all());
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 app.post('/api/suppliers', (req, res) => {
