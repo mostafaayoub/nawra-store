@@ -2563,8 +2563,57 @@ app.patch('/api/products/:id', (req, res) => {
 
 app.delete('/api/products/:id', (req, res) => {
   try {
-    db.prepare('DELETE FROM product_variants WHERE product_id = ?').run(req.params.id);
-    const info = db.prepare('DELETE FROM products WHERE id = ?').run(req.params.id);
+    // Block deletion when ANY non-test row references this product. Same
+    // referential-integrity pattern used by couriers/shipping_zones (those
+    // refuse delete when shipments reference them — see /api/shipping/*).
+    // Real rows (is_test=0/NULL) only — smoke residue doesn't block.
+    const pid = req.params.id;
+    // Smoke-created products (is_test=1) bypass the guard so atexit cleanup
+    // never gets stuck on synthetic history rows. Real products get blocked.
+    const productRow = db.prepare('SELECT is_test FROM products WHERE id = ?').get(pid);
+    if (!productRow) return res.status(404).json({ error: 'not found' });
+    const isTestProduct = !!productRow.is_test;
+
+    // Purchase invoice items — the asset-trail. Once a product has
+    // purchase history, deleting it would orphan the WAC inputs and any
+    // future replay would silently drop the row.
+    const purItems = db.prepare(
+      "SELECT COUNT(*) AS n FROM purchase_invoice_items i " +
+      "JOIN purchase_invoices pi ON pi.id = i.purchase_invoice_id " +
+      "WHERE i.product_id = ? AND (pi.is_test = 0 OR pi.is_test IS NULL)"
+    ).get(pid).n;
+
+    // Stock movements — audit trail. Same reasoning.
+    const moves = db.prepare("SELECT COUNT(*) AS n FROM stock_movements WHERE product_id = ?").get(pid).n;
+
+    // Return items pointing at this product.
+    const retItems = db.prepare(
+      "SELECT COUNT(*) AS n FROM return_items ri " +
+      "JOIN returns r ON r.id = ri.return_id " +
+      "WHERE ri.product_id = ? AND (r.is_test = 0 OR r.is_test IS NULL)"
+    ).get(pid).n;
+
+    // Orders (items are JSON — substring check on serialized name).
+    // Looks for product_id in any item's id field.
+    const orderRefs = db.prepare(
+      "SELECT COUNT(*) AS n FROM orders WHERE (is_test = 0 OR is_test IS NULL) AND items LIKE ?"
+    ).get(`%"id":"${pid}"%`).n;
+
+    const blockers = [];
+    if (purItems  > 0) blockers.push({ resource: 'purchase_invoice_items', count: purItems });
+    if (moves     > 0) blockers.push({ resource: 'stock_movements',        count: moves });
+    if (retItems  > 0) blockers.push({ resource: 'return_items',           count: retItems });
+    if (orderRefs > 0) blockers.push({ resource: 'orders',                 count: orderRefs });
+
+    if (blockers.length && !isTestProduct) {
+      return res.status(409).json({
+        error: 'product has history — refuse delete; archive it instead (PATCH archived=true)',
+        blockers,
+      });
+    }
+
+    db.prepare('DELETE FROM product_variants WHERE product_id = ?').run(pid);
+    const info = db.prepare('DELETE FROM products WHERE id = ?').run(pid);
     if (!info.changes) return res.status(404).json({ error: 'not found' });
     res.json({ ok: true });
   } catch (e) { res.status(500).json({ error: e.message }); }
