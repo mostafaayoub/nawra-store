@@ -7519,6 +7519,279 @@ function AdminDash({ go }) {
             );
           })()}
 
+          {/* Purchase details — /admin/purchases/:id (read-only with action buttons) */}
+          {tab === "purchases" && purchaseDetailKey && !purchaseFormRoute && (() => {
+            const inv = purchaseDetail;
+            if (!inv || !inv.id) {
+              return (
+                <div style={{padding:30,textAlign:"center",color:ui.textSub,fontFamily:ui.fontBody,fontSize:13}}>
+                  جاري تحميل {purchaseDetailKey}...
+                </div>
+              );
+            }
+            const methodLabel = (m) => ({
+              cash:'كاش فوري', transfer:'تحويل بنكي', card:'فيزا/مدى', deferred:'آجل', opening_balance:'رصيد افتتاحي'
+            }[m] || m || '—');
+            const statusBadge = (s) => {
+              if (s === "draft")     return { bg:"#F3F4F6", fg:"#525252", l:"مسودة" };
+              if (s === "received")  return { bg:"#DCFCE7", fg:"#15803D", l:"مستلمة" };
+              if (s === "cancelled") return { bg:"#FEE2E2", fg:"#B91C1C", l:"ملغاة" };
+              return { bg:"#F3F4F6", fg:"#525252", l: s || "—" };
+            };
+            const paymentBadge = (s, paid, total) => {
+              if (s === "paid")    return { bg:"#DCFCE7", fg:"#15803D", l:"مدفوعة كلياً" };
+              if (s === "partial") return { bg:"#FEF3C7", fg:"#92400E", l:`مدفوع ${(Number(paid)||0).toLocaleString()} من ${(Number(total)||0).toLocaleString()}` };
+              return { bg:"#FEE2E2", fg:"#B91C1C", l:"غير مدفوعة" };
+            };
+            const sb = statusBadge(inv.status);
+            const pb = paymentBadge(inv.payment_status, inv.amount_paid, inv.total);
+            const items      = Array.isArray(inv.items) ? inv.items : [];
+            const activity   = Array.isArray(inv.activity) ? inv.activity : [];
+            const attachments= Array.isArray(inv.attachments) ? inv.attachments : [];
+            const paymentEvents = activity.filter(a => a.event === "payment_recorded");
+            const supplierName = inv.is_opening_balance ? "رصيد افتتاحي" : (inv.supplier && inv.supplier.name) || "—";
+            const supplierPhone = inv.supplier && inv.supplier.phone;
+
+            const doPatch = async (patch, successMsg) => {
+              try {
+                const r = await fetch(`/api/purchases/${encodeURIComponent(inv.id)}`, {
+                  method:"PATCH", headers:{"Content-Type":"application/json"},
+                  body: JSON.stringify({ ...patch,
+                    actor_id:   (authUser && authUser.email) || null,
+                    actor_name: (authUser && authUser.name)  || "Super Admin" }),
+                });
+                if (r.ok) { refreshPurchaseDetail(purchaseDetailKey); refreshPurchases(); refreshPurchasesAggs(); }
+                else { const d = await r.json().catch(()=>({})); window.alert(d.error || `فشل (${r.status})`); }
+              } catch (e) { window.alert(e.message); }
+              if (successMsg) console.log(successMsg);
+            };
+
+            const card     = { background:ui.cardBg, border:ui.border, borderRadius:ui.radius, padding:"14px 16px", marginBottom:10 };
+            const cardTitle= { fontSize:12.5,fontWeight:600,color:ui.text,fontFamily:ui.fontBody,marginBottom:10,paddingBottom:6,borderBottom:"0.5px solid #EEE" };
+            const kv       = (k, v) => (
+              <div style={{display:"flex",justifyContent:"space-between",padding:"4px 0",fontSize:12.5,fontFamily:ui.fontBody,color:ui.text}}>
+                <span style={{color:ui.textSub}}>{k}</span><span style={{fontWeight:500}}>{v}</span>
+              </div>
+            );
+            const eventLabel = {
+              created:           "تم الإنشاء",
+              received:          "تم الاستلام (تطبيق على المخزون)",
+              cancelled:         "تم الإلغاء (عكس التأثيرات)",
+              payment_recorded:  "تم تسجيل دفعة",
+              edited:            "تم التعديل",
+            };
+
+            return (
+              <div>
+                {/* Header / action bar */}
+                <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:14,flexWrap:"wrap",gap:10}}>
+                  <div style={{display:"flex",alignItems:"center",gap:10,flexWrap:"wrap"}}>
+                    <button onClick={goPurchases}
+                      style={{background:"transparent",border:"none",cursor:"pointer",color:ui.textSub,fontSize:13,padding:"4px 8px",fontFamily:ui.fontBody}}>← العودة للقائمة</button>
+                    <h2 style={{fontSize:18,fontWeight:600,color:ui.text,fontFamily:"monospace",margin:0}}>{inv.invoice_number}</h2>
+                    <span style={{fontSize:11,padding:"3px 10px",borderRadius:20,background:sb.bg,color:sb.fg,fontFamily:ui.fontBody}}>{sb.l}</span>
+                    <span style={{fontSize:11,padding:"3px 10px",borderRadius:20,background:pb.bg,color:pb.fg,fontFamily:ui.fontBody}}>{pb.l}</span>
+                  </div>
+                  <div style={{display:"flex",gap:6,alignItems:"center",flexWrap:"wrap"}}>
+                    {inv.status === "draft" && (
+                      <>
+                        <button onClick={() => doPatch({ status: "received" })}
+                          style={{padding:"6px 12px",background:"#16A34A",color:"#fff",border:"none",borderRadius:5,fontSize:12,cursor:"pointer",fontFamily:ui.fontBody}}>
+                          ✓ تأكيد الاستلام
+                        </button>
+                        <a href={`#admin/purchases/${encodeURIComponent(inv.id)}/edit`}
+                          style={{padding:"6px 12px",background:ui.cardBg,color:ui.text,border:ui.border,borderRadius:5,fontSize:12,cursor:"pointer",fontFamily:ui.fontBody,textDecoration:"none"}}>
+                          ✏️ تعديل
+                        </a>
+                      </>
+                    )}
+                    {inv.status !== "cancelled" && (
+                      <button onClick={() => {
+                        if (window.confirm("إلغاء الفاتورة سيعكس تأثيرها على المخزون و WAC. متأكد؟")) doPatch({ status: "cancelled" });
+                      }}
+                        style={{padding:"6px 12px",background:ui.cardBg,color:"#B91C1C",border:"0.5px solid #FCA5A5",borderRadius:5,fontSize:12,cursor:"pointer",fontFamily:ui.fontBody}}>
+                        ✗ إلغاء
+                      </button>
+                    )}
+                    <button onClick={() => window.print()}
+                      style={{padding:"6px 12px",background:ui.cardBg,color:ui.text,border:ui.border,borderRadius:5,fontSize:12,cursor:"pointer",fontFamily:ui.fontBody}}>
+                      🖨 طباعة
+                    </button>
+                    {supplierPhone && (
+                      <a href={`https://wa.me/2${String(supplierPhone).replace(/[^\d]/g,"")}?text=${encodeURIComponent(`بخصوص فاتورة ${inv.invoice_number} بقيمة ${(Number(inv.total)||0).toLocaleString()} ج`)}`}
+                        target="_blank" rel="noreferrer"
+                        style={{padding:"6px 12px",background:"#25D366",color:"#fff",border:"none",borderRadius:5,fontSize:12,textDecoration:"none",fontFamily:ui.fontBody}}>
+                        📞 واتساب
+                      </a>
+                    )}
+                  </div>
+                </div>
+
+                <div style={{display:"grid",gridTemplateColumns:mob?"1fr":"2fr 1fr",gap:10,alignItems:"start"}}>
+                  {/* LEFT MAIN */}
+                  <div>
+                    {/* Invoice info */}
+                    <div style={card}>
+                      <div style={cardTitle}>معلومات الفاتورة</div>
+                      {kv("المورد", inv.is_opening_balance ? <span style={{padding:"2px 8px",borderRadius:20,background:"#EFF6FF",color:"#1D4ED8",fontSize:11}}>رصيد افتتاحي</span> : (
+                        inv.supplier_id
+                          ? <a href={`#admin/suppliers/${encodeURIComponent(inv.supplier_id)}`} style={{color:"#1D4ED8",textDecoration:"none"}}>{supplierName}</a>
+                          : "—"
+                      ))}
+                      {kv("تاريخ الفاتورة", inv.invoice_date  || "—")}
+                      {kv("تاريخ الاستلام", (inv.received_date || "").slice(0,10) || "—")}
+                      {inv.supplier_invoice_ref && kv("رقم فاتورة المورد", inv.supplier_invoice_ref)}
+                      {inv.due_date && kv("تاريخ الاستحقاق", inv.due_date)}
+                    </div>
+
+                    {/* Line items */}
+                    <div style={card}>
+                      <div style={cardTitle}>البنود ({items.length})</div>
+                      {items.length === 0 ? (
+                        <div style={{fontSize:12,color:ui.textSub,fontFamily:ui.fontBody,fontStyle:"italic"}}>لا توجد بنود</div>
+                      ) : (
+                        <div style={{overflowX:"auto"}}>
+                          <table style={{width:"100%",borderCollapse:"collapse",fontFamily:ui.fontBody,fontSize:12,minWidth:600}}>
+                            <thead>
+                              <tr style={{background:ui.sideBg,borderBottom:"0.5px solid #E5E5E5"}}>
+                                {["المنتج","الكمية","سعر الوحدة","شحن وجمارك مخصصة","التكلفة الفعلية للوحدة","المجموع"].map(h => (
+                                  <th key={h} style={{padding:"7px 8px",textAlign:"right",fontSize:11,color:ui.textSub,fontWeight:500,whiteSpace:"nowrap"}}>{h}</th>
+                                ))}
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {items.map((it, i) => (
+                                <tr key={i} style={{borderTop:"0.5px solid #EEE"}}>
+                                  <td style={{padding:"7px 8px",fontSize:12,color:ui.text}}>{it.product_name || "—"}{it.product_sku && <span style={{color:ui.textSub,fontSize:10.5,marginInlineStart:6,fontFamily:"monospace"}}>{it.product_sku}</span>}</td>
+                                  <td style={{padding:"7px 8px",fontFamily:"monospace"}}>{it.quantity || 0}</td>
+                                  <td style={{padding:"7px 8px",fontFamily:"monospace"}}>{(Number(it.unit_cost) || 0).toLocaleString()} ج</td>
+                                  <td style={{padding:"7px 8px",fontFamily:"monospace",color:ui.textSub}}>{(Number(it.allocated_landed_cost) || 0).toLocaleString()} ج</td>
+                                  <td style={{padding:"7px 8px",fontFamily:"monospace",fontWeight:500}}>{(Number(it.effective_unit_cost) || 0).toLocaleString()} ج</td>
+                                  <td style={{padding:"7px 8px",fontFamily:"monospace",fontWeight:500}}>{(Number(it.line_total) || 0).toLocaleString()} ج</td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                      )}
+                    </div>
+
+                    {/* Landed cost summary */}
+                    {(inv.shipping_cost || inv.customs_fees || inv.other_costs) ? (
+                      <div style={card}>
+                        <div style={cardTitle}>التكاليف الإضافية (Landed Cost)</div>
+                        {kv("تكلفة الشحن من المورد", `${(Number(inv.shipping_cost)||0).toLocaleString()} ج`)}
+                        {kv("الجمارك والرسوم",      `${(Number(inv.customs_fees)||0).toLocaleString()} ج`)}
+                        {kv("تكاليف أخرى",           `${(Number(inv.other_costs)||0).toLocaleString()} ج`)}
+                        {kv("توزيع التكاليف",        inv.landed_basis === "weight" ? "نسبة من الوزن" : "نسبة من القيمة")}
+                      </div>
+                    ) : null}
+
+                    {/* Activity timeline */}
+                    <div style={card}>
+                      <div style={cardTitle}>السجل ({activity.length})</div>
+                      {activity.length === 0 ? (
+                        <div style={{fontSize:12,color:ui.textSub,fontFamily:ui.fontBody,fontStyle:"italic"}}>لا توجد أحداث</div>
+                      ) : (
+                        <div style={{display:"flex",flexDirection:"column",gap:7}}>
+                          {activity.map((a, i) => (
+                            <div key={a.id || i} style={{display:"flex",gap:10,alignItems:"flex-start",padding:"6px 0",borderBottom:i < activity.length-1 ? "0.5px dashed #EEE" : "none"}}>
+                              <div style={{width:6,height:6,borderRadius:"50%",background:"#10B981",marginTop:6,flexShrink:0}}/>
+                              <div style={{flex:1}}>
+                                <div style={{fontSize:12.5,color:ui.text,fontFamily:ui.fontBody,fontWeight:500}}>{eventLabel[a.event] || a.event}</div>
+                                {a.notes && <div style={{fontSize:11.5,color:ui.textSub,fontFamily:ui.fontBody,marginTop:2}}>{a.notes}</div>}
+                                {a.metadata && a.metadata.payment_number && (
+                                  <div style={{fontSize:11.5,fontFamily:"monospace",marginTop:2}}>
+                                    <a href={`#admin/supplier-payments/${encodeURIComponent(a.metadata.payment_number)}`} style={{color:"#1D4ED8",textDecoration:"none"}}>
+                                      {a.metadata.payment_number}
+                                    </a>
+                                    {a.metadata.amount && <span style={{color:ui.textSub,marginInlineStart:8}}>{Number(a.metadata.amount).toLocaleString()} ج</span>}
+                                  </div>
+                                )}
+                                <div style={{fontSize:10.5,color:ui.textSub,fontFamily:"monospace",marginTop:3}}>
+                                  {(a.created_at || "").slice(0, 16)} {a.actor_name ? `· ${a.actor_name}` : ""}
+                                </div>
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+
+                    {/* Notes */}
+                    {(inv.notes || inv.internal_notes) && (
+                      <div style={card}>
+                        <div style={cardTitle}>ملاحظات</div>
+                        {inv.notes && (
+                          <div style={{fontSize:12.5,color:ui.text,fontFamily:ui.fontBody,marginBottom:8}}>{inv.notes}</div>
+                        )}
+                        {inv.internal_notes && (
+                          <div style={{padding:"7px 10px",background:"#FFFBEB",border:"0.5px solid #FDE68A",borderRadius:5,fontSize:12,color:"#92400E",fontFamily:ui.fontBody,whiteSpace:"pre-wrap"}}>
+                            <b>داخلية:</b> {inv.internal_notes}
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </div>
+
+                  {/* RIGHT SIDEBAR */}
+                  <div>
+                    {/* Totals card */}
+                    <div style={card}>
+                      <div style={cardTitle}>الإجمالي</div>
+                      {kv("مجموع البنود", `${(Number(inv.subtotal)||0).toLocaleString()} ج`)}
+                      {kv("التكاليف الإضافية", `${((Number(inv.shipping_cost)||0)+(Number(inv.customs_fees)||0)+(Number(inv.other_costs)||0)).toLocaleString()} ج`)}
+                      <div style={{display:"flex",justifyContent:"space-between",paddingTop:8,marginTop:6,borderTop:"1px dashed #E5E5E5",fontWeight:600,fontSize:14,color:ui.text,fontFamily:ui.fontBody}}>
+                        <span>الإجمالي النهائي</span>
+                        <span style={{fontFamily:"monospace"}}>{(Number(inv.total)||0).toLocaleString()} ج</span>
+                      </div>
+                    </div>
+
+                    {/* Payment status card */}
+                    <div style={card}>
+                      <div style={cardTitle}>الدفع</div>
+                      {kv("الطريقة", methodLabel(inv.payment_method))}
+                      {kv("مدفوع", `${(Number(inv.amount_paid)||0).toLocaleString()} ج`)}
+                      {kv("متبقي", `${((Number(inv.total)||0) - (Number(inv.amount_paid)||0)).toLocaleString()} ج`)}
+                      {paymentEvents.length > 0 && (
+                        <div style={{marginTop:10,paddingTop:8,borderTop:"0.5px solid #EEE"}}>
+                          <div style={{fontSize:11.5,color:ui.textSub,fontFamily:ui.fontBody,marginBottom:6}}>الدفعات المرتبطة</div>
+                          {paymentEvents.map((a, i) => (
+                            <div key={i} style={{display:"flex",justifyContent:"space-between",fontSize:11.5,fontFamily:"monospace",padding:"3px 0"}}>
+                              <a href={`#admin/supplier-payments/${encodeURIComponent((a.metadata && a.metadata.payment_number) || "")}`} style={{color:"#1D4ED8",textDecoration:"none"}}>
+                                {(a.metadata && a.metadata.payment_number) || "—"}
+                              </a>
+                              <span style={{color:ui.text}}>{Number((a.metadata && a.metadata.amount) || 0).toLocaleString()} ج</span>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                      {inv.status === "received" && inv.payment_status !== "paid" && (
+                        <button onClick={() => { goSupplierPaymentNew(); }}
+                          style={{marginTop:10,width:"100%",padding:"8px 12px",background:"#0EA5E9",color:"#fff",border:"none",borderRadius:5,fontSize:12,cursor:"pointer",fontFamily:ui.fontBody,fontWeight:500}}>
+                          + تسجيل دفعة
+                        </button>
+                      )}
+                    </div>
+
+                    {/* Attachments */}
+                    {attachments.length > 0 && (
+                      <div style={card}>
+                        <div style={cardTitle}>المرفقات ({attachments.length})</div>
+                        {attachments.map((a, i) => (
+                          <a key={i} href={a.file_path} target="_blank" rel="noreferrer"
+                            style={{display:"block",padding:"6px 0",fontSize:12,color:"#1D4ED8",fontFamily:ui.fontBody,textDecoration:"none",borderBottom:i < attachments.length-1 ? "0.5px dashed #EEE" : "none"}}>
+                            📎 {a.original_name || a.file_type || "ملف"}
+                          </a>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                </div>
+              </div>
+            );
+          })()}
+
           {/* Purchase form — /admin/purchases/new + /:id/edit */}
           {tab === "purchases" && purchaseFormRoute && (
             (purchaseFormRoute.mode === "edit" && !purchaseDetail) ? (
