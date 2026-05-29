@@ -550,6 +550,20 @@ ensureColumn('expenses', 'beneficiary_type', "TEXT DEFAULT 'supplier'");        
 ensureColumn('expenses', 'budget_override_reason', 'TEXT');                      // populated when a pending_budget_approval expense is approved
 ensureColumn('expenses', 'payment_date',        'DATETIME');                     // NULL = approved-but-not-yet-paid; set = actual cash-out date (Cash Out calc reads this)
 
+// ── Phase 1 Catalog/Stock refactor: products column additions ───────────────
+// WAC = Weighted Average Cost — computed from purchase_invoice_items, NOT
+// from manual entry on the product form anymore. The legacy `cost` column
+// stays populated (mirrored from WAC) so any legacy query that reads it
+// keeps working until the Phase 3 frontend lockdown lands.
+ensureColumn('products', 'weighted_average_cost', 'REAL DEFAULT 0');
+ensureColumn('products', 'last_purchase_date',    'DATETIME');
+ensureColumn('products', 'last_purchase_price',   'REAL');
+ensureColumn('products', 'total_purchased_qty',   'INTEGER DEFAULT 0');
+
+// Enhanced supplier fields (spec Part D sidebar).
+ensureColumn('suppliers', 'supplier_type',              "TEXT DEFAULT 'other'"); // distributor | merchant | importer | other
+ensureColumn('suppliers', 'default_payment_terms_days', 'INTEGER DEFAULT 0');     // 0 = cash; >0 = N-days deferred
+
 // ── Test-data isolation: is_test column on every smoke-pollutable table ─────
 // Smoke tests set is_test=1 on every row they create. Every business-metric
 // aggregation (Finance, Dashboard, product/customer KPIs) excludes is_test=1
@@ -864,6 +878,124 @@ function slugify(s) {
     .slice(0, 80);
 }
 
+// ── Phase 1 Catalog/Stock refactor: purchases + supplier payments tables ────
+// Purchase invoices replace the old "buy inventory as an expense" pattern.
+// Every stock-in to products MUST flow through a purchase_invoice (except
+// the explicit Stock Adjustment path with a written reason). WAC is recomputed
+// on every purchase save and on cancel/delete via replay.
+db.exec(`
+  CREATE TABLE IF NOT EXISTS purchase_invoices (
+    id                    TEXT PRIMARY KEY,
+    invoice_number        TEXT UNIQUE NOT NULL,           -- PUR-XXXX, sequential
+    supplier_id           TEXT,                            -- nullable for Opening Balance
+    supplier_invoice_ref  TEXT,                            -- supplier's own invoice #
+    is_opening_balance    INTEGER DEFAULT 0,               -- 1 = founder's setup, not a real supplier obligation
+    invoice_date          DATE,                            -- when the supplier issued it
+    received_date         DATETIME,                        -- when goods actually arrived (drives stock_in date)
+    due_date              DATE,                            -- when payment is due (deferred only)
+    subtotal              REAL DEFAULT 0,                  -- sum(items.line_total) before landed costs
+    shipping_cost         REAL DEFAULT 0,
+    customs_fees          REAL DEFAULT 0,
+    other_costs           REAL DEFAULT 0,
+    total                 REAL DEFAULT 0,                  -- subtotal + landed costs
+    landed_basis          TEXT DEFAULT 'value',            -- value | weight (how landed costs distribute)
+    payment_method        TEXT DEFAULT 'cash',             -- cash | transfer | card | deferred
+    payment_status        TEXT DEFAULT 'unpaid',           -- unpaid | partial | paid
+    amount_paid           REAL DEFAULT 0,
+    status                TEXT DEFAULT 'draft',            -- draft | received | cancelled
+    notes                 TEXT,
+    internal_notes        TEXT,
+    is_test               INTEGER DEFAULT 0,
+    created_by            TEXT,
+    created_at            DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at            DATETIME DEFAULT CURRENT_TIMESTAMP
+  )
+`);
+try { db.exec('CREATE INDEX IF NOT EXISTS idx_purchase_invoices_supplier ON purchase_invoices(supplier_id)'); } catch {}
+try { db.exec('CREATE INDEX IF NOT EXISTS idx_purchase_invoices_status ON purchase_invoices(status)'); } catch {}
+try { db.exec('CREATE INDEX IF NOT EXISTS idx_purchase_invoices_payment_status ON purchase_invoices(payment_status)'); } catch {}
+try { db.exec('CREATE INDEX IF NOT EXISTS idx_purchase_invoices_received_date ON purchase_invoices(received_date)'); } catch {}
+try { db.exec('CREATE INDEX IF NOT EXISTS idx_purchase_invoices_is_test ON purchase_invoices(is_test)'); } catch {}
+
+db.exec(`
+  CREATE TABLE IF NOT EXISTS purchase_invoice_items (
+    id                       TEXT PRIMARY KEY,
+    purchase_invoice_id      TEXT NOT NULL,
+    product_id               TEXT NOT NULL,
+    quantity                 INTEGER DEFAULT 0,
+    unit_cost                REAL DEFAULT 0,                -- from supplier
+    allocated_landed_cost    REAL DEFAULT 0,                -- proportional share of shipping+customs+other
+    effective_unit_cost      REAL DEFAULT 0,                -- unit_cost + (allocated_landed_cost / quantity)
+    line_total               REAL DEFAULT 0,                -- unit_cost * quantity (pre-landed)
+    notes                    TEXT,
+    is_test                  INTEGER DEFAULT 0,
+    created_at               DATETIME DEFAULT CURRENT_TIMESTAMP
+  )
+`);
+try { db.exec('CREATE INDEX IF NOT EXISTS idx_purchase_invoice_items_invoice ON purchase_invoice_items(purchase_invoice_id)'); } catch {}
+try { db.exec('CREATE INDEX IF NOT EXISTS idx_purchase_invoice_items_product ON purchase_invoice_items(product_id)'); } catch {}
+try { db.exec('CREATE INDEX IF NOT EXISTS idx_purchase_invoice_items_is_test ON purchase_invoice_items(is_test)'); } catch {}
+
+db.exec(`
+  CREATE TABLE IF NOT EXISTS purchase_attachments (
+    id                   TEXT PRIMARY KEY,
+    purchase_invoice_id  TEXT NOT NULL,
+    file_path            TEXT NOT NULL,
+    file_type            TEXT,                              -- invoice | delivery_note | payment_receipt | other
+    original_name        TEXT,
+    uploaded_at          DATETIME DEFAULT CURRENT_TIMESTAMP
+  )
+`);
+try { db.exec('CREATE INDEX IF NOT EXISTS idx_purchase_attachments_invoice ON purchase_attachments(purchase_invoice_id)'); } catch {}
+
+db.exec(`
+  CREATE TABLE IF NOT EXISTS purchase_activity_log (
+    id                   TEXT PRIMARY KEY,
+    purchase_invoice_id  TEXT NOT NULL,
+    event                TEXT NOT NULL,                     -- created | received | cancelled | payment_recorded | edited
+    notes                TEXT,
+    actor_id             TEXT,
+    actor_name           TEXT,
+    metadata             TEXT,                              -- JSON for arbitrary event details
+    created_at           DATETIME DEFAULT CURRENT_TIMESTAMP
+  )
+`);
+try { db.exec('CREATE INDEX IF NOT EXISTS idx_purchase_activity_log_invoice ON purchase_activity_log(purchase_invoice_id)'); } catch {}
+
+db.exec(`
+  CREATE TABLE IF NOT EXISTS supplier_payments (
+    id               TEXT PRIMARY KEY,
+    payment_number   TEXT UNIQUE NOT NULL,                  -- PAY-XXXX
+    supplier_id      TEXT NOT NULL,
+    amount           REAL DEFAULT 0,                        -- must equal sum of allocations
+    payment_date     DATE,
+    payment_method   TEXT DEFAULT 'cash',                   -- cash | transfer | card | wallet
+    reference_number TEXT,                                  -- bank txn id / cheque # / etc
+    receipt_path     TEXT,
+    notes            TEXT,
+    is_test          INTEGER DEFAULT 0,
+    created_by       TEXT,
+    created_at       DATETIME DEFAULT CURRENT_TIMESTAMP
+  )
+`);
+try { db.exec('CREATE INDEX IF NOT EXISTS idx_supplier_payments_supplier ON supplier_payments(supplier_id)'); } catch {}
+try { db.exec('CREATE INDEX IF NOT EXISTS idx_supplier_payments_payment_date ON supplier_payments(payment_date)'); } catch {}
+try { db.exec('CREATE INDEX IF NOT EXISTS idx_supplier_payments_is_test ON supplier_payments(is_test)'); } catch {}
+
+db.exec(`
+  CREATE TABLE IF NOT EXISTS supplier_payment_allocations (
+    id                   TEXT PRIMARY KEY,
+    supplier_payment_id  TEXT NOT NULL,
+    purchase_invoice_id  TEXT NOT NULL,
+    amount_allocated     REAL DEFAULT 0,
+    is_test              INTEGER DEFAULT 0,
+    created_at           DATETIME DEFAULT CURRENT_TIMESTAMP
+  )
+`);
+try { db.exec('CREATE INDEX IF NOT EXISTS idx_supplier_payment_allocations_payment ON supplier_payment_allocations(supplier_payment_id)'); } catch {}
+try { db.exec('CREATE INDEX IF NOT EXISTS idx_supplier_payment_allocations_invoice ON supplier_payment_allocations(purchase_invoice_id)'); } catch {}
+try { db.exec('CREATE INDEX IF NOT EXISTS idx_supplier_payment_allocations_is_test ON supplier_payment_allocations(is_test)'); } catch {}
+
 // ── Test-data self-heal ──────────────────────────────────────────────────────
 // Two complementary mechanisms:
 //   1. Marker-text purge — historical: any row with `__NAWRA_TEST__` in a
@@ -948,6 +1080,37 @@ function purgeTestData() {
       try { log('is_test return_items (orphan)', db.prepare("DELETE FROM return_items WHERE is_test = 1").run().changes); } catch {}
     }
   } catch (e) { console.warn('[nawra-api] is_test purge returns cascade:', e.message); }
+  // Purchase invoices cascade: items + attachments + activity log first,
+  // then the invoice rows. is_test=1 purchase rows are categorically test
+  // (including any opening-balance flagged as test).
+  try {
+    const purIds = db.prepare("SELECT id FROM purchase_invoices WHERE is_test = 1").all().map(r => r.id);
+    if (purIds.length) {
+      const ph = purIds.map(() => '?').join(',');
+      log('is_test purchase_invoice_items',  db.prepare(`DELETE FROM purchase_invoice_items  WHERE purchase_invoice_id IN (${ph}) OR is_test = 1`).run(...purIds).changes);
+      log('is_test purchase_attachments',    db.prepare(`DELETE FROM purchase_attachments    WHERE purchase_invoice_id IN (${ph})`).run(...purIds).changes);
+      log('is_test purchase_activity_log',   db.prepare(`DELETE FROM purchase_activity_log   WHERE purchase_invoice_id IN (${ph})`).run(...purIds).changes);
+      // Allocations pointing at deleted invoices need wiping too.
+      log('is_test supplier_payment_allocations (invoice)',
+          db.prepare(`DELETE FROM supplier_payment_allocations WHERE purchase_invoice_id IN (${ph})`).run(...purIds).changes);
+      log('is_test purchase_invoices',       db.prepare(`DELETE FROM purchase_invoices       WHERE id IN (${ph})`).run(...purIds).changes);
+    } else {
+      try { log('is_test purchase_invoice_items (orphan)', db.prepare("DELETE FROM purchase_invoice_items WHERE is_test = 1").run().changes); } catch {}
+    }
+  } catch (e) { console.warn('[nawra-api] is_test purge purchases cascade:', e.message); }
+
+  // Supplier payments + their allocations.
+  try {
+    const payIds = db.prepare("SELECT id FROM supplier_payments WHERE is_test = 1").all().map(r => r.id);
+    if (payIds.length) {
+      const ph = payIds.map(() => '?').join(',');
+      log('is_test supplier_payment_allocations (payment)', db.prepare(`DELETE FROM supplier_payment_allocations WHERE supplier_payment_id IN (${ph}) OR is_test = 1`).run(...payIds).changes);
+      log('is_test supplier_payments',                       db.prepare(`DELETE FROM supplier_payments                       WHERE id IN (${ph})`).run(...payIds).changes);
+    } else {
+      try { log('is_test supplier_payment_allocations (orphan)', db.prepare("DELETE FROM supplier_payment_allocations WHERE is_test = 1").run().changes); } catch {}
+    }
+  } catch (e) { console.warn('[nawra-api] is_test purge payments cascade:', e.message); }
+
   ['orders', 'expenses', 'products', 'users'].forEach((t) => {
     try { log(`is_test ${t}`, db.prepare(`DELETE FROM ${t} WHERE is_test = 1`).run().changes); }
     catch (e) { console.warn(`[nawra-api] is_test purge ${t}:`, e.message); }
@@ -3533,6 +3696,24 @@ const allocateAwbNumber = db.transaction(() => {
   ).get();
   const n = (row.m || 0) + 1;
   return `AWB-${String(n).padStart(4, '0')}`;
+});
+
+// Purchase invoice number (PUR-XXXX) + supplier payment number (PAY-XXXX).
+// Same sequential pattern as orders/AWB/RET — MAX(...) + 1 inside a txn so
+// concurrent inserts can't collide on the unique constraint.
+const allocatePurchaseInvoiceNumber = db.transaction(() => {
+  const row = db.prepare(
+    "SELECT COALESCE(MAX(CAST(SUBSTR(invoice_number, 5) AS INTEGER)), 0) AS m FROM purchase_invoices WHERE invoice_number LIKE 'PUR-%'"
+  ).get();
+  const n = (row.m || 0) + 1;
+  return `PUR-${String(n).padStart(4, '0')}`;
+});
+const allocateSupplierPaymentNumber = db.transaction(() => {
+  const row = db.prepare(
+    "SELECT COALESCE(MAX(CAST(SUBSTR(payment_number, 5) AS INTEGER)), 0) AS m FROM supplier_payments WHERE payment_number LIKE 'PAY-%'"
+  ).get();
+  const n = (row.m || 0) + 1;
+  return `PAY-${String(n).padStart(4, '0')}`;
 });
 
 // Match a customer's governorate string to a shipping zone. Iterates active
