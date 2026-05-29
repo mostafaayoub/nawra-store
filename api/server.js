@@ -2440,6 +2440,7 @@ app.post('/api/products', (req, res) => {
         usage_text, usage_i18n,
         seo_title_i18n, seo_description_i18n,
         slug, size, publish_at, is_best_seller, has_variants, archived,
+        weight_kg,
         is_test,
         created_at, updated_at
       ) VALUES (
@@ -2450,6 +2451,7 @@ app.post('/api/products', (req, res) => {
         ?,?,
         ?,?,
         ?,?,?,?,?,?,
+        ?,
         ?,
         datetime('now'), datetime('now')
       )
@@ -2470,6 +2472,7 @@ app.post('/api/products', (req, res) => {
       p.is_best_seller ? 1 : 0,
       p.has_variants ? 1 : 0,
       p.archived ? 1 : 0,
+      Number.isFinite(+p.weight_kg) ? +p.weight_kg : 0.3,
       p.is_test ? 1 : 0,
     );
 
