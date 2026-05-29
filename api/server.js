@@ -943,10 +943,13 @@ db.exec(`
     file_path            TEXT NOT NULL,
     file_type            TEXT,                              -- invoice | delivery_note | payment_receipt | other
     original_name        TEXT,
+    is_test              INTEGER DEFAULT 0,
     uploaded_at          DATETIME DEFAULT CURRENT_TIMESTAMP
   )
 `);
+ensureColumn('purchase_attachments', 'is_test', 'INTEGER DEFAULT 0');   // belt-and-braces for existing rows
 try { db.exec('CREATE INDEX IF NOT EXISTS idx_purchase_attachments_invoice ON purchase_attachments(purchase_invoice_id)'); } catch {}
+try { db.exec('CREATE INDEX IF NOT EXISTS idx_purchase_attachments_is_test ON purchase_attachments(is_test)'); } catch {}
 
 db.exec(`
   CREATE TABLE IF NOT EXISTS purchase_activity_log (
@@ -957,10 +960,13 @@ db.exec(`
     actor_id             TEXT,
     actor_name           TEXT,
     metadata             TEXT,                              -- JSON for arbitrary event details
+    is_test              INTEGER DEFAULT 0,
     created_at           DATETIME DEFAULT CURRENT_TIMESTAMP
   )
 `);
+ensureColumn('purchase_activity_log', 'is_test', 'INTEGER DEFAULT 0');
 try { db.exec('CREATE INDEX IF NOT EXISTS idx_purchase_activity_log_invoice ON purchase_activity_log(purchase_invoice_id)'); } catch {}
+try { db.exec('CREATE INDEX IF NOT EXISTS idx_purchase_activity_log_is_test ON purchase_activity_log(is_test)'); } catch {}
 
 db.exec(`
   CREATE TABLE IF NOT EXISTS supplier_payments (
@@ -4905,6 +4911,275 @@ app.delete('/api/expense-categories/:id', (req, res) => {
 });
 
 // ── Suppliers CRUD ──────────────────────────────────────────────────────────
+// ════════════════════════════════════════════════════════════════════════════
+// ── Phase 1 Catalog/Stock refactor: WAC engine + landed-cost helpers ──────────
+// ════════════════════════════════════════════════════════════════════════════
+//
+// WAC = Weighted Average Cost. After this refactor, products.weighted_average_cost
+// is the SINGLE source of truth for unit cost, and it's never written to
+// directly — it's derived from purchase_invoice_items.
+//
+// Three flows touch it:
+//   1. New purchase invoice transitions to 'received' → applyPurchaseToProduct
+//      runs per line item, incrementally bumping WAC by the textbook formula
+//      ((qty_old × wac_old) + (qty_new × cost_new)) / (qty_old + qty_new)
+//   2. Existing 'received' invoice is cancelled → reversePurchaseFromProduct
+//      then recomputeWacByReplay rebuilds WAC from scratch for the affected
+//      products. Replay is the safe answer when math gets ambiguous.
+//   3. Opening Balance invoice — behaves exactly like a normal purchase
+//      for WAC purposes, but bypasses Payables (no supplier owed) by setting
+//      is_opening_balance = 1 and supplier_id = null.
+//
+// The legacy products.cost column is mirrored from WAC on every update so any
+// legacy aggregation query that reads .cost stays correct until Phase 3.
+
+// Distribute landed costs (shipping + customs + other) across line items
+// proportionally by either VALUE (line_total share) or WEIGHT (qty × product.weight_kg).
+// Returns the same items shape with allocated_landed_cost + effective_unit_cost set.
+function distributeLandedCost(items, totals, basis = 'value') {
+  const totalLanded = (Number(totals.shipping_cost) || 0)
+                    + (Number(totals.customs_fees)  || 0)
+                    + (Number(totals.other_costs)   || 0);
+  if (totalLanded <= 0 || !items.length) {
+    return items.map(it => ({
+      ...it,
+      allocated_landed_cost: 0,
+      effective_unit_cost: Number(it.unit_cost) || 0,
+    }));
+  }
+  // Compute the basis sum.
+  let basisSum = 0;
+  const enriched = items.map(it => {
+    const qty = Number(it.quantity) || 0;
+    const lineTotal = (Number(it.unit_cost) || 0) * qty;
+    let basisValue;
+    if (basis === 'weight') {
+      // pull weight_kg from products; falls back to 0.3 default
+      let w = 0.3;
+      try {
+        const p = db.prepare('SELECT weight_kg FROM products WHERE id = ?').get(String(it.product_id));
+        if (p && Number.isFinite(Number(p.weight_kg))) w = Number(p.weight_kg);
+      } catch {}
+      basisValue = qty * w;
+    } else {
+      basisValue = lineTotal;
+    }
+    basisSum += basisValue;
+    return { ...it, _line_total: lineTotal, _basis: basisValue };
+  });
+  if (basisSum <= 0) {
+    // Falls back to even split when basis is zero (e.g. all weights 0).
+    return enriched.map(it => {
+      const share = totalLanded / enriched.length;
+      const qty = Number(it.quantity) || 1;
+      return {
+        ...it,
+        _line_total: undefined, _basis: undefined,
+        allocated_landed_cost: share,
+        effective_unit_cost: (Number(it.unit_cost) || 0) + (share / qty),
+      };
+    });
+  }
+  return enriched.map(it => {
+    const share = totalLanded * (it._basis / basisSum);
+    const qty = Number(it.quantity) || 1;
+    return {
+      ...it,
+      _line_total: undefined, _basis: undefined,
+      allocated_landed_cost: share,
+      effective_unit_cost: (Number(it.unit_cost) || 0) + (share / qty),
+    };
+  });
+}
+
+// Apply a single received purchase line to its product: bump WAC + stock +
+// last_purchase_* + total_purchased_qty, and record a stock_movement.
+function applyPurchaseToProduct({ product_id, quantity, effective_unit_cost, invoice, item_id }) {
+  const qty = Number(quantity) || 0;
+  if (qty <= 0) return null;
+  const cost = Number(effective_unit_cost) || 0;
+  const p = db.prepare('SELECT * FROM products WHERE id = ?').get(String(product_id));
+  if (!p) throw new Error(`product not found: ${product_id}`);
+
+  const oldStock = Number(p.stock) || 0;
+  const oldWac   = Number(p.weighted_average_cost) || 0;
+  const newStock = oldStock + qty;
+  // Standard WAC formula: weighted by quantity.
+  const newWac = newStock > 0 ? ((oldStock * oldWac) + (qty * cost)) / newStock : 0;
+  const newTotalPurchased = (Number(p.total_purchased_qty) || 0) + qty;
+
+  db.prepare(`
+    UPDATE products SET
+      stock                 = ?,
+      weighted_average_cost = ?,
+      cost                  = ?,                              -- legacy mirror until Phase 3 lockdown
+      last_purchase_date    = COALESCE(?, last_purchase_date),
+      last_purchase_price   = ?,
+      total_purchased_qty   = ?,
+      updated_at            = datetime('now')
+    WHERE id = ?
+  `).run(
+    newStock, newWac, newWac,
+    invoice && invoice.received_date ? invoice.received_date : null,
+    cost,
+    newTotalPurchased,
+    String(product_id),
+  );
+
+  recordMovement({
+    product_id: String(product_id),
+    product_name: p.name || null,
+    type: 'purchase_in',
+    quantity_delta: +qty,
+    balance_after_available: newStock,
+    balance_after_reserved:  Number(p.stock_reserved) || 0,
+    balance_after_damaged:   Number(p.stock_damaged)  || 0,
+    reason: invoice ? `وارد من فاتورة شراء ${invoice.invoice_number}` : 'وارد من فاتورة شراء',
+    reference: invoice ? invoice.invoice_number : (item_id || null),
+    unit_cost: cost,
+    user_id:   invoice ? invoice.created_by : null,
+    user_name: null,
+  });
+
+  return { product_id, old_wac: oldWac, new_wac: newWac, old_stock: oldStock, new_stock: newStock };
+}
+
+// Reverse one line item's stock contribution. WAC isn't backed-out inline
+// here — recomputeWacByReplay does it cleanly afterward.
+function reverseStockForPurchaseLine({ product_id, quantity, invoice }) {
+  const qty = Number(quantity) || 0;
+  if (qty <= 0) return null;
+  const p = db.prepare('SELECT * FROM products WHERE id = ?').get(String(product_id));
+  if (!p) return null;
+  const newStock = Math.max(0, (Number(p.stock) || 0) - qty);
+  const newTotalPurchased = Math.max(0, (Number(p.total_purchased_qty) || 0) - qty);
+  db.prepare(`
+    UPDATE products SET
+      stock               = ?,
+      total_purchased_qty = ?,
+      updated_at          = datetime('now')
+    WHERE id = ?
+  `).run(newStock, newTotalPurchased, String(product_id));
+  recordMovement({
+    product_id: String(product_id),
+    product_name: p.name || null,
+    type: 'purchase_reverse',
+    quantity_delta: -qty,
+    balance_after_available: newStock,
+    balance_after_reserved:  Number(p.stock_reserved) || 0,
+    balance_after_damaged:   Number(p.stock_damaged)  || 0,
+    reason: invoice ? `إلغاء فاتورة شراء ${invoice.invoice_number}` : 'إلغاء فاتورة شراء',
+    reference: invoice ? invoice.invoice_number : null,
+    unit_cost: Number(p.weighted_average_cost) || 0,
+  });
+  return { product_id, new_stock: newStock };
+}
+
+// Replay every non-cancelled purchase line for this product in chronological
+// order. After cancel/delete this is how products.weighted_average_cost,
+// last_purchase_*, total_purchased_qty get restated. Cheap — a single product
+// has tens of purchase lines at most.
+function recomputeWacByReplay(product_id) {
+  const lines = db.prepare(`
+    SELECT
+      i.id,
+      i.quantity,
+      i.effective_unit_cost,
+      pi.received_date,
+      pi.invoice_date,
+      pi.created_at
+    FROM purchase_invoice_items i
+    JOIN purchase_invoices pi ON pi.id = i.purchase_invoice_id
+    WHERE i.product_id = ?
+      AND pi.status != 'cancelled'
+    ORDER BY
+      COALESCE(pi.received_date, pi.invoice_date, pi.created_at) ASC,
+      pi.created_at ASC,
+      i.created_at  ASC
+  `).all(String(product_id));
+
+  let runningQty = 0;
+  let runningWac = 0;
+  let lastDate   = null;
+  let lastPrice  = null;
+  let totalPurchased = 0;
+  for (const l of lines) {
+    const q  = Number(l.quantity) || 0;
+    const c  = Number(l.effective_unit_cost) || 0;
+    const newQ = runningQty + q;
+    runningWac = newQ > 0 ? ((runningQty * runningWac) + (q * c)) / newQ : 0;
+    runningQty = newQ;
+    totalPurchased += q;
+    lastDate  = l.received_date || l.invoice_date || l.created_at || lastDate;
+    lastPrice = c;
+  }
+  db.prepare(`
+    UPDATE products SET
+      weighted_average_cost = ?,
+      cost                  = ?,
+      last_purchase_date    = ?,
+      last_purchase_price   = ?,
+      total_purchased_qty   = ?,
+      updated_at            = datetime('now')
+    WHERE id = ?
+  `).run(runningWac, runningWac, lastDate, lastPrice, totalPurchased, String(product_id));
+  return { product_id, wac: runningWac, total_purchased: totalPurchased };
+}
+
+// Reconcile a purchase invoice's payment_status against its amount_paid + total.
+function updateInvoicePaymentStatus(invoice_id) {
+  const inv = db.prepare('SELECT total, amount_paid FROM purchase_invoices WHERE id = ?').get(String(invoice_id));
+  if (!inv) return;
+  const paid = Number(inv.amount_paid) || 0;
+  const tot  = Number(inv.total) || 0;
+  let status = 'unpaid';
+  if (paid >= tot && tot > 0) status = 'paid';
+  else if (paid > 0)         status = 'partial';
+  db.prepare("UPDATE purchase_invoices SET payment_status = ?, updated_at = datetime('now') WHERE id = ?").run(status, String(invoice_id));
+  return status;
+}
+
+// Append one audit row to purchase_activity_log.
+function recordPurchaseActivity({ purchase_invoice_id, event, notes, actor_id, actor_name, metadata, is_test }) {
+  const id = `pal_${Date.now().toString(36)}_${Math.random().toString(36).slice(2,5)}`;
+  try {
+    db.prepare(`
+      INSERT INTO purchase_activity_log
+        (id, purchase_invoice_id, event, notes, actor_id, actor_name, metadata, is_test)
+      VALUES (?,?,?,?,?,?,?,?)
+    `).run(
+      id, String(purchase_invoice_id), event, notes || null,
+      actor_id || null, actor_name || null,
+      metadata ? JSON.stringify(metadata) : null,
+      is_test ? 1 : 0,
+    );
+  } catch (e) { console.warn('[nawra-api] recordPurchaseActivity skipped:', e.message); }
+  return id;
+}
+
+// Resolve a purchase invoice by either internal id or PUR-XXXX number, and
+// hydrate items + attachments + activity log + supplier in one return.
+function hydratePurchaseInvoice(key) {
+  const invRow = String(key || '').startsWith('PUR-')
+    ? db.prepare('SELECT * FROM purchase_invoices WHERE invoice_number = ?').get(key)
+    : db.prepare('SELECT * FROM purchase_invoices WHERE id = ?').get(key);
+  if (!invRow) return null;
+  const items = db.prepare(`
+    SELECT i.*, p.name AS product_name, p.sku AS product_sku
+    FROM purchase_invoice_items i
+    LEFT JOIN products p ON p.id = i.product_id
+    WHERE i.purchase_invoice_id = ?
+    ORDER BY i.created_at ASC
+  `).all(invRow.id);
+  const attachments = db.prepare('SELECT * FROM purchase_attachments WHERE purchase_invoice_id = ? ORDER BY uploaded_at DESC').all(invRow.id);
+  const activity = db.prepare('SELECT * FROM purchase_activity_log WHERE purchase_invoice_id = ? ORDER BY created_at ASC').all(invRow.id)
+    .map(a => { try { a.metadata = a.metadata ? JSON.parse(a.metadata) : null; } catch { a.metadata = null; } return a; });
+  const supplier = invRow.supplier_id
+    ? db.prepare('SELECT * FROM suppliers WHERE id = ?').get(invRow.supplier_id)
+    : null;
+  return { ...invRow, items, attachments, activity, supplier };
+}
+
 app.get('/api/suppliers', (req, res) => {
   try {
     const rows = db.prepare('SELECT * FROM suppliers WHERE active = 1 ORDER BY name').all();
