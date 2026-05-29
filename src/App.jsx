@@ -1113,7 +1113,11 @@ function AdmIcon({ name, size = 16 }) {
     "receipt":       <><path d="M5 21V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2v16l-3-2-3 2-3-2-3 2-2-2z"/><path d="M9 7h6M9 11h6M9 15h4"/></>,
     "report-money":  <><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M9 9h6M12 9v8"/><path d="M9 13c0 1.5 1.5 2 3 2s3-.5 3-2-1.5-2-3-2-3-.5-3-2 1.5-2 3-2 3 .5 3 2"/></>,
     "trash":         <><path d="M4 7h16"/><path d="M10 11v6M14 11v6"/><path d="M5 7l1 12a2 2 0 0 0 2 2h8a2 2 0 0 0 2-2l1-12"/><path d="M9 7V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v3"/></>,
-    "pencil":        <><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4 12.5-12.5z"/></>
+    "pencil":        <><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4 12.5-12.5z"/></>,
+    // Phase 2 — Purchases & Suppliers sidebar icons.
+    "shopping-bag":  <><path d="M6 7h12l-1 13a2 2 0 0 1-2 2H9a2 2 0 0 1-2-2L6 7z"/><path d="M9 7V5a3 3 0 0 1 6 0v2"/></>,
+    "factory":       <><path d="M3 21V9l5 3V9l5 3V9l5 3V21H3z"/><path d="M7 17h2M11 17h2M15 17h2"/></>,
+    "cash":          <><rect x="3" y="6" width="18" height="12" rx="2"/><circle cx="12" cy="12" r="2.5"/><path d="M6 9v6M18 9v6"/></>,
   };
   return (
     <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" style={{flexShrink:0,verticalAlign:"middle"}}>
@@ -2562,6 +2566,67 @@ function AdminDash({ go }) {
   }, [retDetailHash]);
   const goReturn       = (retNum) => { window.location.hash = `#admin/returns/${encodeURIComponent(retNum)}`; };
   const goReturnsList  = ()       => { if (window.location.hash !== "#admin") window.location.hash = "#admin"; setTab("returns"); };
+
+  // Purchases subroutes — #admin/purchases/new | /:id/edit | /:id (details)
+  const purchaseFormRoute = (() => {
+    if (typeof window === "undefined") return null;
+    const h = window.location.hash || "";
+    if (h === "#admin/purchases/new") return { mode: "new" };
+    const m = h.match(/^#admin\/purchases\/([^/]+)\/edit$/);
+    if (m) return { mode: "edit", id: decodeURIComponent(m[1]) };
+    return null;
+  })();
+  const purchaseDetailKey = (() => {
+    if (typeof window === "undefined") return null;
+    const h = window.location.hash || "";
+    if (h === "#admin/purchases/new") return null;
+    const m = h.match(/^#admin\/purchases\/([^/]+)$/);
+    return m ? decodeURIComponent(m[1]) : null;
+  })();
+  useEffect(() => {
+    if ((purchaseFormRoute || purchaseDetailKey) && tab !== "purchases") setTab("purchases");
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [purchaseFormRoute && purchaseFormRoute.mode, purchaseFormRoute && purchaseFormRoute.id, purchaseDetailKey]);
+  const goPurchases       = ()    => { if (window.location.hash !== "#admin") window.location.hash = "#admin"; setTab("purchases"); };
+  const goPurchaseNew     = ()    => { window.location.hash = "#admin/purchases/new"; };
+  const goPurchaseEdit    = (id)  => { window.location.hash = `#admin/purchases/${encodeURIComponent(id)}/edit`; };
+  const goPurchaseDetail  = (key) => { window.location.hash = `#admin/purchases/${encodeURIComponent(key)}`; };
+
+  // Suppliers subroutes — #admin/suppliers/:id
+  const supplierDetailId = (() => {
+    if (typeof window === "undefined") return null;
+    const h = window.location.hash || "";
+    const m = h.match(/^#admin\/suppliers\/([^/]+)$/);
+    return m ? decodeURIComponent(m[1]) : null;
+  })();
+  useEffect(() => {
+    if (supplierDetailId && tab !== "suppliers") setTab("suppliers");
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [supplierDetailId]);
+  const goSuppliers     = ()    => { if (window.location.hash !== "#admin") window.location.hash = "#admin"; setTab("suppliers"); };
+  const goSupplier      = (id)  => { window.location.hash = `#admin/suppliers/${encodeURIComponent(id)}`; };
+
+  // Supplier payments subroutes — #admin/supplier-payments/new | /:id
+  const supplierPaymentFormRoute = (() => {
+    if (typeof window === "undefined") return null;
+    const h = window.location.hash || "";
+    if (h === "#admin/supplier-payments/new") return { mode: "new" };
+    return null;
+  })();
+  const supplierPaymentDetailKey = (() => {
+    if (typeof window === "undefined") return null;
+    const h = window.location.hash || "";
+    if (h === "#admin/supplier-payments/new") return null;
+    const m = h.match(/^#admin\/supplier-payments\/([^/]+)$/);
+    return m ? decodeURIComponent(m[1]) : null;
+  })();
+  useEffect(() => {
+    if ((supplierPaymentFormRoute || supplierPaymentDetailKey) && tab !== "supplier-payments") setTab("supplier-payments");
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [supplierPaymentFormRoute && supplierPaymentFormRoute.mode, supplierPaymentDetailKey]);
+  const goSupplierPayments    = ()    => { if (window.location.hash !== "#admin") window.location.hash = "#admin"; setTab("supplier-payments"); };
+  const goSupplierPaymentNew  = ()    => { window.location.hash = "#admin/supplier-payments/new"; };
+  const goSupplierPayment     = (key) => { window.location.hash = `#admin/supplier-payments/${encodeURIComponent(key)}`; };
   // Whenever the user lands on an order-detail URL, ensure the active tab is
   // "orders" (so leaving the detail returns to the right list, and the topbar
   // title is correct).
@@ -2915,20 +2980,40 @@ function AdminDash({ go }) {
   };
 
   // ── Nav items for sidebar ──────────────────────────────────────────────────
-  const navItems = [
-    { k:"overview",    l:"نظرة عامة",   icon:"chart-bar" },
-    { k:"orders",      l:"الطلبات",     icon:"shopping-cart" },
-    { k:"products",    l:"المنتجات",    icon:"box" },
-    { k:"add-product", l:"إضافة منتج",  icon:"plus" },
-    { k:"inventory",   l:"المخزون",     icon:"package" },
-    { k:"customers",   l:"العملاء",     icon:"users" },
-    { k:"returns",     l:"المرتجعات",   icon:"refresh" },
-    { k:"expenses",    l:"المصروفات",   icon:"receipt" },
-    { k:"finance",     l:"المالية",     icon:"report-money" },
-    { k:"shipping",    l:"الشحن",       icon:"truck" },
-    { k:"coupons",     l:"الكوبونات",   icon:"discount" },
-    { k:"settings",    l:"الإعدادات",   icon:"settings" },
+  // Sidebar nav: grouped into business-domain sections. Phase 2 introduces
+  // "المشتريات والمخزون" with 4 items, splits "الكتالوج" out for products,
+  // and tightens "المالية"/"العمليات" labels. Mobile flattens the groups
+  // into a single horizontal scroll bar (section titles don't fit there).
+  const navGroups = [
+    { title: null, items: [
+      { k:"overview",    l:"نظرة عامة",       icon:"chart-bar" },
+    ]},
+    { title: "المبيعات", items: [
+      { k:"orders",      l:"الطلبات",         icon:"shopping-cart" },
+      { k:"customers",   l:"العملاء",         icon:"users" },
+      { k:"returns",     l:"المرتجعات",       icon:"refresh" },
+      { k:"coupons",     l:"الكوبونات",       icon:"discount" },
+    ]},
+    { title: "الكتالوج", items: [
+      { k:"products",    l:"المنتجات",        icon:"box" },
+      { k:"add-product", l:"إضافة منتج",      icon:"plus" },
+    ]},
+    { title: "المشتريات والمخزون", items: [
+      { k:"purchases",         l:"المشتريات",        icon:"shopping-bag" },
+      { k:"suppliers",         l:"الموردين",         icon:"factory" },
+      { k:"supplier-payments", l:"دفعات الموردين",   icon:"cash" },
+      { k:"inventory",         l:"المخزون",          icon:"package" },
+    ]},
+    { title: "المالية", items: [
+      { k:"expenses",    l:"المصروفات",       icon:"receipt" },
+      { k:"finance",     l:"التقارير المالية", icon:"report-money" },
+    ]},
+    { title: "العمليات", items: [
+      { k:"shipping",    l:"الشحن",           icon:"truck" },
+      { k:"settings",    l:"الإعدادات",       icon:"settings" },
+    ]},
   ];
+  const navItems = navGroups.flatMap(g => g.items);
 
   const topbarTitle = navItems.find(n=>n.k===tab)?.l || "نظرة عامة";
 
@@ -2947,7 +3032,9 @@ function AdminDash({ go }) {
 
   // ── Sidebar nav button ─────────────────────────────────────────────────────
   const NavBtn = ({ item }) => {
-    const active = tab === item.k && !detailOrderId && !productFormRoute && !customerDetailEmail && !retDetailHash;
+    const active = tab === item.k && !detailOrderId && !productFormRoute && !customerDetailEmail && !retDetailHash
+      && !purchaseFormRoute && !purchaseDetailKey && !supplierDetailId
+      && !supplierPaymentFormRoute && !supplierPaymentDetailKey;
     return (
       <button onClick={()=>{
         // "إضافة منتج" is now a shortcut into the products subroute.
@@ -3185,7 +3272,25 @@ function AdminDash({ go }) {
                 }}><AdmIcon name={n.icon} size={14}/>{n.l}</button>
               ))}
             </div>
-          ) : navItems.map(n => <NavBtn key={n.k} item={n} />)}
+          ) : (
+            // Desktop: render groups with section labels (RTL-friendly).
+            navGroups.map((g, gi) => (
+              <div key={gi} style={{marginBottom: gi < navGroups.length - 1 ? 8 : 0}}>
+                {g.title && (
+                  <div style={{
+                    padding: "8px 16px 4px",
+                    fontSize: 10.5,
+                    color: ui.textSub,
+                    fontFamily: ui.fontBody,
+                    fontWeight: 500,
+                    letterSpacing: 0.2,
+                    textTransform: "none",
+                  }}>{g.title}</div>
+                )}
+                {g.items.map(n => <NavBtn key={n.k} item={n} />)}
+              </div>
+            ))
+          )}
           <div style={{flex:1}} />
           {/* Show the active super-admin's name as a quiet footer label. */}
           {!mob && authUser && (
