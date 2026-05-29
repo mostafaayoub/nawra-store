@@ -7813,6 +7813,221 @@ function AdminDash({ go }) {
             )
           )}
 
+          {/* ─── SUPPLIER PAYMENTS (Catalog/Stock refactor — Phase 2.5) ──── */}
+          {tab === "supplier-payments" && !supplierPaymentFormRoute && !supplierPaymentDetailKey && (() => {
+            const ag = supplierPaymentsAggs || {};
+            const totalPages = Math.max(1, Math.ceil((supplierPaymentsTotal || 0) / 25));
+            const methodLabel = (m) => ({ cash:'كاش', transfer:'تحويل', card:'فيزا', wallet:'محفظة' }[m] || m || '—');
+            return (
+              <div>
+                <div style={{display:"flex",alignItems:"flex-start",justifyContent:"space-between",marginBottom:14,flexWrap:"wrap",gap:10}}>
+                  <div>
+                    <h2 style={{fontSize:18,fontWeight:600,color:ui.text,fontFamily:ui.fontBody,margin:0}}>دفعات الموردين</h2>
+                    <div style={{fontSize:12,color:ui.textSub,fontFamily:ui.fontBody,marginTop:2}}>سجل المدفوعات للموردين</div>
+                  </div>
+                  <button onClick={goSupplierPaymentNew}
+                    style={{padding:"8px 14px",background:ui.text,color:"#fff",border:"none",borderRadius:6,fontSize:12.5,cursor:"pointer",fontFamily:ui.fontBody,fontWeight:500}}>
+                    + دفعة جديدة
+                  </button>
+                </div>
+
+                {/* KPI cards (3) */}
+                <div style={{display:"grid",gridTemplateColumns:mob?"1fr":"repeat(3,1fr)",gap:10,marginBottom:14}}>
+                  <div style={{background:ui.cardBg,border:ui.border,borderRadius:ui.radius,padding:"14px 16px",borderTop:"3px solid #0EA5E9"}}>
+                    <div style={{fontSize:11.5,color:ui.textSub,fontFamily:ui.fontBody,marginBottom:5}}>مدفوعات الشهر</div>
+                    <div style={{fontSize:mob?17:21,color:ui.text,fontFamily:ui.fontHead,fontWeight:500}}>
+                      {(ag.total_month || 0).toLocaleString()} <span style={{fontSize:11,color:ui.textSub,fontFamily:ui.fontBody}}>ج</span>
+                    </div>
+                  </div>
+                  <div style={{background:ui.cardBg,border:ui.border,borderRadius:ui.radius,padding:"14px 16px",borderTop:"3px solid #6366F1"}}>
+                    <div style={{fontSize:11.5,color:ui.textSub,fontFamily:ui.fontBody,marginBottom:5}}>عدد الدفعات</div>
+                    <div style={{fontSize:mob?17:21,color:ui.text,fontFamily:ui.fontHead,fontWeight:500}}>{ag.count_month || 0}</div>
+                  </div>
+                  <div style={{background:ui.cardBg,border:ui.border,borderRadius:ui.radius,padding:"14px 16px",borderTop:"3px solid #9333EA"}}>
+                    <div style={{fontSize:11.5,color:ui.textSub,fontFamily:ui.fontBody,marginBottom:5}}>متوسط الدفعة</div>
+                    <div style={{fontSize:mob?17:21,color:ui.text,fontFamily:ui.fontHead,fontWeight:500}}>
+                      {(ag.avg_payment || 0).toLocaleString()} <span style={{fontSize:11,color:ui.textSub,fontFamily:ui.fontBody}}>ج</span>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Filter bar */}
+                <div style={{display:"flex",gap:8,flexWrap:"wrap",marginBottom:10}}>
+                  <input value={supplierPaymentsFilters.q} onChange={e=>{setSupplierPaymentsFilters({...supplierPaymentsFilters,q:e.target.value}); setSupplierPaymentsPage(1);}}
+                    placeholder="بحث برقم الدفعة / المورد / المرجع"
+                    style={{padding:"8px 11px",border:ui.border,borderRadius:6,background:ui.cardBg,fontFamily:ui.fontBody,fontSize:12.5,color:ui.text,outline:"none",direction:"rtl",minWidth:240,flex:1}}/>
+                  <select value={supplierPaymentsFilters.supplier_id} onChange={e=>{setSupplierPaymentsFilters({...supplierPaymentsFilters,supplier_id:e.target.value}); setSupplierPaymentsPage(1);}}
+                    style={{padding:"8px 11px",border:ui.border,borderRadius:6,background:ui.cardBg,fontFamily:ui.fontBody,fontSize:12.5,color:ui.text,outline:"none"}}>
+                    <option value="all">كل الموردين</option>
+                    {(suppliers || []).map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
+                  </select>
+                  <input type="date" value={supplierPaymentsFilters.from} onChange={e=>{setSupplierPaymentsFilters({...supplierPaymentsFilters,from:e.target.value}); setSupplierPaymentsPage(1);}}
+                    title="من تاريخ"
+                    style={{padding:"8px 11px",border:ui.border,borderRadius:6,background:ui.cardBg,fontFamily:ui.fontBody,fontSize:12.5,color:ui.text,outline:"none"}}/>
+                  <input type="date" value={supplierPaymentsFilters.to} onChange={e=>{setSupplierPaymentsFilters({...supplierPaymentsFilters,to:e.target.value}); setSupplierPaymentsPage(1);}}
+                    title="إلى تاريخ"
+                    style={{padding:"8px 11px",border:ui.border,borderRadius:6,background:ui.cardBg,fontFamily:ui.fontBody,fontSize:12.5,color:ui.text,outline:"none"}}/>
+                </div>
+
+                {/* Result count */}
+                <div style={{fontSize:12.5,color:ui.textSub,fontFamily:ui.fontBody,marginBottom:8}}>
+                  {supplierPaymentsTotal === 0 ? "لا توجد دفعات" : `${supplierPayments.length} من ${supplierPaymentsTotal} دفعة`}
+                </div>
+
+                {/* Table or empty */}
+                {supplierPayments.length === 0 ? (
+                  <div style={{background:ui.cardBg,border:ui.border,borderRadius:ui.radius,padding:"56px 20px",textAlign:"center"}}>
+                    <div style={{fontSize:42,marginBottom:10}}>💵</div>
+                    <div style={{fontSize:15,color:ui.text,fontFamily:ui.fontBody,fontWeight:600,marginBottom:6}}>لا توجد دفعات للموردين</div>
+                    <div style={{fontSize:12.5,color:ui.textSub,fontFamily:ui.fontBody,maxWidth:420,margin:"0 auto 14px"}}>
+                      سجل أول دفعة لتقليل مستحقات الموردين
+                    </div>
+                    <button onClick={goSupplierPaymentNew}
+                      style={{padding:"9px 18px",background:ui.text,color:"#fff",border:"none",borderRadius:6,fontSize:13,cursor:"pointer",fontFamily:ui.fontBody,fontWeight:500}}>
+                      + دفعة جديدة
+                    </button>
+                  </div>
+                ) : (
+                  <div style={{background:ui.cardBg,border:ui.border,borderRadius:ui.radius,overflow:"hidden",overflowX:"auto"}}>
+                    <table style={{width:"100%",borderCollapse:"collapse",direction:"rtl",fontFamily:ui.fontBody,minWidth:900}}>
+                      <thead>
+                        <tr style={{background:ui.sideBg,borderBottom:`0.5px solid #E5E5E5`}}>
+                          {["رقم الدفعة","المورد","المبلغ","تاريخ الدفع","طريقة الدفع","الفواتير المسددة","المرجع","الإجراءات"].map(h => (
+                            <th key={h} style={{padding:"11px 12px",textAlign:"right",fontSize:11.5,color:ui.textSub,fontWeight:500,whiteSpace:"nowrap"}}>{h}</th>
+                          ))}
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {supplierPayments.map(r => (
+                          <tr key={r.id} style={{borderTop:"0.5px solid #EEE"}}>
+                            <td style={{padding:"9px 12px",fontSize:12,fontFamily:"monospace"}}>
+                              <a href={`#admin/supplier-payments/${encodeURIComponent(r.payment_number || r.id)}`} style={{color:"#1D4ED8",textDecoration:"none"}}>{r.payment_number || "—"}</a>
+                            </td>
+                            <td style={{padding:"9px 12px",fontSize:13,color:ui.text}}>
+                              {r.supplier_id ? (
+                                <a href={`#admin/suppliers/${encodeURIComponent(r.supplier_id)}`} style={{color:"#1D4ED8",textDecoration:"none"}}>{r.supplier_name || "—"}</a>
+                              ) : "—"}
+                            </td>
+                            <td style={{padding:"9px 12px",fontSize:12.5,color:ui.text,fontWeight:500,whiteSpace:"nowrap"}}>{(Number(r.amount)||0).toLocaleString()} ج</td>
+                            <td style={{padding:"9px 12px",fontSize:11.5,color:ui.textSub,whiteSpace:"nowrap"}}>{r.payment_date || "—"}</td>
+                            <td style={{padding:"9px 12px",fontSize:11.5,color:ui.textSub,whiteSpace:"nowrap"}}>{methodLabel(r.payment_method)}</td>
+                            <td style={{padding:"9px 12px",fontSize:11.5,color:ui.textSub}}>
+                              {r.allocations_count != null ? `${r.allocations_count} فاتورة · ${(Number(r.allocations_total)||0).toLocaleString()} ج` : "—"}
+                            </td>
+                            <td style={{padding:"9px 12px",fontSize:11,color:ui.textSub,fontFamily:"monospace"}}>{r.reference_number || "—"}</td>
+                            <td style={{padding:"9px 12px",textAlign:"left",whiteSpace:"nowrap"}}>
+                              <a href={`#admin/supplier-payments/${encodeURIComponent(r.payment_number || r.id)}`}
+                                title="عرض التفاصيل"
+                                style={{background:"transparent",border:"none",cursor:"pointer",padding:4,color:"#1D4ED8",fontSize:14,textDecoration:"none"}}>
+                                👁
+                              </a>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+
+                {/* Pagination */}
+                {totalPages > 1 && (
+                  <div style={{display:"flex",justifyContent:"center",alignItems:"center",gap:8,marginTop:12,fontFamily:ui.fontBody,fontSize:12.5}}>
+                    <button disabled={supplierPaymentsPage <= 1} onClick={() => setSupplierPaymentsPage(supplierPaymentsPage - 1)}
+                      style={{padding:"5px 11px",border:ui.border,background:ui.cardBg,borderRadius:5,cursor:supplierPaymentsPage <= 1 ? "not-allowed" : "pointer",opacity:supplierPaymentsPage <= 1 ? 0.5 : 1,color:ui.text}}>السابق</button>
+                    <span style={{color:ui.textSub}}>{supplierPaymentsPage} / {totalPages}</span>
+                    <button disabled={supplierPaymentsPage >= totalPages} onClick={() => setSupplierPaymentsPage(supplierPaymentsPage + 1)}
+                      style={{padding:"5px 11px",border:ui.border,background:ui.cardBg,borderRadius:5,cursor:supplierPaymentsPage >= totalPages ? "not-allowed" : "pointer",opacity:supplierPaymentsPage >= totalPages ? 0.5 : 1,color:ui.text}}>التالي</button>
+                  </div>
+                )}
+              </div>
+            );
+          })()}
+
+          {/* Supplier payment form — /admin/supplier-payments/new */}
+          {tab === "supplier-payments" && supplierPaymentFormRoute && (
+            <SupplierPaymentForm
+              suppliers={suppliers}
+              authUser={authUser}
+              onSaved={() => { refreshSupplierPayments(); refreshSupplierPaymentsAggs(); refreshPurchases(); refreshPurchasesAggs(); goSupplierPayments(); }}
+              onCancel={goSupplierPayments}
+              ui={ui}
+              mob={mob}
+            />
+          )}
+
+          {/* Supplier payment details — /admin/supplier-payments/:key (read-only) */}
+          {tab === "supplier-payments" && supplierPaymentDetailKey && !supplierPaymentFormRoute && (() => {
+            const p = supplierPaymentDetail;
+            if (!p || !p.id) {
+              return <div style={{padding:30,textAlign:"center",color:ui.textSub,fontFamily:ui.fontBody,fontSize:13}}>جاري تحميل {supplierPaymentDetailKey}...</div>;
+            }
+            const allocs = Array.isArray(p.allocations) ? p.allocations : [];
+            const methodLabel = (m) => ({ cash:'كاش', transfer:'تحويل بنكي', card:'فيزا', wallet:'محفظة إلكترونية' }[m] || m || '—');
+            const card     = { background:ui.cardBg, border:ui.border, borderRadius:ui.radius, padding:"14px 16px", marginBottom:10 };
+            const cardTitle= { fontSize:12.5,fontWeight:600,color:ui.text,fontFamily:ui.fontBody,marginBottom:10,paddingBottom:6,borderBottom:"0.5px solid #EEE" };
+            const kv = (k, v) => (
+              <div style={{display:"flex",justifyContent:"space-between",padding:"5px 0",fontSize:12.5,fontFamily:ui.fontBody,color:ui.text}}>
+                <span style={{color:ui.textSub}}>{k}</span><span style={{fontWeight:500, fontFamily: typeof v === "string" && /[0-9,]/.test(v) ? "monospace" : ui.fontBody}}>{v}</span>
+              </div>
+            );
+            const onDelete = async () => {
+              if (!window.confirm("حذف الدفعة سيعكس تخصيصاتها على الفواتير. متأكد؟")) return;
+              try {
+                const r = await fetch(`/api/supplier-payments/${encodeURIComponent(p.id)}`, { method:"DELETE" });
+                if (r.ok) { refreshSupplierPayments(); refreshSupplierPaymentsAggs(); goSupplierPayments(); }
+                else { const d = await r.json().catch(()=>({})); window.alert(d.error || `فشل (${r.status})`); }
+              } catch (e) { window.alert(e.message); }
+            };
+            return (
+              <div>
+                <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:14,flexWrap:"wrap",gap:10}}>
+                  <div style={{display:"flex",alignItems:"center",gap:10,flexWrap:"wrap"}}>
+                    <button onClick={goSupplierPayments}
+                      style={{background:"transparent",border:"none",cursor:"pointer",color:ui.textSub,fontSize:13,padding:"4px 8px",fontFamily:ui.fontBody}}>← العودة للقائمة</button>
+                    <h2 style={{fontSize:18,fontWeight:600,color:ui.text,fontFamily:"monospace",margin:0}}>{p.payment_number}</h2>
+                  </div>
+                  <button onClick={onDelete}
+                    style={{padding:"6px 12px",background:ui.cardBg,color:"#B91C1C",border:"0.5px solid #FCA5A5",borderRadius:5,fontSize:12,cursor:"pointer",fontFamily:ui.fontBody}}>
+                    🗑 حذف الدفعة
+                  </button>
+                </div>
+                <div style={{display:"grid",gridTemplateColumns:mob?"1fr":"2fr 1fr",gap:10,alignItems:"start"}}>
+                  <div>
+                    <div style={card}>
+                      <div style={cardTitle}>معلومات الدفعة</div>
+                      {kv("المورد", p.supplier_id ? <a href={`#admin/suppliers/${encodeURIComponent(p.supplier_id)}`} style={{color:"#1D4ED8",textDecoration:"none"}}>{p.supplier_name || "—"}</a> : "—")}
+                      {kv("المبلغ", `${(Number(p.amount)||0).toLocaleString()} ج`)}
+                      {kv("تاريخ الدفع", p.payment_date || "—")}
+                      {kv("طريقة الدفع", methodLabel(p.payment_method))}
+                      {p.reference_number && kv("رقم المرجع", p.reference_number)}
+                    </div>
+                    <div style={card}>
+                      <div style={cardTitle}>الفواتير المسددة ({allocs.length})</div>
+                      {allocs.length === 0 ? (
+                        <div style={{fontSize:12,color:ui.textSub,fontFamily:ui.fontBody,fontStyle:"italic"}}>—</div>
+                      ) : (
+                        <div style={{display:"flex",flexDirection:"column",gap:6}}>
+                          {allocs.map((a, i) => (
+                            <div key={i} style={{display:"flex",justifyContent:"space-between",padding:"7px 10px",background:"#F9FAFB",borderRadius:5,fontSize:12,fontFamily:ui.fontBody}}>
+                              <a href={`#admin/purchases/${encodeURIComponent(a.invoice_number || a.purchase_invoice_id)}`} style={{color:"#1D4ED8",textDecoration:"none",fontFamily:"monospace"}}>{a.invoice_number || a.purchase_invoice_id}</a>
+                              <span style={{fontFamily:"monospace",fontWeight:500}}>{(Number(a.amount_allocated)||0).toLocaleString()} ج</span>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                    {p.notes && (
+                      <div style={card}>
+                        <div style={cardTitle}>ملاحظات</div>
+                        <div style={{fontSize:12.5,color:ui.text,fontFamily:ui.fontBody,whiteSpace:"pre-wrap"}}>{p.notes}</div>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              </div>
+            );
+          })()}
+
           {/* ─── SUPPLIERS (Catalog/Stock refactor — Phase 2.4) ────────────── */}
           {tab === "suppliers" && !supplierDetailId && (() => {
             const ag    = suppliersAggs || {};
@@ -12912,6 +13127,260 @@ async function generateAwbPdf({ ship, bulk, sender, action = "save" } = {}) {
     doc.save(name);
   }
   return doc;
+}
+
+// ─── SupplierPaymentForm — module-scope (input focus preservation) ──────────
+// Records a payment to a supplier with per-invoice allocations. The form
+// loads the supplier's unpaid invoices when supplier is selected and lets
+// the admin allocate the payment amount across them. Validates that
+// sum(allocations) === payment.amount before allowing save.
+function SupplierPaymentForm({ suppliers, authUser, onSaved, onCancel, ui, mob }) {
+  const today = new Date().toISOString().slice(0, 10);
+  const [supplierId,    setSupplierId]    = useState("");
+  const [amount,        setAmount]        = useState(0);
+  const [paymentDate,   setPaymentDate]   = useState(today);
+  const [paymentMethod, setPaymentMethod] = useState("cash");
+  const [refNum,        setRefNum]        = useState("");
+  const [notes,         setNotes]         = useState("");
+  const [outstandingInvs, setOutstandingInvs] = useState([]); // [{ id, invoice_number, total, amount_paid, remaining, invoice_date }]
+  const [allocations,     setAllocations]     = useState({}); // { [invoiceId]: amount }
+  const [saveBusy, setSaveBusy] = useState(false);
+  const [err,      setErr]      = useState("");
+
+  // When supplier changes, fetch their outstanding (received + not fully
+  // paid) invoices so the admin can allocate against them.
+  useEffect(() => {
+    let cancelled = false;
+    if (!supplierId) { setOutstandingInvs([]); setAllocations({}); return; }
+    (async () => {
+      try {
+        const qs = new URLSearchParams({ supplier_id: supplierId, status: "received", perPage: "100" });
+        const r = await fetch(`/api/purchases?${qs}`);
+        if (!r.ok || cancelled) return;
+        const d = await r.json();
+        const inv = (d.rows || [])
+          .filter(x => x.payment_status !== "paid")
+          .map(x => ({
+            id: x.id,
+            invoice_number: x.invoice_number,
+            total: Number(x.total) || 0,
+            amount_paid: Number(x.amount_paid) || 0,
+            remaining: (Number(x.total) || 0) - (Number(x.amount_paid) || 0),
+            invoice_date: x.invoice_date,
+          }))
+          .filter(x => x.remaining > 0);
+        setOutstandingInvs(inv);
+        setAllocations({});
+      } catch {}
+    })();
+    return () => { cancelled = true; };
+  }, [supplierId]);
+
+  const totalAllocated = Object.values(allocations).reduce((s, v) => s + (Number(v) || 0), 0);
+  const remainingToAllocate = (Number(amount) || 0) - totalAllocated;
+  const allocOk = Math.abs(remainingToAllocate) < 0.005 && (Number(amount) || 0) > 0;
+
+  const inputStyle  = { padding:"7px 10px",border:ui.border,borderRadius:5,fontFamily:ui.fontBody,fontSize:12.5,color:ui.text,outline:"none",boxSizing:"border-box",width:"100%" };
+  const numInput    = { ...inputStyle, fontFamily:"monospace", direction:"ltr", textAlign:"left" };
+  const card        = { background:ui.cardBg, border:ui.border, borderRadius:ui.radius, padding:"12px 14px", marginBottom:10 };
+  const cardTitle   = { fontSize:12.5,fontWeight:600,color:ui.text,fontFamily:ui.fontBody,marginBottom:10,paddingBottom:6,borderBottom:"0.5px solid #EEE" };
+  const lbl         = { fontSize:11.5,color:ui.textSub,fontFamily:ui.fontBody,marginBottom:3,display:"block" };
+
+  // "Allocate evenly across outstanding" helper — fills allocations[i] = remaining[i]
+  // (capped so total stays ≤ payment amount).
+  const autoAllocate = () => {
+    let left = Number(amount) || 0;
+    const next = {};
+    for (const inv of outstandingInvs) {
+      if (left <= 0) break;
+      const allot = Math.min(left, inv.remaining);
+      if (allot > 0) { next[inv.id] = Math.round(allot * 100) / 100; left -= allot; }
+    }
+    setAllocations(next);
+  };
+
+  const onSave = async () => {
+    if (!supplierId) { setErr("اختر مورداً"); return; }
+    if (!(Number(amount) > 0)) { setErr("المبلغ يجب أن يكون أكبر من 0"); return; }
+    if (!allocOk) { setErr(`توزيع المبلغ غير مكتمل — متبقي ${remainingToAllocate.toLocaleString()} ج`); return; }
+    setErr(""); setSaveBusy(true);
+    try {
+      const allocList = Object.entries(allocations)
+        .filter(([_, v]) => (Number(v) || 0) > 0)
+        .map(([invId, v]) => ({ purchase_invoice_id: invId, amount_allocated: Number(v) }));
+      const body = {
+        supplier_id: supplierId,
+        amount: Number(amount),
+        payment_date: paymentDate,
+        payment_method: paymentMethod,
+        reference_number: refNum || null,
+        notes: notes || null,
+        allocations: allocList,
+        actor_id:   (authUser && authUser.email) || null,
+        actor_name: (authUser && authUser.name)  || "Super Admin",
+      };
+      const r = await fetch("/api/supplier-payments", { method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify(body) });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok) { setErr(d.error || `فشل الحفظ (${r.status})`); return; }
+      if (onSaved) onSaved(d);
+    } catch (e) { setErr(e.message || String(e)); }
+    finally { setSaveBusy(false); }
+  };
+
+  return (
+    <div>
+      <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:14,flexWrap:"wrap",gap:10}}>
+        <div>
+          <h2 style={{fontSize:18,fontWeight:600,color:ui.text,fontFamily:ui.fontBody,margin:0}}>دفعة جديدة للمورد</h2>
+          <div style={{fontSize:12,color:ui.textSub,fontFamily:ui.fontBody,marginTop:2}}>سيتم تخفيض مستحقات المورد بعد الحفظ</div>
+        </div>
+        <div style={{display:"flex",gap:8}}>
+          <button onClick={onCancel}
+            style={{padding:"8px 14px",background:ui.cardBg,color:ui.text,border:ui.border,borderRadius:6,fontSize:12.5,cursor:"pointer",fontFamily:ui.fontBody}}>
+            إلغاء
+          </button>
+          <button onClick={onSave} disabled={saveBusy || !allocOk || !supplierId}
+            style={{padding:"8px 16px",background:(saveBusy||!allocOk||!supplierId)?"#9CA3AF":ui.text,color:"#fff",border:"none",borderRadius:6,fontSize:12.5,cursor:(saveBusy||!allocOk||!supplierId)?"not-allowed":"pointer",fontFamily:ui.fontBody,fontWeight:500}}>
+            {saveBusy ? "جاري الحفظ..." : "حفظ الدفعة"}
+          </button>
+        </div>
+      </div>
+
+      {err && (
+        <div style={{background:"#FEE2E2",border:"0.5px solid #FCA5A5",borderRadius:6,padding:"8px 12px",marginBottom:10,fontSize:12.5,color:"#991B1B",fontFamily:ui.fontBody}}>
+          {err}
+        </div>
+      )}
+
+      <div style={{display:"grid",gridTemplateColumns:mob?"1fr":"2fr 1fr",gap:10,alignItems:"start"}}>
+        <div>
+          {/* Basic info */}
+          <div style={card}>
+            <div style={cardTitle}>معلومات الدفعة</div>
+            <div style={{display:"grid",gridTemplateColumns:mob?"1fr":"1fr 1fr",gap:10}}>
+              <div>
+                <label style={lbl}>المورد <span style={{color:"#DC2626"}}>*</span></label>
+                <select value={supplierId} onChange={e=>setSupplierId(e.target.value)} style={inputStyle}>
+                  <option value="">— اختر مورداً —</option>
+                  {(suppliers || []).map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
+                </select>
+              </div>
+              <div>
+                <label style={lbl}>المبلغ <span style={{color:"#DC2626"}}>*</span></label>
+                <input type="number" min={0} step="0.01" value={amount} onChange={e=>setAmount(e.target.value)} style={numInput}/>
+              </div>
+              <div>
+                <label style={lbl}>تاريخ الدفع</label>
+                <input type="date" value={paymentDate} onChange={e=>setPaymentDate(e.target.value)} style={inputStyle}/>
+              </div>
+              <div>
+                <label style={lbl}>طريقة الدفع</label>
+                <select value={paymentMethod} onChange={e=>setPaymentMethod(e.target.value)} style={inputStyle}>
+                  <option value="cash">كاش</option>
+                  <option value="transfer">تحويل بنكي</option>
+                  <option value="card">فيزا</option>
+                  <option value="wallet">محفظة إلكترونية</option>
+                </select>
+              </div>
+              <div style={{gridColumn: mob ? "auto" : "1 / span 2"}}>
+                <label style={lbl}>رقم المرجع (اختياري)</label>
+                <input value={refNum} onChange={e=>setRefNum(e.target.value)}
+                  placeholder="رقم العملية البنكية / الشيك"
+                  style={inputStyle}/>
+              </div>
+              <div style={{gridColumn: mob ? "auto" : "1 / span 2"}}>
+                <label style={lbl}>ملاحظات</label>
+                <textarea rows={2} value={notes} onChange={e=>setNotes(e.target.value)}
+                  style={{...inputStyle, fontFamily:ui.fontBody, resize:"vertical"}}/>
+              </div>
+            </div>
+          </div>
+
+          {/* Allocations */}
+          <div style={card}>
+            <div style={{...cardTitle, display:"flex", justifyContent:"space-between", alignItems:"center"}}>
+              <span>توزيع المبلغ على الفواتير ({outstandingInvs.length})</span>
+              {outstandingInvs.length > 0 && Number(amount) > 0 && (
+                <button onClick={autoAllocate}
+                  style={{padding:"4px 10px",background:"transparent",color:"#1D4ED8",border:"0.5px dashed #93C5FD",borderRadius:5,fontSize:11,cursor:"pointer",fontFamily:ui.fontBody}}>
+                  توزيع تلقائي
+                </button>
+              )}
+            </div>
+            {!supplierId ? (
+              <div style={{fontSize:12,color:ui.textSub,fontFamily:ui.fontBody,fontStyle:"italic"}}>اختر مورداً أولاً</div>
+            ) : outstandingInvs.length === 0 ? (
+              <div style={{fontSize:12,color:ui.textSub,fontFamily:ui.fontBody,fontStyle:"italic"}}>لا توجد فواتير غير مدفوعة لهذا المورد</div>
+            ) : (
+              <div style={{overflowX:"auto"}}>
+                <table style={{width:"100%",borderCollapse:"collapse",fontFamily:ui.fontBody,fontSize:12,minWidth:600}}>
+                  <thead>
+                    <tr style={{background:ui.sideBg}}>
+                      <th style={{padding:"7px 8px",textAlign:"right",fontSize:11,color:ui.textSub,fontWeight:500}}>الفاتورة</th>
+                      <th style={{padding:"7px 8px",textAlign:"right",fontSize:11,color:ui.textSub,fontWeight:500}}>التاريخ</th>
+                      <th style={{padding:"7px 8px",textAlign:"right",fontSize:11,color:ui.textSub,fontWeight:500}}>الإجمالي</th>
+                      <th style={{padding:"7px 8px",textAlign:"right",fontSize:11,color:ui.textSub,fontWeight:500}}>المدفوع</th>
+                      <th style={{padding:"7px 8px",textAlign:"right",fontSize:11,color:ui.textSub,fontWeight:500}}>المتبقي</th>
+                      <th style={{padding:"7px 8px",textAlign:"right",fontSize:11,color:ui.textSub,fontWeight:500,width:130}}>تخصيص</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {outstandingInvs.map(inv => {
+                      const allot = Number(allocations[inv.id] || 0);
+                      const overAllocated = allot > inv.remaining + 0.005;
+                      return (
+                        <tr key={inv.id} style={{borderTop:"0.5px solid #EEE"}}>
+                          <td style={{padding:"7px 8px",fontFamily:"monospace"}}>
+                            <a href={`#admin/purchases/${encodeURIComponent(inv.invoice_number || inv.id)}`} style={{color:"#1D4ED8",textDecoration:"none"}}>{inv.invoice_number}</a>
+                          </td>
+                          <td style={{padding:"7px 8px",color:ui.textSub}}>{inv.invoice_date || "—"}</td>
+                          <td style={{padding:"7px 8px",fontFamily:"monospace"}}>{inv.total.toLocaleString()} ج</td>
+                          <td style={{padding:"7px 8px",fontFamily:"monospace"}}>{inv.amount_paid.toLocaleString()} ج</td>
+                          <td style={{padding:"7px 8px",fontFamily:"monospace",fontWeight:500}}>{inv.remaining.toLocaleString()} ج</td>
+                          <td style={{padding:"7px 8px"}}>
+                            <input type="number" min={0} step="0.01" value={allocations[inv.id] || ""}
+                              onChange={e=>setAllocations(prev => ({...prev, [inv.id]: e.target.value}))}
+                              placeholder="0"
+                              style={{...numInput, borderColor: overAllocated ? "#FCA5A5" : ui.border.replace("0.5px solid ","")}}/>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+        </div>
+
+        {/* Sidebar — allocation summary */}
+        <div>
+          <div style={card}>
+            <div style={cardTitle}>ملخص التوزيع</div>
+            <div style={{display:"flex",flexDirection:"column",gap:6,fontSize:12.5,fontFamily:ui.fontBody,color:ui.text}}>
+              <div style={{display:"flex",justifyContent:"space-between"}}>
+                <span>المبلغ الإجمالي</span>
+                <span style={{fontFamily:"monospace",fontWeight:500}}>{(Number(amount)||0).toLocaleString()} ج</span>
+              </div>
+              <div style={{display:"flex",justifyContent:"space-between"}}>
+                <span>المُوزّع</span>
+                <span style={{fontFamily:"monospace",fontWeight:500}}>{totalAllocated.toLocaleString()} ج</span>
+              </div>
+              <div style={{display:"flex",justifyContent:"space-between",paddingTop:6,marginTop:4,borderTop:"1px dashed #E5E5E5",fontWeight:600,color: allocOk ? "#15803D" : "#B91C1C"}}>
+                <span>{allocOk ? "✓ مكتمل" : "متبقي"}</span>
+                <span style={{fontFamily:"monospace"}}>{remainingToAllocate.toLocaleString()} ج</span>
+              </div>
+              {!allocOk && (Number(amount) || 0) > 0 && (
+                <div style={{fontSize:11,color:ui.textSub,fontFamily:ui.fontBody,marginTop:4,fontStyle:"italic"}}>
+                  يجب توزيع كامل المبلغ على الفواتير قبل الحفظ
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
 }
 
 // ─── PurchaseInvoiceForm — module-scope so typing in any field doesn't ──────
