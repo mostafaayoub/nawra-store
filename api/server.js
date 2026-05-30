@@ -1880,7 +1880,6 @@ app.post('/api/orders', (req, res) => {
     } = req.body;
     if (!id || !name) return res.status(400).json({ error: 'id and name required' });
 
-    const orderNumber = allocateOrderNumber();
     const isTest = is_test ? 1 : 0;
 
     // ── Phase 3: cost_snapshot ─────────────────────────────────────────
@@ -1905,28 +1904,90 @@ app.post('/api/orders', (req, res) => {
       note: '\u062a\u0645 \u0625\u0646\u0634\u0627\u0621 \u0627\u0644\u0637\u0644\u0628',
     }];
 
-    db.prepare(`
-      INSERT OR REPLACE INTO orders (
-        id, date, name, phone, city, address, items, total, status, lat, lng, userEmail,
-        order_number, payment_method, payment_status, payment_reference, customer_notes,
-        subtotal, shipping_cost, discount_amount, coupon_code, status_history, is_test
-      ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-    `).run(
-      String(id), date, name, phone, city, address,
-      JSON.stringify(itemsWithCost), Number(total)||0, status||'\u062c\u062f\u064a\u062f',
-      lat||null, lng||null, userEmail||null,
-      orderNumber,
-      payment_method || 'cash',
-      payment_status || 'unpaid',
-      payment_reference || null,
-      customer_notes || null,
-      subtotal != null ? Number(subtotal) : null,
-      shipping_cost != null ? Number(shipping_cost) : null,
-      discount_amount != null ? Number(discount_amount) : null,
-      coupon_code || null,
-      JSON.stringify(history),
-      isTest,
-    );
+    // \u2500\u2500 Race-safe checkout (Phase 1 slice 1.3) \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+    // Wrap stock validation + INSERT in a single db.transaction (immediate
+    // mode for writes in better-sqlite3) so concurrent POSTs see consistent
+    // stock_available. Insufficient stock throws STOCK_CONFLICT which we
+    // surface as 409 with 3 same-category in-stock alternatives the
+    // storefront can offer. Per Part B the order itself doesn't reserve
+    // stock yet -- reservation happens on admin confirm (\u062c\u062f\u064a\u062f \u2192 \u0642\u064a\u062f \u0627\u0644\u062a\u062c\u0647\u064a\u0632)
+    // via applyStockTransition. is_test orders skip the check so smoke runs
+    // never collide with real-product availability.
+    let conflict = null;
+    let orderNumber;
+    const createTx = db.transaction(() => {
+      if (!isTest) {
+        for (const it of itemsWithCost) {
+          const qty = Number(it.qty) || 0;
+          if (!qty) continue;
+          const p = findProductForItem(it);
+          if (!p) continue; // unmatchable line -- admin manual order, let it pass
+          const available = Number(p.stock) || 0;
+          if (available < qty) {
+            const alts = db.prepare(`
+              SELECT id, name, images, price, stock
+              FROM products
+              WHERE category = ? AND id != ? AND stock > 0
+                AND status = 'published'
+                AND (is_test = 0 OR is_test IS NULL)
+              ORDER BY created_at DESC LIMIT 3
+            `).all(p.category || '', p.id);
+            conflict = {
+              product_id: p.id,
+              product_name: p.name,
+              available,
+              requested: qty,
+              alternatives: alts.map(a => ({
+                id: a.id, name: a.name, price: a.price, stock: a.stock,
+                image: (() => { try { const arr = JSON.parse(a.images || '[]'); return arr[0] || null; } catch { return null; } })(),
+              })),
+            };
+            const err = new Error('STOCK_CONFLICT'); err.code = 'STOCK_CONFLICT';
+            throw err;
+          }
+        }
+      }
+
+      orderNumber = allocateOrderNumber();
+
+      db.prepare(`
+        INSERT OR REPLACE INTO orders (
+          id, date, name, phone, city, address, items, total, status, lat, lng, userEmail,
+          order_number, payment_method, payment_status, payment_reference, customer_notes,
+          subtotal, shipping_cost, discount_amount, coupon_code, status_history, is_test
+        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+      `).run(
+        String(id), date, name, phone, city, address,
+        JSON.stringify(itemsWithCost), Number(total)||0, status||'\u062c\u062f\u064a\u062f',
+        lat||null, lng||null, userEmail||null,
+        orderNumber,
+        payment_method || 'cash',
+        payment_status || 'unpaid',
+        payment_reference || null,
+        customer_notes || null,
+        subtotal != null ? Number(subtotal) : null,
+        shipping_cost != null ? Number(shipping_cost) : null,
+        discount_amount != null ? Number(discount_amount) : null,
+        coupon_code || null,
+        JSON.stringify(history),
+        isTest,
+      );
+
+      // ADJ 3: per-order audit timeline starts on creation.
+      writeOrderActivity({
+        orderId: id, fromStatus: null, toStatus: status || '\u062c\u062f\u064a\u062f',
+        actor: { id: userEmail || null, name: name || null },
+        notes: 'order_created', isTest,
+      });
+    });
+
+    try { createTx(); }
+    catch (e) {
+      if (e && e.code === 'STOCK_CONFLICT' && conflict) {
+        return res.status(409).json({ error: 'insufficient_stock', ...conflict });
+      }
+      throw e;
+    }
 
     if (userEmail) {
       upsertUser.run(userEmail, name||null, phone||null, Number(total)||0);
@@ -1939,12 +2000,10 @@ app.post('/api/orders', (req, res) => {
       logCustomerActivity(userEmail, 'order_placed', { order_id: String(id), order_number: orderNumber, total: Number(total)||0 });
     }
 
-    // Reserve stock so the inventory page reflects what's locked to this order.
-    // Skip for is_test=1 orders so smoke runs can't increment stock_reserved
-    // on real products — the orphan reservation would survive the order purge
-    // and drift inventory_value across every run.
-    const order = db.prepare('SELECT * FROM orders WHERE id = ?').get(String(id));
-    if (!isTest) reserveStockForOrder(order, itemsWithCost);
+    // POST does NOT reserve stock -- reservation happens on admin confirm
+    // (جديد → قيد التجهيز) via applyStockTransition (slice 1.4). The legacy
+    // reserveStockForOrder helper stays defined for any callers that still
+    // use it directly but the storefront path no longer triggers it.
 
     // Notify the super admin so they see the new order in their inbox.
     sendMessage({
