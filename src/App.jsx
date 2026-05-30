@@ -1776,6 +1776,8 @@ function AdminDash({ go }) {
   const [finProfitByCategory, setFinProfitByCategory] = useState({ rows: [] });
   const [finKeyMetrics,   setFinKeyMetrics]   = useState(null);
   const [finBreakEven,    setFinBreakEven]    = useState(null);
+  // Phase 3: lifetime balance sheet snapshot (Assets/Liabilities/Equity).
+  const [finBalanceSheet, setFinBalanceSheet] = useState(null);
   // Filter chips — collapsed dropdown panel toggled by a chip button.
   // payment_method/product_category server-side filtering isn't wired yet
   // (Phase-1 backend didn't add those query params); these affect only
@@ -1803,7 +1805,7 @@ function AdminDash({ go }) {
       const compareQS = finCompare === "yoy" ? "&comparison=yoy" : "";
       // One round-trip per logical concern. Parallel so the UI doesn't wait
       // on the slowest endpoint serially.
-      const [s, c, b, cf, rcv, pay, pbc, km, be] = await Promise.all([
+      const [s, c, b, cf, rcv, pay, pbc, km, be, bs] = await Promise.all([
         fetch(`/api/finance/summary?from=${from}&to=${to}${compareQS}`).then(r => r.ok ? r.json() : null),
         fetch(`/api/finance/chart?from=${from}&to=${to}`).then(r => r.ok ? r.json() : []),
         fetch(`/api/finance/expenses?from=${from}&to=${to}`).then(r => r.ok ? r.json() : { rows:[], total:0, revenue:0 }),
@@ -1813,11 +1815,13 @@ function AdminDash({ go }) {
         fetch(`/api/finance/profit-by-category?from=${from}&to=${to}`).then(r => r.ok ? r.json() : { rows:[] }),
         fetch(`/api/finance/key-metrics?from=${from}&to=${to}`).then(r => r.ok ? r.json() : null),
         fetch(`/api/finance/break-even`).then(r => r.ok ? r.json() : null),
+        fetch(`/api/finance/balance-sheet`).then(r => r.ok ? r.json() : null),
       ]);
       setFinSummary(s); setFinChart(c || []); setFinExpBreakdown(b || { rows:[], total:0, revenue:0 });
       setFinCashFlow(cf); setFinReceivables(rcv); setFinPayables(pay);
       setFinProfitByCategory(pbc || { rows:[] });
       setFinKeyMetrics(km); setFinBreakEven(be);
+      setFinBalanceSheet(bs);
     } catch {}
   };
   useEffect(() => { if (tab === "finance") refreshFinance(); }, [tab, finRange, finFrom, finTo, finCompare]); // eslint-disable-line
@@ -6403,6 +6407,11 @@ function AdminDash({ go }) {
               { l:"هامش صافي الربح", v: `${s.net_margin_pct}%`,change: s.change?.net_margin_pct, accent:"#9333EA", isPct:true },
               { l:"التدفق النقدي",   v: fmt(s.cash_flow),      change: s.change?.cash_flow,      accent: s.cash_flow >= 0 ? "#16A34A" : "#DC2626" },
             ];
+            // Phase 3 KPIs — inventory asset (Σ stock × WAC across products).
+            // Surfaces from /api/finance/summary (P3.1 backend addition).
+            const kpisRow3 = [
+              { l:"أصل المخزون", v: fmt(s.inventory_asset_value || 0), accent:"#0EA5E9" },
+            ];
 
             // CSV export — every visible section
             const exportFinanceCsv = () => {
@@ -6645,9 +6654,85 @@ function AdminDash({ go }) {
                   <div style={{display:"grid",gridTemplateColumns:mob?"1fr 1fr":"repeat(4,1fr)",gap:10,marginBottom:10}}>
                     {kpisRow1.map((k,i) => <KpiCard key={`r1-${i}`} k={k}/>)}
                   </div>
-                  <div style={{display:"grid",gridTemplateColumns:mob?"1fr 1fr":"repeat(4,1fr)",gap:10,marginBottom:12}}>
+                  <div style={{display:"grid",gridTemplateColumns:mob?"1fr 1fr":"repeat(4,1fr)",gap:10,marginBottom:10}}>
                     {kpisRow2.map((k,i) => <KpiCard key={`r2-${i}`} k={k}/>)}
                   </div>
+                  {/* SECTION 1c — Phase 3 KPIs: inventory asset */}
+                  <div style={{display:"grid",gridTemplateColumns:mob?"1fr 1fr":"repeat(4,1fr)",gap:10,marginBottom:12}}>
+                    {kpisRow3.map((k,i) => <KpiCard key={`r3-${i}`} k={k}/>)}
+                  </div>
+
+                  {/* SECTION 1d — Phase 3 Balance Sheet (lifetime snapshot) */}
+                  {finBalanceSheet && (
+                    <div style={{...cardStyle,marginBottom:12}}>
+                      <div style={sectionTitle}>الميزانية العمومية (لقطة لحظية)</div>
+                      <div style={{padding:"12px 14px",display:"grid",gridTemplateColumns:mob?"1fr":"1fr 1fr 1fr",gap:18}}>
+                        {/* Assets */}
+                        <div>
+                          <div style={{fontSize:11.5,color:"#15803D",fontFamily:ui.fontBody,marginBottom:8,fontWeight:600}}>
+                            الأصول (Assets)
+                          </div>
+                          {[
+                            ["النقد",           finBalanceSheet.assets?.cash        || 0, "#16A34A"],
+                            ["المخزون (WAC)",   finBalanceSheet.assets?.inventory   || 0, "#0EA5E9"],
+                            ["الذمم المدينة",   finBalanceSheet.assets?.receivables || 0, "#F97316"],
+                          ].map(([lbl,val,col]) => (
+                            <div key={lbl} style={{display:"flex",justifyContent:"space-between",fontFamily:ui.fontBody,fontSize:12.5,color:ui.text,padding:"5px 0"}}>
+                              <span style={{display:"inline-flex",alignItems:"center",gap:6}}>
+                                <span style={{width:8,height:8,borderRadius:2,background:col}}/>{lbl}
+                              </span>
+                              <span style={{fontFamily:"monospace"}}>{fmt(val)} ج</span>
+                            </div>
+                          ))}
+                          <div style={{display:"flex",justifyContent:"space-between",paddingTop:8,marginTop:6,borderTop:"1px dashed #BBF7D0",fontWeight:600,fontSize:13.5,color:"#15803D",fontFamily:ui.fontBody}}>
+                            <span>إجمالي الأصول</span>
+                            <span style={{fontFamily:"monospace"}}>{fmt(finBalanceSheet.assets?.total || 0)} ج</span>
+                          </div>
+                        </div>
+                        {/* Liabilities */}
+                        <div>
+                          <div style={{fontSize:11.5,color:"#B91C1C",fontFamily:ui.fontBody,marginBottom:8,fontWeight:600}}>
+                            الخصوم (Liabilities)
+                          </div>
+                          {[
+                            ["مستحقات للموردين",     finBalanceSheet.liabilities?.supplier_payables || 0, "#DC2626"],
+                            ["مصروفات غير مدفوعة",   finBalanceSheet.liabilities?.expense_payables  || 0, "#EC4899"],
+                          ].map(([lbl,val,col]) => (
+                            <div key={lbl} style={{display:"flex",justifyContent:"space-between",fontFamily:ui.fontBody,fontSize:12.5,color:ui.text,padding:"5px 0"}}>
+                              <span style={{display:"inline-flex",alignItems:"center",gap:6}}>
+                                <span style={{width:8,height:8,borderRadius:2,background:col}}/>{lbl}
+                              </span>
+                              <span style={{fontFamily:"monospace"}}>{fmt(val)} ج</span>
+                            </div>
+                          ))}
+                          <div style={{display:"flex",justifyContent:"space-between",paddingTop:8,marginTop:6,borderTop:"1px dashed #FECACA",fontWeight:600,fontSize:13.5,color:"#B91C1C",fontFamily:ui.fontBody}}>
+                            <span>إجمالي الخصوم</span>
+                            <span style={{fontFamily:"monospace"}}>{fmt(finBalanceSheet.liabilities?.total || 0)} ج</span>
+                          </div>
+                        </div>
+                        {/* Equity */}
+                        <div>
+                          <div style={{fontSize:11.5,color:"#1D4ED8",fontFamily:ui.fontBody,marginBottom:8,fontWeight:600}}>
+                            حقوق الملكية (Equity)
+                          </div>
+                          <div style={{padding:"14px 12px",background:"#EFF6FF",border:"0.5px solid #BFDBFE",borderRadius:6,marginTop:8}}>
+                            <div style={{fontSize:11.5,color:ui.textSub,fontFamily:ui.fontBody,marginBottom:4}}>الأصول − الخصوم</div>
+                            <div style={{fontSize:21,fontWeight:600,color: (finBalanceSheet.equity || 0) >= 0 ? "#1D4ED8" : "#B91C1C",fontFamily:"monospace"}}>
+                              {fmt(finBalanceSheet.equity || 0)} <span style={{fontSize:13,color:ui.textSub,fontFamily:ui.fontBody,fontWeight:400}}>ج</span>
+                            </div>
+                          </div>
+                          {(finBalanceSheet.opening_cash || 0) > 0 && (
+                            <div style={{marginTop:8,fontSize:11,color:ui.textSub,fontFamily:ui.fontBody}}>
+                              يشمل رصيد افتتاحي قدره {fmt(finBalanceSheet.opening_cash)} ج
+                            </div>
+                          )}
+                          <div style={{marginTop:8,fontSize:10.5,color:ui.textSub,fontFamily:ui.fontBody,fontStyle:"italic"}}>
+                            لقطة عمر كامل — تتحدث مع كل عملية بيع وشراء ودفع
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  )}
 
                   {/* SECTION 2 — Cash flow breakdown */}
                   <div style={{...cardStyle,marginBottom:12}}>
