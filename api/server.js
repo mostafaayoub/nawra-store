@@ -356,6 +356,83 @@ ensureColumn('returns', 'pickup_address',    'TEXT');                          /
 ensureColumn('returns', 'return_tracking',   'TEXT');                          // waybill from courier when customer ships
 ensureColumn('returns', 'rejection_reason',  'TEXT');                          // when status=rejected
 
+// ── Order Lifecycle Integration (Phase 1) ─────────────────────────────────
+// Adds the columns the 5-stage return flow, refused-delivery flow, and
+// auto-shipment hooks all read/write. Idempotent via ensureColumn. None
+// are NOT NULL so existing rows survive without backfill.
+ensureColumn('orders',    'is_refused',                'INTEGER DEFAULT 0');     // set when customer refuses delivery at the door
+ensureColumn('shipments', 'shipment_type',             "TEXT DEFAULT 'outbound'"); // outbound | return | refused_return
+ensureColumn('shipments', 'parent_shipment_id',        'TEXT');                  // for return/refused_return: original outbound shipment id
+ensureColumn('returns',   'received_at_warehouse_at',  'DATETIME');              // stage 4: physical arrival at warehouse
+ensureColumn('returns',   'refunded_at',               'DATETIME');              // stage 5: refund fully issued (distinct from legacy processed_at)
+ensureColumn('returns',   'return_courier_cost',       'REAL DEFAULT 0');        // cost of the return-leg waybill (store always pays courier; who-it's-deducted-from is below)
+ensureColumn('returns',   'return_shipping_paid_by',   "TEXT DEFAULT 'store'");   // store | customer — derived from return_reasons.shipping_paid_by on approval
+ensureColumn('return_reasons', 'shipping_paid_by',     "TEXT DEFAULT 'store'");   // ADJ 1: per-reason rule for who eats the return-leg shipping cost
+
+// One-shot backfill: the seeded "changed_mind" reason should make the
+// customer pay return shipping (Part E "غيرت رأيي" rule). Other seeds
+// stay 'store' (the column default).
+try { db.prepare("UPDATE return_reasons SET shipping_paid_by = 'customer' WHERE id = 'rr_def_changed_mind' AND shipping_paid_by = 'store'").run(); } catch {}
+
+// pending_refunds — Balance Sheet liability bucket (Part I). One row per
+// approved-but-not-yet-paid refund. Cleared on refund issuance (status =
+// 'issued'). Source of truth for the "مرتجعات معتمدة بانتظار الرد" KPI.
+db.exec(`
+  CREATE TABLE IF NOT EXISTS pending_refunds (
+    id             TEXT PRIMARY KEY,
+    return_id      TEXT NOT NULL,
+    amount         REAL NOT NULL,
+    refund_method  TEXT,                   -- cash | original | store_credit
+    status         TEXT DEFAULT 'pending', -- pending | issued
+    is_test        INTEGER DEFAULT 0,
+    created_at     DATETIME DEFAULT CURRENT_TIMESTAMP,
+    settled_at     DATETIME
+  )
+`);
+try { db.exec('CREATE INDEX IF NOT EXISTS idx_pending_refunds_return ON pending_refunds(return_id)'); } catch {}
+try { db.exec('CREATE INDEX IF NOT EXISTS idx_pending_refunds_status ON pending_refunds(status)'); } catch {}
+
+// customer_debts — Receivables source for non-order debts (Part F: the
+// outbound shipping fee owed by a customer who refused delivery). One
+// row per debt; settled when admin marks "تم تحصيل" or writes off.
+db.exec(`
+  CREATE TABLE IF NOT EXISTS customer_debts (
+    id                 TEXT PRIMARY KEY,
+    customer_id        TEXT,                   -- user.email when known
+    customer_name      TEXT,
+    customer_phone     TEXT,
+    amount             REAL NOT NULL,
+    reason             TEXT NOT NULL,          -- e.g. 'shipping_after_refusal'
+    status             TEXT DEFAULT 'pending', -- pending | paid | written_off
+    reference_order_id TEXT,                   -- triggering order
+    is_test            INTEGER DEFAULT 0,
+    created_at         DATETIME DEFAULT CURRENT_TIMESTAMP,
+    settled_at         DATETIME
+  )
+`);
+try { db.exec('CREATE INDEX IF NOT EXISTS idx_customer_debts_status   ON customer_debts(status)'); } catch {}
+try { db.exec('CREATE INDEX IF NOT EXISTS idx_customer_debts_customer ON customer_debts(customer_id)'); } catch {}
+
+// order_activity_log — ADJ 3: per-order audit timeline. Mirrors the
+// shipment_status_history + return_activity_log patterns. Every order
+// state transition writes one row. Order details page renders this as
+// a timeline for support visibility.
+db.exec(`
+  CREATE TABLE IF NOT EXISTS order_activity_log (
+    id           TEXT PRIMARY KEY,
+    order_id     TEXT NOT NULL,
+    from_status  TEXT,
+    to_status    TEXT NOT NULL,
+    actor_id     TEXT,
+    actor_name   TEXT,
+    notes        TEXT,
+    metadata     TEXT DEFAULT '{}',
+    is_test      INTEGER DEFAULT 0,
+    created_at   DATETIME DEFAULT CURRENT_TIMESTAMP
+  )
+`);
+try { db.exec('CREATE INDEX IF NOT EXISTS idx_order_activity_order ON order_activity_log(order_id, created_at)'); } catch {}
+
 // Per-item refund breakdown — one return can contain many lines (this is
 // the spec's "Products Card" data source). Legacy single-product returns
 // continue to work with zero rows in this table (UI falls back to the
@@ -1138,7 +1215,9 @@ function purgeTestData() {
     }
   } catch (e) { console.warn('[nawra-api] is_test purge payments cascade:', e.message); }
 
-  ['orders', 'expenses', 'products', 'users'].forEach((t) => {
+  ['orders', 'expenses', 'products', 'users',
+   // Order Lifecycle Integration (Phase 1) — new tables that carry is_test
+   'pending_refunds', 'customer_debts', 'order_activity_log'].forEach((t) => {
     try { log(`is_test ${t}`, db.prepare(`DELETE FROM ${t} WHERE is_test = 1`).run().changes); }
     catch (e) { console.warn(`[nawra-api] is_test purge ${t}:`, e.message); }
   });
