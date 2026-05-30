@@ -3198,8 +3198,10 @@ function AdminDash({ go }) {
   }));
   const topProducts = Array.from(productAgg.values()).sort((a,b)=>b.qty-a.qty).slice(0,5);
   // Fallback: if no orders yet, show products from catalogue (qty=0) so the card is never empty
+  // prods may be null while the API fetch is in flight (Phase 3 storefront
+  // refactor moved the source-of-truth to /api/products). Guard with || [].
   const topProductsForRender = topProducts.length ? topProducts
-    : prods.slice(0,3).map(p => ({ name: p.nameAr || p.name, qty:0, rev:0, icon: p.icon, brand: p.brand }));
+    : (prods || []).slice(0,3).map(p => ({ name: p.nameAr || p.name, qty:0, rev:0, icon: p.icon, brand: p.brand }));
 
   // Localized current-month label (e.g. "مايو 2026")
   const monthLabel = new Intl.DateTimeFormat("ar-EG", { month:"long", year:"numeric" }).format(now);
