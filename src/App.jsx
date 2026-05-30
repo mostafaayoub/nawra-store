@@ -330,27 +330,101 @@ const PRODS_KEY = "nawra_products";
 const ProdsCtx = createContext(null);
 const useProds = () => useContext(ProdsCtx);
 
+// API → storefront product shape. Storefront cards/detail pages read:
+// nameAr / nameEn / descAr / descEn / detAr / detEn / useAr / useEn / img /
+// price / priceBefore / stock / brand / badge / icon / bg / id.
+// Source fields (from GET /api/products): name, name_i18n.{ar,en},
+// description, description_i18n.{ar,en}, usage_text, usage_i18n.{ar,en},
+// ingredients, ingredients_i18n.{ar,en}, images[], price, price_before,
+// stock, brand, status, archived, in_stock, featured, is_best_seller.
+function apiToStorefront(p) {
+  const ni = p.name_i18n        || {};
+  const di = p.description_i18n || {};
+  const ii = p.ingredients_i18n || {};
+  const ui = p.usage_i18n       || {};
+  return {
+    id:           p.id,
+    name:         p.name || ni.ar || "",
+    nameAr:       p.name || ni.ar || "",
+    nameEn:       ni.en  || "",
+    descAr:       p.description || di.ar || "",
+    descEn:       di.en  || "",
+    detAr:        p.usage_text || ui.ar || "",
+    detEn:        ui.en  || "",
+    useAr:        p.ingredients || ii.ar || "",
+    useEn:        ii.en  || "",
+    img:          (Array.isArray(p.images) && p.images[0]) || "",
+    price:        Number(p.price)        || 0,
+    priceBefore:  Number(p.price_before) || 0,
+    stock:        Number(p.stock)        || 0,
+    brand:        p.brand || "",
+    category:     p.category || "",
+    badgeAr:      p.is_best_seller ? "الأكثر مبيعاً" : (p.featured ? "مميز" : ""),
+    badgeEn:      p.is_best_seller ? "Best Seller"   : (p.featured ? "Featured" : ""),
+    stars:        5,
+    icon:         "✨",
+    bg:           "linear-gradient(135deg,#F5EBE8,#E8D5C4)",
+  };
+}
+
 function ProdsProvider({ children, initialProds }) {
+  // null = haven't fetched yet (consumers fall back to initialProds for
+  // first paint). After fetch resolves it's always an array (possibly
+  // empty when the DB is genuinely empty — DON'T fall back to PRODS in
+  // that case, the storefront should reflect reality).
   const [prods, setProds] = useState(() => {
     try {
       const saved = JSON.parse(localStorage.getItem(PRODS_KEY));
-      if (saved && saved.length) {
-        // Backfill any missing translated fields (nameEn, descEn, detEn, useEn, img…)
-        // from the fresh PRODS defaults, while keeping admin edits (price, stock, etc.)
-        return saved.map(s => {
-          const fresh = (initialProds || []).find(p => p.id === s.id);
-          return fresh ? { ...fresh, ...s } : s;
-        });
-      }
+      // Trust the cache only for synchronous first paint; the mount
+      // effect below replaces it within a frame with the live list.
+      if (Array.isArray(saved) && saved.length) return saved;
     } catch {}
-    return initialProds;
+    return null;
   });
-  const save = (p) => { setProds(p); localStorage.setItem(PRODS_KEY, JSON.stringify(p)); };
-  const addProd = (p) => save([...prods, { ...p, id: Date.now(), stock: parseInt(p.stock)||10 }]);
-  const updateStock = (id, qty) => save(prods.map(p => p.id === id ? { ...p, stock: Math.max(0, p.stock - qty) } : p));
-  const delProd = (id) => save(prods.filter(p => p.id !== id));
-  const editProd = (id, data) => save(prods.map(p => p.id === id ? { ...p, ...data } : p));
-  return <ProdsCtx.Provider value={{ prods, addProd, delProd, editProd, updateStock }}>{children}</ProdsCtx.Provider>;
+
+  // Live fetch from /api/products on mount + on every navigation to a
+  // storefront route. Previously the provider only ever read localStorage,
+  // so after data resets or admin edits the storefront stayed stuck on
+  // stale (often deleted) products forever.
+  useEffect(() => {
+    let cancelled = false;
+    const refresh = async () => {
+      try {
+        const r = await fetch("/api/products");
+        if (!r.ok || cancelled) return;
+        const list = await r.json();
+        if (!Array.isArray(list)) return;
+        // Storefront only sees PUBLISHED + non-archived products. Stock=0
+        // still renders (with "نفد" badge per existing card UX).
+        const mapped = list
+          .filter(p => p.status === "published" && !p.archived)
+          .map(apiToStorefront);
+        if (cancelled) return;
+        setProds(mapped);
+        try { localStorage.setItem(PRODS_KEY, JSON.stringify(mapped)); } catch {}
+      } catch {}
+    };
+    refresh();
+    const onHash = () => {
+      const h = (typeof window !== "undefined" && window.location.hash) || "";
+      // Skip refresh on admin routes — AdminDash has its own /api/products
+      // pull via refreshProducts(). Refreshing here would race + waste a call.
+      if (!h.startsWith("#admin")) refresh();
+    };
+    window.addEventListener("hashchange", onHash);
+    return () => { cancelled = true; window.removeEventListener("hashchange", onHash); };
+  }, []);
+
+  // Legacy mutations (kept for any old call site that still touches the
+  // localStorage cache directly). After the next refresh on hashchange,
+  // these get overwritten with the live API state — they're effectively
+  // optimistic local updates with no server persistence.
+  const save = (p) => { setProds(p); try { localStorage.setItem(PRODS_KEY, JSON.stringify(p)); } catch {} };
+  const addProd = (p) => save([...(prods || []), { ...p, id: Date.now(), stock: parseInt(p.stock)||10 }]);
+  const updateStock = (id, qty) => save((prods || []).map(p => p.id === id ? { ...p, stock: Math.max(0, p.stock - qty) } : p));
+  const delProd = (id) => save((prods || []).filter(p => p.id !== id));
+  const editProd = (id, data) => save((prods || []).map(p => p.id === id ? { ...p, ...data } : p));
+  return <ProdsCtx.Provider value={{ prods, addProd, delProd, editProd, updateStock, _initialProds: initialProds }}>{children}</ProdsCtx.Provider>;
 }
 
 // ─── Orders Store ─────────────────────────────────────────────────────────────
@@ -680,7 +754,7 @@ function Nav({ r, go, openCart, user, onLogout }) {
             <ul style={{ display: "flex", gap: 22, listStyle: "none", margin: 0, padding: 0 }}>
               {links.map(([h, l]) => <li key={h}><span onClick={() => go(h)} style={{ cursor: "pointer", color: r === h ? C.go : C.dk, fontSize: 13.5, fontFamily: C.fb, fontWeight: 500, letterSpacing: "0.02em" }}>{l}</span></li>)}
             </ul>
-            <SearchBar go={go} allProds={(navProds && navProds.length) ? navProds : PRODS} />
+            <SearchBar go={go} allProds={navProds == null ? PRODS : navProds} />
           </div>
         )}
         <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
@@ -16499,15 +16573,19 @@ function AppInner() {
       if (!user || !isAdminRole(user.role)) { go("#login"); return null; }
       return <AdminDash go={go} />;
     }
-    if (pid) return <ProdDetail id={pid} go={go} allProds={(prods&&prods.length)?prods:PRODS} />;
+    // prods === null → fetch hasn't resolved yet, fall back to hardcoded PRODS
+    // for a non-blank first paint. After fetch resolves, use prods (possibly
+    // empty), so deleted products disappear and added ones appear.
+    const allProds = prods == null ? PRODS : prods;
+    if (pid) return <ProdDetail id={pid} go={go} allProds={allProds} />;
     switch (route) {
-      case "#products": return <Products go={go} allProds={(prods&&prods.length)?prods:PRODS} />;
+      case "#products": return <Products go={go} allProds={allProds} />;
       case "#about":    return <About go={go} />;
       case "#contact":  return <Contact />;
       case "#shipping": return <Shipping />;
       case "#myorders":  return <MyOrders go={go} />;
       case "#addresses": return <MyAddresses go={go} />;
-      default:           return <Home go={go} allProds={(prods&&prods.length)?prods:PRODS} />;
+      default:           return <Home go={go} allProds={allProds} />;
     }
   };
 
