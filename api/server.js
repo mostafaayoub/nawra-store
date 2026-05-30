@@ -4393,18 +4393,50 @@ app.patch('/api/shipments/:key', (req, res) => {
         notes: b.notes || null,
         actor_id: b.actor_id || null, actor_name: b.actor_name || null,
       });
-      // Auto-progress parent order on delivery.
-      if (b.status === 'delivered' && cur.order_id) {
-        try {
-          const o = db.prepare('SELECT status FROM orders WHERE id = ?').get(cur.order_id);
-          if (o && o.status !== 'مكتمل' && o.status !== 'ملغي') {
+      // ── Shipment → order auto-sync (Phase 3 slice 4) ──────────────────
+      // delivered  → order مكتمل (idempotent: skip if already مكتمل/ملغي)
+      // cancelled  → order ملغي ONLY if no other active shipment exists
+      //              for the same order (a re-shipment is still active).
+      // returned   → no order status change (returns module handles it).
+      // is_test guard keeps smoke shipments from mutating real orders even
+      // if they share an order_id by mistake.
+      if (cur.order_id && cur.is_test !== 1) {
+        const o = db.prepare('SELECT status FROM orders WHERE id = ? AND (is_test = 0 OR is_test IS NULL)').get(cur.order_id);
+        if (o) {
+          if (b.status === 'delivered' && o.status !== 'مكتمل' && o.status !== 'ملغي') {
             db.prepare("UPDATE orders SET status = 'مكتمل' WHERE id = ?").run(cur.order_id);
-            // The PATCH /api/orders auto-flip rules already set payment_status
-            // on completion; calling that here would require re-implementing
-            // its body. Phase 2 will route shipment-delivery through the
-            // existing order PATCH instead.
+            try {
+              sendMessage({
+                from_user_id: null,
+                from_user_name: 'نظام الشحن',
+                to_user_id: SUPER_ADMIN_FALLBACK,
+                type: 'info',
+                subject: `تم تسليم الطلب — تحديث تلقائي`,
+                body: `تم تسليم الشحنة ${cur.awb_number || ''} وتحويل الطلب إلى "مكتمل".`,
+                metadata: { kind: 'shipment_autosync', order_id: cur.order_id, awb: cur.awb_number, to_status: 'مكتمل', requires_action: false },
+              });
+            } catch {}
+          } else if (b.status === 'cancelled' && o.status !== 'ملغي' && o.status !== 'مكتمل') {
+            // Only cascade if no other ACTIVE shipment for this order.
+            const stillActive = db.prepare(
+              "SELECT COUNT(*) AS n FROM shipments WHERE order_id = ? AND id != ? AND status NOT IN ('cancelled','returned')"
+            ).get(cur.order_id, cur.id).n;
+            if (stillActive === 0) {
+              db.prepare("UPDATE orders SET status = 'ملغي' WHERE id = ?").run(cur.order_id);
+              try {
+                sendMessage({
+                  from_user_id: null,
+                  from_user_name: 'نظام الشحن',
+                  to_user_id: SUPER_ADMIN_FALLBACK,
+                  type: 'info',
+                  subject: `تم إلغاء الشحنة — تحديث تلقائي`,
+                  body: `تم إلغاء الشحنة ${cur.awb_number || ''} ولا توجد شحنة بديلة، تم تحويل الطلب إلى "ملغي".`,
+                  metadata: { kind: 'shipment_autosync', order_id: cur.order_id, awb: cur.awb_number, to_status: 'ملغي', requires_action: false },
+                });
+              } catch {}
+            }
           }
-        } catch {}
+        }
       }
     }
     const fresh = db.prepare('SELECT * FROM shipments WHERE id = ?').get(cur.id);
