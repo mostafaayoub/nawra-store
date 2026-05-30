@@ -819,7 +819,12 @@ try { db.exec('CREATE INDEX IF NOT EXISTS idx_shipment_history_shipment ON shipm
     { key: 'shipping',  name_ar: 'شحن',              name_en: 'Shipping',         color: '#F97316', icon: '🚚', sort_order: 4 },
     { key: 'overhead',  name_ar: 'تشغيلي',           name_en: 'Operating',        color: '#EC4899', icon: '⚙', sort_order: 5 },
     { key: 'general',   name_ar: 'عام',              name_en: 'General',          color: '#6B7280', icon: '🧾', sort_order: 6 },
-    { key: 'purchases', name_ar: 'مشتريات منتجات',   name_en: 'Product purchases', color: '#0EA5E9', icon: '🛒', sort_order: 7 },
+    // Phase 3: 'purchases' category is DEPRECATED. Inventory purchases now
+    // flow through the Purchases module (purchase_invoices), not expenses.
+    // Seed removed. Any historical row in this category remains visible on
+    // the Expenses page so the admin can reclassify, but new defaults won't
+    // include it. The boot-time cleanup below hard-deletes the seed row
+    // when no expenses reference it.
     { key: 'banking',   name_ar: 'مصاريف بنكية',     name_en: 'Banking fees',     color: '#9333EA', icon: '🏦', sort_order: 8 },
     { key: 'taxes',     name_ar: 'ضرائب',            name_en: 'Taxes',            color: '#DC2626', icon: '🧾', sort_order: 9 },
     { key: 'returns',   name_ar: 'مرتجعات',          name_en: 'Returns',          color: '#B45309', icon: '↩',  sort_order: 10 },
@@ -839,6 +844,22 @@ try { db.exec('CREATE INDEX IF NOT EXISTS idx_shipment_history_shipment ON shipm
       db.transaction(() => { rows.forEach(r => { const cid = lookup.get(r.category); if (cid) upd.run(cid, r.id); }); })();
     }
   } catch (err) { console.warn('[nawra-api] expense category_id backfill skipped:', err.message); }
+  // Phase 3: drop the deprecated 'purchases' category if no expenses still
+  // reference it. If any row remains, the category survives so the row
+  // stays renderable on the Expenses page (and gets a deprecation banner
+  // in the UI). Idempotent.
+  try {
+    const purCat = db.prepare("SELECT id FROM expense_categories WHERE key = 'purchases'").get();
+    if (purCat) {
+      const using = db.prepare("SELECT COUNT(*) AS n FROM expenses WHERE category = 'purchases' OR category_id = ?").get(purCat.id).n;
+      if (!using) {
+        db.prepare("DELETE FROM expense_categories WHERE id = ?").run(purCat.id);
+        console.log("[nawra-api] dropped deprecated 'purchases' expense category (no referencing expenses)");
+      } else {
+        console.log(`[nawra-api] 'purchases' category retained — ${using} expenses still reference it (will surface with deprecation banner)`);
+      }
+    }
+  } catch (err) { console.warn('[nawra-api] purchases category cleanup skipped:', err.message); }
 })();
 
 // Slug uniqueness — best-effort. We add a partial unique index that excludes
@@ -1624,6 +1645,21 @@ app.post('/api/orders', (req, res) => {
 
     const orderNumber = allocateOrderNumber();
     const isTest = is_test ? 1 : 0;
+
+    // ── Phase 3: cost_snapshot ─────────────────────────────────────────
+    // Stamp each line item with the product's current WAC at order-create
+    // time. Finance COGS reads this snapshot so historical orders keep their
+    // cost basis even after later purchases shift the product's WAC.
+    // Falls back to legacy products.cost when WAC is 0 (pre-refactor data).
+    const itemsWithCost = (Array.isArray(items) ? items : []).map(it => {
+      // Honour caller-provided snapshot when set (admin manual order with
+      // override), otherwise look up from products.
+      if (it && Number(it.cost_snapshot) > 0) return { ...it };
+      const p = findProductForItem(it);
+      const wac = p ? (Number(p.weighted_average_cost) || Number(p.cost) || 0) : 0;
+      return { ...it, cost_snapshot: wac };
+    });
+
     const history = [{
       status: status || '\u062c\u062f\u064a\u062f',
       at: new Date().toISOString(),
@@ -1640,7 +1676,7 @@ app.post('/api/orders', (req, res) => {
       ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
     `).run(
       String(id), date, name, phone, city, address,
-      JSON.stringify(items||[]), Number(total)||0, status||'\u062c\u062f\u064a\u062f',
+      JSON.stringify(itemsWithCost), Number(total)||0, status||'\u062c\u062f\u064a\u062f',
       lat||null, lng||null, userEmail||null,
       orderNumber,
       payment_method || 'cash',
@@ -1671,7 +1707,7 @@ app.post('/api/orders', (req, res) => {
     // on real products — the orphan reservation would survive the order purge
     // and drift inventory_value across every run.
     const order = db.prepare('SELECT * FROM orders WHERE id = ?').get(String(id));
-    if (!isTest) reserveStockForOrder(order, items || []);
+    if (!isTest) reserveStockForOrder(order, itemsWithCost);
 
     // Notify the super admin so they see the new order in their inbox.
     sendMessage({
@@ -6278,7 +6314,13 @@ function aggregateFinance(fromISO, toISO) {
     items.forEach(it => {
       const qty   = Number(it.qty)   || 0;
       const price = Number(it.price) || 0;
-      const cost  = findCost(it.name);
+      // Phase 3 COGS: prefer cost_snapshot (stamped at order-create from WAC),
+      // fall back to live products.cost lookup for any pre-snapshot rows.
+      // This keeps historical orders priced at their original cost even after
+      // later purchases shift the product's WAC.
+      const cost  = Number(it.cost_snapshot) > 0
+        ? Number(it.cost_snapshot)
+        : findCost(it.name);
       cogs += cost * qty;
       const key = (it.name || '').trim() || '—';
       const meta = metaByName.get(key.toLowerCase());
@@ -6523,6 +6565,17 @@ app.get('/api/finance/summary', (req, res) => {
       top_by_revenue:  cur.topByRevenue,
       top_by_profit:   cur.topByProfit,
       profit_by_category: cur.profitByCategory,
+      // Phase 3: inventory value as asset (separate from expenses).
+      // Sum of (stock_available × WAC) across all non-test products.
+      inventory_asset_value: (() => {
+        try {
+          const row = db.prepare(`
+            SELECT COALESCE(SUM(stock * COALESCE(weighted_average_cost, cost, 0)), 0) AS v
+            FROM products WHERE (is_test = 0 OR is_test IS NULL)
+          `).get();
+          return Math.round(Number(row.v) || 0);
+        } catch { return 0; }
+      })(),
       // Data integrity warnings — frontend renders a banner if these are non-empty.
       cogs_warning_count:    cur.cogsWarningProducts.length,
       cogs_warning_products: cur.cogsWarningProducts.slice(0, 5),
@@ -6676,6 +6729,101 @@ app.get('/api/finance/profit-by-category', (req, res) => {
 // /key-metrics — AOV, Inventory Turnover, CAC, CLV. Each comes with a
 // 6-period sparkline (one number per month) so the frontend can render
 // the trend without a second request. Spec section 9.
+// GET /api/finance/balance-sheet — Phase 3 spec section G.5
+// Lifetime snapshot of the simple balance sheet.
+//   Assets      = Cash (running) + Inventory (WAC × stock) + Receivables
+//   Liabilities = Payables (unpaid purchase invoices + unpaid expenses)
+//   Equity      = Assets − Liabilities
+// Cash is approximated as (lifetime cash_in − lifetime cash_out). Real
+// stores would seed an opening cash balance via settings.store.opening_cash
+// — supported here as an additive offset when set.
+app.get('/api/finance/balance-sheet', (_req, res) => {
+  try {
+    const NOT_TEST = '(is_test = 0 OR is_test IS NULL)';
+
+    // ── Assets ─────────────────────────────────────────────────────────
+    // Cash position: lifetime cash_in (paid orders) − lifetime cash_out
+    // (paid expenses + supplier_payments).
+    const cashInRow = db.prepare(`
+      SELECT COALESCE(SUM(total), 0) AS amount FROM orders
+      WHERE payment_status = 'paid' AND status != 'ملغي' AND ${NOT_TEST}
+    `).get();
+    const expCashOutRow = db.prepare(`
+      SELECT COALESCE(SUM(amount), 0) AS amount FROM expenses
+      WHERE status = 'approved' AND payment_date IS NOT NULL
+        AND category != 'purchases' AND ${NOT_TEST}
+    `).get();
+    const suppPaidRow = db.prepare(`
+      SELECT COALESCE(SUM(amount), 0) AS amount FROM supplier_payments
+      WHERE ${NOT_TEST}
+    `).get();
+    let openingCash = 0;
+    try {
+      const row = db.prepare("SELECT value FROM settings WHERE key = 'store'").get();
+      const s = row ? JSON.parse(row.value || '{}') : {};
+      openingCash = Number(s.opening_cash) || 0;
+    } catch {}
+    const cash = openingCash + Number(cashInRow.amount) - Number(expCashOutRow.amount) - Number(suppPaidRow.amount);
+
+    // Inventory asset: stock × WAC across real products.
+    const invRow = db.prepare(`
+      SELECT COALESCE(SUM(stock * COALESCE(weighted_average_cost, cost, 0)), 0) AS v
+      FROM products WHERE ${NOT_TEST}
+    `).get();
+    const inventory = Math.round(Number(invRow.v) || 0);
+
+    // Receivables: unpaid COD + unpaid online orders not cancelled.
+    const codPendingRow = db.prepare(`
+      SELECT COALESCE(SUM(total),0) AS amount FROM orders
+      WHERE payment_method = 'cash' AND status NOT IN ('مكتمل','ملغي') AND ${NOT_TEST}
+    `).get();
+    const onlinePendingRow = db.prepare(`
+      SELECT COALESCE(SUM(total),0) AS amount FROM orders
+      WHERE payment_method != 'cash' AND payment_method IS NOT NULL
+        AND payment_status != 'paid' AND status != 'ملغي' AND ${NOT_TEST}
+    `).get();
+    const receivables = Number(codPendingRow.amount) + Number(onlinePendingRow.amount);
+
+    // ── Liabilities ────────────────────────────────────────────────────
+    // Purchase-invoice payables (received + not fully paid).
+    const purInvPayRow = db.prepare(`
+      SELECT COALESCE(SUM(total - COALESCE(amount_paid, 0)), 0) AS amount
+      FROM purchase_invoices
+      WHERE status = 'received' AND payment_status != 'paid'
+        AND supplier_id IS NOT NULL AND ${NOT_TEST}
+    `).get();
+    const expensePayRow = db.prepare(`
+      SELECT COALESCE(SUM(amount), 0) AS amount FROM expenses
+      WHERE status = 'approved' AND payment_date IS NULL AND ${NOT_TEST}
+    `).get();
+    const purchaseInvoicePayables = Number(purInvPayRow.amount) || 0;
+    const expensePayables         = Number(expensePayRow.amount) || 0;
+    const payables                = purchaseInvoicePayables + expensePayables;
+
+    const totalAssets      = Math.round(cash + inventory + receivables);
+    const totalLiabilities = Math.round(payables);
+    const equity           = totalAssets - totalLiabilities;
+
+    res.json({
+      assets: {
+        cash:        Math.round(cash),
+        inventory,
+        receivables: Math.round(receivables),
+        total:       totalAssets,
+      },
+      liabilities: {
+        supplier_payables: Math.round(purchaseInvoicePayables),
+        expense_payables:  Math.round(expensePayables),
+        total:             totalLiabilities,
+      },
+      equity,
+      opening_cash:        Math.round(openingCash),
+      // Diagnostic — lets the frontend annotate the Balance Sheet card.
+      computed_at: new Date().toISOString(),
+    });
+  } catch (e) { console.error('GET /api/finance/balance-sheet', e); res.status(500).json({ error: e.message }); }
+});
+
 app.get('/api/finance/key-metrics', (req, res) => {
   try {
     const { from, to } = req.query;
