@@ -4728,13 +4728,23 @@ function AdminDash({ go }) {
 
             return (
               <div>
-                {/* Top action bar */}
-                <div style={{display:"grid",gridTemplateColumns:mob?"1fr":"repeat(3,1fr)",gap:10,marginBottom:14}}>
-                  <button onClick={()=>setStockInOpen(true)}
+                {/* Top action bar — Phase 3: "وارد جديد" routes to the
+                    Purchases module (proper supplier-invoice flow), and a
+                    new "تعديل جرد" button opens the legacy single-item
+                    stock-add modal for physical-count corrections only. */}
+                <div style={{display:"grid",gridTemplateColumns:mob?"1fr":"repeat(4,1fr)",gap:10,marginBottom:14}}>
+                  <a href="#admin/purchases/new"
                     style={{display:"flex",alignItems:"center",justifyContent:"center",gap:8,
                       background:"#16A34A",color:"#fff",border:"none",padding:"12px",cursor:"pointer",
+                      fontSize:13,fontFamily:ui.fontBody,fontWeight:500,borderRadius:6,textDecoration:"none"}}>
+                    <AdmIcon name="plus" size={15}/> وارد جديد (فاتورة شراء)
+                  </a>
+                  <button onClick={()=>setStockInOpen(true)}
+                    title="تعديل جرد فعلي — أضف الفرق مع سبب موضّح"
+                    style={{display:"flex",alignItems:"center",justifyContent:"center",gap:8,
+                      background:ui.cardBg,color:ui.text,border:ui.border,padding:"12px",cursor:"pointer",
                       fontSize:13,fontFamily:ui.fontBody,fontWeight:500,borderRadius:6}}>
-                    <AdmIcon name="plus" size={15}/> وارد جديد
+                    <AdmIcon name="pencil" size={15}/> تعديل جرد
                   </button>
                   <button onClick={()=>setStockOutOpen(true)}
                     style={{display:"flex",alignItems:"center",justifyContent:"center",gap:8,
@@ -4832,7 +4842,7 @@ function AdminDash({ go }) {
                         <table style={{width:"100%",borderCollapse:"collapse",direction:"rtl",fontFamily:ui.fontBody,minWidth:880}}>
                           <thead>
                             <tr style={{background:ui.sideBg,borderBottom:`0.5px solid #E5E5E5`}}>
-                              {["المنتج","الحالة","متاح","محجوز","هالك","الإجمالي","آخر حركة",""].map(h=>(
+                              {["المنتج","الحالة","متاح","محجوز","هالك","الإجمالي","متوسط التكلفة","قيمة المخزون","آخر حركة",""].map(h=>(
                                 <th key={h} style={{padding:"11px 12px",textAlign:"right",fontSize:11.5,color:ui.textSub,fontWeight:500,whiteSpace:"nowrap"}}>{h}</th>
                               ))}
                             </tr>
@@ -4863,6 +4873,13 @@ function AdminDash({ go }) {
                                   <td style={{padding:"11px 12px",fontSize:13,color:"#F97316",fontFamily:ui.fontBody,textAlign:"center"}}>{p.stock_reserved||0}</td>
                                   <td style={{padding:"11px 12px",fontSize:13,color:(p.stock_damaged||0)>0?"#DC2626":ui.textSub,fontFamily:ui.fontBody,textAlign:"center"}}>{p.stock_damaged||0}</td>
                                   <td style={{padding:"11px 12px",fontSize:13,color:ui.text,fontWeight:500,fontFamily:ui.fontBody,textAlign:"center"}}>{total}</td>
+                                  {/* P3.3: WAC + Stock Value columns sourced from products.weighted_average_cost */}
+                                  <td style={{padding:"11px 12px",fontSize:12.5,color:ui.text,fontFamily:"monospace",textAlign:"center",whiteSpace:"nowrap"}}>
+                                    {(Number(p.weighted_average_cost) || Number(p.cost) || 0).toLocaleString()} ج
+                                  </td>
+                                  <td style={{padding:"11px 12px",fontSize:12.5,color:ui.text,fontWeight:500,fontFamily:"monospace",textAlign:"center",whiteSpace:"nowrap"}}>
+                                    {((Number(p.stock) || 0) * (Number(p.weighted_average_cost) || Number(p.cost) || 0)).toLocaleString()} ج
+                                  </td>
                                   <td style={{padding:"11px 12px",fontSize:11.5,color:ui.textSub,fontFamily:ui.fontBody,whiteSpace:"nowrap"}}>
                                     {p.updated_at ? fmtDate(p.updated_at) : "—"}
                                   </td>
@@ -4941,7 +4958,14 @@ function AdminDash({ go }) {
                                     {delta > 0 ? `+${delta}` : delta}
                                   </td>
                                   <td style={{padding:"11px 12px",fontSize:11.5,color:ui.textSub,fontFamily:ui.fontBody,maxWidth:260,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>
-                                    {m.reason || "—"}{m.reference ? ` · #${m.reference}` : ""}
+                                    {m.reason || "—"}
+                                    {m.reference && /^PUR-\d+$/.test(String(m.reference)) ? (
+                                      <> · <a href={`#admin/purchases/${encodeURIComponent(m.reference)}`}
+                                              style={{color:"#1D4ED8",textDecoration:"none",fontFamily:"monospace"}}>{m.reference}</a></>
+                                    ) : m.reference && /^RET-\d+$/.test(String(m.reference)) ? (
+                                      <> · <a href={`#admin/returns/${encodeURIComponent(m.reference)}`}
+                                              style={{color:"#1D4ED8",textDecoration:"none",fontFamily:"monospace"}}>{m.reference}</a></>
+                                    ) : m.reference ? <> · #{m.reference}</> : null}
                                   </td>
                                   <td style={{padding:"11px 12px",fontSize:12,color:ui.textSub,fontFamily:ui.fontBody}}>{m.user_name || m.user_id || "—"}</td>
                                   <td style={{padding:"11px 12px",fontSize:11.5,color:ui.textSub,fontFamily:ui.fontBody,whiteSpace:"nowrap"}}>{fmtDate(m.created_at)}</td>
