@@ -1778,6 +1778,47 @@ function AdminDash({ go }) {
   const [finBreakEven,    setFinBreakEven]    = useState(null);
   // Phase 3: lifetime balance sheet snapshot (Assets/Liabilities/Equity).
   const [finBalanceSheet, setFinBalanceSheet] = useState(null);
+  // Phase 3.5: dedicated Payables + Receivables pages — extra detail
+  // (per-supplier breakdown, per-order list) beyond the rollups already
+  // surfaced on the Finance dashboard.
+  const [payablesUnpaidPurInvs, setPayablesUnpaidPurInvs] = useState([]);
+  const [payablesUnpaidExp,     setPayablesUnpaidExp]     = useState([]);
+  const [receivablesCodOrders,  setReceivablesCodOrders]  = useState([]);
+  const [receivablesOnline,     setReceivablesOnline]     = useState([]);
+  const refreshPayablesDetail = useCallback(async () => {
+    try {
+      const [p, e] = await Promise.all([
+        fetch("/api/purchases?status=received&payment_status=unpaid&perPage=100").then(r => r.ok ? r.json() : { rows:[] }),
+        fetch("/api/expenses?status=approved").then(r => r.ok ? r.json() : []),
+      ]);
+      const purRows = (p.rows || []).filter(x => x.payment_status !== "paid");
+      // Server returns invoices regardless of payment status when filter dropped;
+      // re-fetch partials too.
+      const [p2] = await Promise.all([
+        fetch("/api/purchases?status=received&payment_status=partial&perPage=100").then(r => r.ok ? r.json() : { rows:[] }),
+      ]);
+      setPayablesUnpaidPurInvs([...purRows, ...(p2.rows || [])]);
+      const expArr = Array.isArray(e) ? e : [];
+      setPayablesUnpaidExp(expArr.filter(x => x.status === "approved" && !x.payment_date));
+    } catch {}
+  }, []);
+  const refreshReceivablesDetail = useCallback(async () => {
+    try {
+      const r = await fetch("/api/orders?perPage=200");
+      if (!r.ok) return;
+      const d = await r.json();
+      const rows = Array.isArray(d.rows) ? d.rows : Array.isArray(d) ? d : [];
+      setReceivablesCodOrders(rows.filter(o =>
+        o.payment_method === "cash" && !["مكتمل","ملغي"].includes(o.status)
+      ));
+      setReceivablesOnline(rows.filter(o =>
+        o.payment_method && o.payment_method !== "cash"
+        && o.payment_status !== "paid" && o.status !== "ملغي"
+      ));
+    } catch {}
+  }, []);
+  useEffect(() => { if (tab === "payables") refreshPayablesDetail(); }, [tab, refreshPayablesDetail]);
+  useEffect(() => { if (tab === "receivables") refreshReceivablesDetail(); }, [tab, refreshReceivablesDetail]);
   // Filter chips — collapsed dropdown panel toggled by a chip button.
   // payment_method/product_category server-side filtering isn't wired yet
   // (Phase-1 backend didn't add those query params); these affect only
@@ -3121,8 +3162,10 @@ function AdminDash({ go }) {
       { k:"inventory",         l:"المخزون",          icon:"package" },
     ]},
     { title: "المالية", items: [
-      { k:"expenses",    l:"المصروفات",       icon:"receipt" },
-      { k:"finance",     l:"التقارير المالية", icon:"report-money" },
+      { k:"expenses",     l:"المصروفات",       icon:"receipt" },
+      { k:"payables",     l:"الذمم الدائنة",    icon:"arrow-up" },     // ما عليك للموردين
+      { k:"receivables",  l:"الذمم المدينة",    icon:"arrow-down" },   // ما لك على العملاء
+      { k:"finance",      l:"التقارير المالية", icon:"report-money" },
     ]},
     { title: "العمليات", items: [
       { k:"shipping",    l:"الشحن",           icon:"truck" },
@@ -8141,6 +8184,201 @@ function AdminDash({ go }) {
                       </div>
                     )}
                   </div>
+                </div>
+              </div>
+            );
+          })()}
+
+          {/* ─── PAYABLES (Phase 3.5) ──────────────────────────────────────── */}
+          {tab === "payables" && (() => {
+            const purInvs  = Array.isArray(payablesUnpaidPurInvs) ? payablesUnpaidPurInvs : [];
+            const exps     = Array.isArray(payablesUnpaidExp)     ? payablesUnpaidExp     : [];
+            const totalSup = purInvs.reduce((s, x) => s + ((Number(x.total)||0) - (Number(x.amount_paid)||0)), 0);
+            const totalExp = exps.reduce((s, x) => s + (Number(x.amount)||0), 0);
+            const grand    = totalSup + totalExp;
+            return (
+              <div>
+                <div style={{marginBottom:14}}>
+                  <h2 style={{fontSize:18,fontWeight:600,color:ui.text,fontFamily:ui.fontBody,margin:0}}>الذمم الدائنة (Payables)</h2>
+                  <div style={{fontSize:12,color:ui.textSub,fontFamily:ui.fontBody,marginTop:2}}>ما عليك للموردين والمصروفات غير المدفوعة</div>
+                </div>
+                {/* KPI cards */}
+                <div style={{display:"grid",gridTemplateColumns:mob?"1fr":"repeat(3,1fr)",gap:10,marginBottom:14}}>
+                  <div style={{background:ui.cardBg,border:ui.border,borderRadius:ui.radius,padding:"14px 16px",borderTop:"3px solid #DC2626"}}>
+                    <div style={{fontSize:11.5,color:ui.textSub,fontFamily:ui.fontBody,marginBottom:5}}>إجمالي المستحقات</div>
+                    <div style={{fontSize:mob?17:21,color:ui.text,fontFamily:ui.fontHead,fontWeight:500}}>
+                      {grand.toLocaleString()} <span style={{fontSize:11,color:ui.textSub,fontFamily:ui.fontBody}}>ج</span>
+                    </div>
+                  </div>
+                  <div style={{background:ui.cardBg,border:ui.border,borderRadius:ui.radius,padding:"14px 16px",borderTop:"3px solid #EF4444"}}>
+                    <div style={{fontSize:11.5,color:ui.textSub,fontFamily:ui.fontBody,marginBottom:5}}>فواتير شراء غير مسددة</div>
+                    <div style={{fontSize:mob?17:21,color:ui.text,fontFamily:ui.fontHead,fontWeight:500}}>{purInvs.length}</div>
+                    <div style={{fontSize:11,color:ui.textSub,fontFamily:"monospace",marginTop:3}}>{totalSup.toLocaleString()} ج</div>
+                  </div>
+                  <div style={{background:ui.cardBg,border:ui.border,borderRadius:ui.radius,padding:"14px 16px",borderTop:"3px solid #EC4899"}}>
+                    <div style={{fontSize:11.5,color:ui.textSub,fontFamily:ui.fontBody,marginBottom:5}}>مصروفات غير مدفوعة</div>
+                    <div style={{fontSize:mob?17:21,color:ui.text,fontFamily:ui.fontHead,fontWeight:500}}>{exps.length}</div>
+                    <div style={{fontSize:11,color:ui.textSub,fontFamily:"monospace",marginTop:3}}>{totalExp.toLocaleString()} ج</div>
+                  </div>
+                </div>
+                {/* Tables */}
+                <div style={{background:ui.cardBg,border:ui.border,borderRadius:ui.radius,padding:"14px 16px",marginBottom:10}}>
+                  <h3 style={{fontSize:13,fontWeight:600,color:ui.text,fontFamily:ui.fontBody,margin:"0 0 10px"}}>فواتير الموردين ({purInvs.length})</h3>
+                  {purInvs.length === 0 ? (
+                    <div style={{fontSize:12,color:ui.textSub,fontFamily:ui.fontBody,fontStyle:"italic"}}>لا توجد فواتير مستحقة</div>
+                  ) : (
+                    <table style={{width:"100%",borderCollapse:"collapse",direction:"rtl",fontFamily:ui.fontBody,fontSize:12,minWidth:600}}>
+                      <thead>
+                        <tr style={{background:ui.sideBg}}>
+                          {["رقم الفاتورة","المورد","الإجمالي","المدفوع","المتبقي","تاريخ الاستحقاق","الإجراءات"].map(h => (
+                            <th key={h} style={{padding:"8px 10px",textAlign:"right",fontSize:11,color:ui.textSub,fontWeight:500}}>{h}</th>
+                          ))}
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {purInvs.map(r => {
+                          const remaining = (Number(r.total)||0) - (Number(r.amount_paid)||0);
+                          const overdue = r.due_date && r.due_date < new Date().toISOString().slice(0,10);
+                          return (
+                            <tr key={r.id} style={{borderTop:"0.5px solid #EEE", background: overdue ? "#FEF2F2" : "transparent"}}>
+                              <td style={{padding:"8px 10px",fontFamily:"monospace"}}><a href={`#admin/purchases/${encodeURIComponent(r.invoice_number || r.id)}`} style={{color:"#1D4ED8",textDecoration:"none"}}>{r.invoice_number}</a></td>
+                              <td style={{padding:"8px 10px"}}>{r.supplier_id ? <a href={`#admin/suppliers/${encodeURIComponent(r.supplier_id)}`} style={{color:"#1D4ED8",textDecoration:"none"}}>{r.supplier_name || "—"}</a> : "—"}</td>
+                              <td style={{padding:"8px 10px",fontFamily:"monospace"}}>{(Number(r.total)||0).toLocaleString()} ج</td>
+                              <td style={{padding:"8px 10px",fontFamily:"monospace"}}>{(Number(r.amount_paid)||0).toLocaleString()} ج</td>
+                              <td style={{padding:"8px 10px",fontFamily:"monospace",fontWeight:500,color:"#B91C1C"}}>{remaining.toLocaleString()} ج</td>
+                              <td style={{padding:"8px 10px",fontSize:11.5,color: overdue ? "#B91C1C" : ui.textSub, fontWeight: overdue ? 600 : 400}}>
+                                {r.due_date || "—"} {overdue && <span style={{marginInlineStart:4}}>⚠</span>}
+                              </td>
+                              <td style={{padding:"8px 10px"}}>
+                                <a href="#admin/supplier-payments/new"
+                                  style={{padding:"4px 10px",background:"#0EA5E9",color:"#fff",borderRadius:4,fontSize:11,textDecoration:"none",fontFamily:ui.fontBody}}>
+                                  + دفعة
+                                </a>
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  )}
+                </div>
+                <div style={{background:ui.cardBg,border:ui.border,borderRadius:ui.radius,padding:"14px 16px"}}>
+                  <h3 style={{fontSize:13,fontWeight:600,color:ui.text,fontFamily:ui.fontBody,margin:"0 0 10px"}}>مصروفات معتمدة غير مدفوعة ({exps.length})</h3>
+                  {exps.length === 0 ? (
+                    <div style={{fontSize:12,color:ui.textSub,fontFamily:ui.fontBody,fontStyle:"italic"}}>لا توجد مصروفات معلقة</div>
+                  ) : (
+                    <table style={{width:"100%",borderCollapse:"collapse",direction:"rtl",fontFamily:ui.fontBody,fontSize:12,minWidth:600}}>
+                      <thead>
+                        <tr style={{background:ui.sideBg}}>
+                          {["الوصف","الفئة","المبلغ","تاريخ الإصدار","المستفيد"].map(h => (
+                            <th key={h} style={{padding:"8px 10px",textAlign:"right",fontSize:11,color:ui.textSub,fontWeight:500}}>{h}</th>
+                          ))}
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {exps.map(x => (
+                          <tr key={x.id} style={{borderTop:"0.5px solid #EEE"}}>
+                            <td style={{padding:"8px 10px"}}>{x.description || "—"}</td>
+                            <td style={{padding:"8px 10px",color:ui.textSub}}>{x.category || "—"}</td>
+                            <td style={{padding:"8px 10px",fontFamily:"monospace",fontWeight:500,color:"#B91C1C"}}>{(Number(x.amount)||0).toLocaleString()} ج</td>
+                            <td style={{padding:"8px 10px",color:ui.textSub,fontSize:11}}>{x.date || "—"}</td>
+                            <td style={{padding:"8px 10px",color:ui.textSub}}>{x.supplier_name || "—"}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  )}
+                </div>
+              </div>
+            );
+          })()}
+
+          {/* ─── RECEIVABLES (Phase 3.5) ───────────────────────────────────── */}
+          {tab === "receivables" && (() => {
+            const cod    = Array.isArray(receivablesCodOrders) ? receivablesCodOrders : [];
+            const online = Array.isArray(receivablesOnline)    ? receivablesOnline    : [];
+            const codTotal    = cod.reduce((s, x) => s + (Number(x.total)||0), 0);
+            const onlineTotal = online.reduce((s, x) => s + (Number(x.total)||0), 0);
+            const grand       = codTotal + onlineTotal;
+            return (
+              <div>
+                <div style={{marginBottom:14}}>
+                  <h2 style={{fontSize:18,fontWeight:600,color:ui.text,fontFamily:ui.fontBody,margin:0}}>الذمم المدينة (Receivables)</h2>
+                  <div style={{fontSize:12,color:ui.textSub,fontFamily:ui.fontBody,marginTop:2}}>ما لك على العملاء (طلبات قيد التحصيل)</div>
+                </div>
+                {/* KPI cards */}
+                <div style={{display:"grid",gridTemplateColumns:mob?"1fr":"repeat(3,1fr)",gap:10,marginBottom:14}}>
+                  <div style={{background:ui.cardBg,border:ui.border,borderRadius:ui.radius,padding:"14px 16px",borderTop:"3px solid #16A34A"}}>
+                    <div style={{fontSize:11.5,color:ui.textSub,fontFamily:ui.fontBody,marginBottom:5}}>إجمالي المستحقات</div>
+                    <div style={{fontSize:mob?17:21,color:ui.text,fontFamily:ui.fontHead,fontWeight:500}}>
+                      {grand.toLocaleString()} <span style={{fontSize:11,color:ui.textSub,fontFamily:ui.fontBody}}>ج</span>
+                    </div>
+                  </div>
+                  <div style={{background:ui.cardBg,border:ui.border,borderRadius:ui.radius,padding:"14px 16px",borderTop:"3px solid #0EA5E9"}}>
+                    <div style={{fontSize:11.5,color:ui.textSub,fontFamily:ui.fontBody,marginBottom:5}}>COD قيد التوصيل</div>
+                    <div style={{fontSize:mob?17:21,color:ui.text,fontFamily:ui.fontHead,fontWeight:500}}>{cod.length}</div>
+                    <div style={{fontSize:11,color:ui.textSub,fontFamily:"monospace",marginTop:3}}>{codTotal.toLocaleString()} ج</div>
+                  </div>
+                  <div style={{background:ui.cardBg,border:ui.border,borderRadius:ui.radius,padding:"14px 16px",borderTop:"3px solid #9333EA"}}>
+                    <div style={{fontSize:11.5,color:ui.textSub,fontFamily:ui.fontBody,marginBottom:5}}>أونلاين قيد الانتظار</div>
+                    <div style={{fontSize:mob?17:21,color:ui.text,fontFamily:ui.fontHead,fontWeight:500}}>{online.length}</div>
+                    <div style={{fontSize:11,color:ui.textSub,fontFamily:"monospace",marginTop:3}}>{onlineTotal.toLocaleString()} ج</div>
+                  </div>
+                </div>
+                {/* Tables */}
+                <div style={{background:ui.cardBg,border:ui.border,borderRadius:ui.radius,padding:"14px 16px",marginBottom:10}}>
+                  <h3 style={{fontSize:13,fontWeight:600,color:ui.text,fontFamily:ui.fontBody,margin:"0 0 10px"}}>طلبات COD قيد التوصيل ({cod.length})</h3>
+                  {cod.length === 0 ? (
+                    <div style={{fontSize:12,color:ui.textSub,fontFamily:ui.fontBody,fontStyle:"italic"}}>لا توجد طلبات COD معلقة</div>
+                  ) : (
+                    <table style={{width:"100%",borderCollapse:"collapse",direction:"rtl",fontFamily:ui.fontBody,fontSize:12,minWidth:600}}>
+                      <thead>
+                        <tr style={{background:ui.sideBg}}>
+                          {["رقم الطلب","العميل","الإجمالي","الحالة","التاريخ"].map(h => (
+                            <th key={h} style={{padding:"8px 10px",textAlign:"right",fontSize:11,color:ui.textSub,fontWeight:500}}>{h}</th>
+                          ))}
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {cod.map(o => (
+                          <tr key={o.id} style={{borderTop:"0.5px solid #EEE"}}>
+                            <td style={{padding:"8px 10px",fontFamily:"monospace"}}><a href={`#admin/orders/${encodeURIComponent(o.id)}`} style={{color:"#1D4ED8",textDecoration:"none"}}>#{o.order_number || o.id}</a></td>
+                            <td style={{padding:"8px 10px"}}>{o.name}</td>
+                            <td style={{padding:"8px 10px",fontFamily:"monospace",fontWeight:500}}>{(Number(o.total)||0).toLocaleString()} ج</td>
+                            <td style={{padding:"8px 10px"}}><span style={{fontSize:10.5,padding:"2px 8px",borderRadius:20,background:"#FEF3C7",color:"#92400E"}}>{o.status}</span></td>
+                            <td style={{padding:"8px 10px",color:ui.textSub,fontSize:11}}>{o.date || ""}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  )}
+                </div>
+                <div style={{background:ui.cardBg,border:ui.border,borderRadius:ui.radius,padding:"14px 16px"}}>
+                  <h3 style={{fontSize:13,fontWeight:600,color:ui.text,fontFamily:ui.fontBody,margin:"0 0 10px"}}>طلبات أونلاين قيد الانتظار ({online.length})</h3>
+                  {online.length === 0 ? (
+                    <div style={{fontSize:12,color:ui.textSub,fontFamily:ui.fontBody,fontStyle:"italic"}}>لا توجد طلبات أونلاين معلقة</div>
+                  ) : (
+                    <table style={{width:"100%",borderCollapse:"collapse",direction:"rtl",fontFamily:ui.fontBody,fontSize:12,minWidth:600}}>
+                      <thead>
+                        <tr style={{background:ui.sideBg}}>
+                          {["رقم الطلب","العميل","الإجمالي","الدفع","التاريخ"].map(h => (
+                            <th key={h} style={{padding:"8px 10px",textAlign:"right",fontSize:11,color:ui.textSub,fontWeight:500}}>{h}</th>
+                          ))}
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {online.map(o => (
+                          <tr key={o.id} style={{borderTop:"0.5px solid #EEE"}}>
+                            <td style={{padding:"8px 10px",fontFamily:"monospace"}}><a href={`#admin/orders/${encodeURIComponent(o.id)}`} style={{color:"#1D4ED8",textDecoration:"none"}}>#{o.order_number || o.id}</a></td>
+                            <td style={{padding:"8px 10px"}}>{o.name}</td>
+                            <td style={{padding:"8px 10px",fontFamily:"monospace",fontWeight:500}}>{(Number(o.total)||0).toLocaleString()} ج</td>
+                            <td style={{padding:"8px 10px",color:ui.textSub,fontSize:11}}>{o.payment_method}</td>
+                            <td style={{padding:"8px 10px",color:ui.textSub,fontSize:11}}>{o.date || ""}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  )}
                 </div>
               </div>
             );
