@@ -2064,6 +2064,7 @@ function AdminDash({ go }) {
   const [shipZones,       setShipZones]       = useState([]);
   const [shipSelected,    setShipSelected]    = useState({}); // { [id]: true } for bulk
   const [bulkAwbBusy,     setBulkAwbBusy]     = useState(false); // throttles bulk AWB print
+  const [manifestOpen,    setManifestOpen]    = useState(false); // courier manifest modal
   const [shipDetailAwb,   setShipDetailAwb]   = useState(null);
   const [shipDetail,      setShipDetail]      = useState(null);
 
@@ -7284,6 +7285,11 @@ function AdminDash({ go }) {
                       style={{padding:"8px 14px",background:ui.cardBg,color:ui.text,border:ui.border,borderRadius:6,fontSize:12.5,cursor:"pointer",fontFamily:ui.fontBody}}>
                       تصدير CSV
                     </button>
+                    <button onClick={() => setManifestOpen(true)}
+                      title="كشف يومي بالشحنات المُسلَّمة لمندوب شركة الشحن — للطباعة والتوقيع"
+                      style={{padding:"8px 14px",background:ui.cardBg,color:ui.text,border:ui.border,borderRadius:6,fontSize:12.5,cursor:"pointer",fontFamily:ui.fontBody}}>
+                      📋 مانيفست تسليم
+                    </button>
                     <button
                       disabled={selectedIds.length === 0 || bulkAwbBusy}
                       onClick={async () => {
@@ -7544,6 +7550,16 @@ function AdminDash({ go }) {
                       } catch {}
                     }}
                     isSuper={isSuper}
+                    ui={ui}
+                    mob={mob}
+                  />
+                )}
+
+                {/* Courier manifest modal (Phase 3 slice 3) */}
+                {manifestOpen && (
+                  <CourierManifestModal
+                    couriers={shipCouriers}
+                    onClose={() => setManifestOpen(false)}
                     ui={ui}
                     mob={mob}
                   />
@@ -13701,6 +13717,237 @@ async function generateAwbPdf({ ship, bulk, sender, action = "save" } = {}) {
     doc.save(name);
   }
   return doc;
+}
+
+// ─── CourierManifestModal (Phase 3 slice 3) ──────────────────────────────
+// Daily handoff report: admin picks courier + date, server returns every
+// shipment whose shipped_at falls on that day for that courier. View shows
+// table + totals (count, weight, COD, courier cost). CSV export uses BOM
+// for Arabic Excel compatibility. Print opens a new window with a print-
+// optimized HTML doc and triggers window.print() — keeps print CSS from
+// interfering with the admin UI and aligns with user preference for
+// window.print() over jsPDF on non-AWB outputs.
+function CourierManifestModal({ couriers, onClose, ui, mob }) {
+  const today = new Date().toISOString().slice(0, 10);
+  const activeCouriers = (Array.isArray(couriers) ? couriers : []).filter(c => c.active !== 0 && c.active !== false);
+  const [courierId, setCourierId] = useState(activeCouriers[0] ? String(activeCouriers[0].id) : "");
+  const [date,      setDate]      = useState(today);
+  const [busy,      setBusy]      = useState(false);
+  const [err,       setErr]       = useState("");
+  const [manifest,  setManifest]  = useState(null); // { courier, date, shipments, totals }
+
+  const inputStyle = { padding:"7px 10px",border:ui.border,borderRadius:5,fontFamily:ui.fontBody,fontSize:12.5,color:ui.text,outline:"none",boxSizing:"border-box",width:"100%" };
+  const lbl        = { fontSize:11.5,color:ui.textSub,fontFamily:ui.fontBody,marginBottom:3,display:"block" };
+
+  const generate = async () => {
+    if (!courierId) { setErr("اختر شركة الشحن"); return; }
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) { setErr("اختر تاريخاً صحيحاً"); return; }
+    setErr(""); setBusy(true); setManifest(null);
+    try {
+      const r = await fetch(`/api/shipping/manifest?courier_id=${encodeURIComponent(courierId)}&date=${encodeURIComponent(date)}`);
+      if (!r.ok) { const j = await r.json().catch(() => ({})); throw new Error(j.error || `HTTP ${r.status}`); }
+      const data = await r.json();
+      setManifest(data);
+    } catch (e) { setErr(e.message || "فشل تحميل المانيفست"); }
+    finally { setBusy(false); }
+  };
+
+  const exportCsv = () => {
+    if (!manifest || !Array.isArray(manifest.shipments)) return;
+    const head = ["AWB","رقم الطلب","العميل","الهاتف","العنوان","المدينة","المنطقة","الوزن (كجم)","تكلفة الشحن","المبلغ المحصل (COD)","ملاحظات"];
+    const esc = (v) => { const x = v == null ? "" : String(v); return /[",\n]/.test(x) ? `"${x.replace(/"/g,'""')}"` : x; };
+    const lines = [head.join(",")];
+    manifest.shipments.forEach(s => lines.push([
+      s.awb_number || "", s.order_number || s.order_id || "", s.customer_name || "",
+      s.customer_phone || "", s.customer_address || "", s.customer_city || "",
+      s.zone_name || "",
+      (Number(s.weight_kg) || 0).toFixed(2),
+      (Number(s.courier_cost) || 0).toLocaleString(),
+      (Number(s.customer_paid_cod) || 0).toLocaleString(),
+      s.special_instructions || s.internal_notes || "",
+    ].map(esc).join(",")));
+    const blob = new Blob(["﻿" + lines.join("\n")], { type:"text/csv;charset=utf-8;" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `manifest_${(manifest.courier && manifest.courier.name) || "courier"}_${manifest.date}.csv`;
+    document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(url);
+  };
+
+  const printManifest = () => {
+    if (!manifest || !Array.isArray(manifest.shipments) || !manifest.shipments.length) return;
+    const w = window.open("", "_blank", "width=900,height=700");
+    if (!w) { window.alert("السماح بالنوافذ المنبثقة لطباعة المانيفست"); return; }
+    const esc = (v) => String(v == null ? "" : v).replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+    const rows = manifest.shipments.map((s, i) => `
+      <tr>
+        <td style="text-align:center;">${i + 1}</td>
+        <td style="font-family:monospace;">${esc(s.awb_number || "—")}</td>
+        <td style="font-family:monospace;">${esc(s.order_number || s.order_id || "—")}</td>
+        <td>${esc(s.customer_name || "—")}<div style="font-size:9pt;color:#555;font-family:monospace;">${esc(s.customer_phone || "")}</div></td>
+        <td>${esc(s.customer_city ? `${s.customer_city} — ` : "")}${esc(s.customer_address || "—")}<div style="font-size:9pt;color:#555;">${esc(s.zone_name || "")}</div></td>
+        <td style="text-align:center;white-space:nowrap;">${(Number(s.weight_kg) || 0).toFixed(2)}</td>
+        <td style="text-align:center;white-space:nowrap;">${(Number(s.courier_cost) || 0).toLocaleString()}</td>
+        <td style="text-align:center;white-space:nowrap;font-weight:600;">${(Number(s.customer_paid_cod) || 0) > 0 ? `${(Number(s.customer_paid_cod) || 0).toLocaleString()} ج` : "—"}</td>
+        <td style="font-size:9pt;line-height:1.3;">${esc(s.special_instructions || s.internal_notes || "")}</td>
+        <td style="text-align:center;font-size:9pt;color:#888;">______</td>
+      </tr>`).join("");
+    const tot = manifest.totals || { count:0, weight:0, cod:0, shipping:0 };
+    const html = `<!doctype html><html lang="ar" dir="rtl"><head><meta charset="utf-8"><title>مانيفست ${esc((manifest.courier && manifest.courier.name) || "")} - ${esc(manifest.date)}</title>
+<style>
+  *{box-sizing:border-box;}
+  body{font-family:'Cairo','Noto Naskh Arabic','Tahoma',sans-serif;direction:rtl;color:#000;margin:14mm;}
+  h1{font-size:18pt;margin:0 0 4mm;}
+  .meta{display:flex;justify-content:space-between;border-bottom:1.5px solid #000;padding-bottom:3mm;margin-bottom:5mm;font-size:11pt;}
+  .meta b{display:block;font-size:13pt;}
+  table{width:100%;border-collapse:collapse;font-size:9.5pt;}
+  th,td{border:0.5px solid #444;padding:4px 6px;vertical-align:top;}
+  th{background:#f0f0f0;font-weight:600;font-size:9pt;}
+  tfoot td{font-weight:700;background:#fafafa;}
+  .totals{margin-top:5mm;display:grid;grid-template-columns:repeat(4,1fr);gap:4mm;font-size:10pt;}
+  .totals div{border:0.6px solid #000;padding:3mm;border-radius:1mm;}
+  .totals b{display:block;font-size:14pt;margin-top:1mm;font-family:monospace;}
+  .signatures{margin-top:10mm;display:grid;grid-template-columns:1fr 1fr;gap:10mm;font-size:10pt;}
+  .signatures div{border-top:1px solid #000;padding-top:2mm;text-align:center;}
+  @media print{ body{margin:10mm;} }
+</style></head><body>
+<h1>مانيفست تسليم الشحنات</h1>
+<div class="meta">
+  <div><span style="color:#555;">شركة الشحن</span><b>${esc((manifest.courier && manifest.courier.name) || "—")}</b></div>
+  <div><span style="color:#555;">تاريخ التسليم</span><b style="font-family:monospace;">${esc(manifest.date)}</b></div>
+  <div><span style="color:#555;">إجمالي الشحنات</span><b>${tot.count}</b></div>
+</div>
+<table>
+  <thead><tr>
+    <th>#</th><th>AWB</th><th>رقم الطلب</th><th>العميل</th><th>العنوان / المنطقة</th>
+    <th>الوزن</th><th>تكلفة الشحن</th><th>COD</th><th>ملاحظات</th><th>استلام</th>
+  </tr></thead>
+  <tbody>${rows || `<tr><td colspan="10" style="text-align:center;padding:8mm;color:#666;">لا توجد شحنات لهذا التاريخ</td></tr>`}</tbody>
+</table>
+<div class="totals">
+  <div><span style="color:#555;">عدد الشحنات</span><b>${tot.count}</b></div>
+  <div><span style="color:#555;">إجمالي الوزن (كجم)</span><b>${(tot.weight || 0).toFixed(2)}</b></div>
+  <div><span style="color:#555;">إجمالي تكلفة الشحن</span><b>${(tot.shipping || 0).toLocaleString()} ج</b></div>
+  <div><span style="color:#555;">إجمالي COD المتوقع</span><b>${(tot.cod || 0).toLocaleString()} ج</b></div>
+</div>
+<div class="signatures">
+  <div>توقيع مندوب نوّرَة</div>
+  <div>توقيع مندوب ${esc((manifest.courier && manifest.courier.name) || "الشركة")}</div>
+</div>
+</body></html>`;
+    w.document.open(); w.document.write(html); w.document.close(); w.focus();
+    setTimeout(() => { try { w.print(); } catch {} }, 350);
+  };
+
+  const close = () => { if (!busy) onClose(); };
+
+  return (
+    <div onClick={close}
+      style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.5)",display:"flex",alignItems:"center",justifyContent:"center",zIndex:1000,padding:mob?10:20}}>
+      <div onClick={e=>e.stopPropagation()}
+        style={{background:ui.cardBg,borderRadius:ui.radius,maxWidth:980,width:"100%",maxHeight:"92vh",overflow:"auto",direction:"rtl",border:ui.border}}>
+        <div style={{padding:"14px 18px",borderBottom:ui.border,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+          <div>
+            <h3 style={{fontSize:16,fontWeight:600,color:ui.text,fontFamily:ui.fontBody,margin:0}}>مانيفست تسليم لشركة الشحن</h3>
+            <div style={{fontSize:11.5,color:ui.textSub,fontFamily:ui.fontBody,marginTop:3}}>كشف يومي بالشحنات المُسلَّمة لمندوب الشركة — جاهز للطباعة والتوقيع</div>
+          </div>
+          <button onClick={close} style={{background:"transparent",border:"none",cursor:"pointer",fontSize:20,color:ui.textSub,padding:4}}>×</button>
+        </div>
+
+        <div style={{padding:18}}>
+          <div style={{display:"grid",gridTemplateColumns:mob?"1fr":"1fr 1fr auto",gap:10,alignItems:"end"}}>
+            <div>
+              <label style={lbl}>شركة الشحن</label>
+              <select value={courierId} onChange={e => setCourierId(e.target.value)} style={inputStyle}>
+                {activeCouriers.length === 0 && <option value="">لا توجد شركات شحن مفعّلة</option>}
+                {activeCouriers.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
+              </select>
+            </div>
+            <div>
+              <label style={lbl}>تاريخ التسليم</label>
+              <input type="date" value={date} onChange={e => setDate(e.target.value)} style={inputStyle} max={today}/>
+            </div>
+            <button onClick={generate} disabled={busy || !courierId}
+              style={{padding:"8px 18px",background:(busy || !courierId)?"#9CA3AF":ui.text,color:"#fff",border:"none",borderRadius:5,fontSize:12.5,cursor:(busy || !courierId)?"not-allowed":"pointer",fontFamily:ui.fontBody,whiteSpace:"nowrap"}}>
+              {busy ? "...جاري التحميل" : "عرض المانيفست"}
+            </button>
+          </div>
+          {err && <div style={{marginTop:10,padding:"7px 11px",background:"#FEE2E2",color:"#B91C1C",border:"0.5px solid #FECACA",borderRadius:5,fontSize:12,fontFamily:ui.fontBody}}>{err}</div>}
+
+          {manifest && (
+            <div style={{marginTop:18}}>
+              {/* Totals strip */}
+              <div style={{display:"grid",gridTemplateColumns:mob?"1fr 1fr":"repeat(4,1fr)",gap:8,marginBottom:12}}>
+                <div style={{background:ui.sideBg,border:ui.border,borderRadius:5,padding:"8px 11px"}}>
+                  <div style={{fontSize:10.5,color:ui.textSub,fontFamily:ui.fontBody}}>عدد الشحنات</div>
+                  <div style={{fontSize:16,fontFamily:ui.fontHead,color:ui.text,fontWeight:500}}>{manifest.totals.count}</div>
+                </div>
+                <div style={{background:ui.sideBg,border:ui.border,borderRadius:5,padding:"8px 11px"}}>
+                  <div style={{fontSize:10.5,color:ui.textSub,fontFamily:ui.fontBody}}>إجمالي الوزن</div>
+                  <div style={{fontSize:16,fontFamily:ui.fontHead,color:ui.text,fontWeight:500}}>{(manifest.totals.weight || 0).toFixed(2)} <span style={{fontSize:11,color:ui.textSub}}>كجم</span></div>
+                </div>
+                <div style={{background:ui.sideBg,border:ui.border,borderRadius:5,padding:"8px 11px"}}>
+                  <div style={{fontSize:10.5,color:ui.textSub,fontFamily:ui.fontBody}}>تكلفة الشحن</div>
+                  <div style={{fontSize:16,fontFamily:ui.fontHead,color:ui.text,fontWeight:500}}>{(manifest.totals.shipping || 0).toLocaleString()} <span style={{fontSize:11,color:ui.textSub}}>ج</span></div>
+                </div>
+                <div style={{background:"#FFF7E6",border:"0.5px solid #FCD34D",borderRadius:5,padding:"8px 11px"}}>
+                  <div style={{fontSize:10.5,color:"#92400E",fontFamily:ui.fontBody}}>COD المتوقع</div>
+                  <div style={{fontSize:16,fontFamily:ui.fontHead,color:"#92400E",fontWeight:600}}>{(manifest.totals.cod || 0).toLocaleString()} <span style={{fontSize:11}}>ج</span></div>
+                </div>
+              </div>
+
+              <div style={{display:"flex",gap:8,marginBottom:10,flexWrap:"wrap"}}>
+                <button onClick={printManifest} disabled={!manifest.shipments.length}
+                  style={{padding:"7px 14px",background: manifest.shipments.length ? "#1D4ED8" : "#9CA3AF",color:"#fff",border:"none",borderRadius:5,fontSize:12,cursor: manifest.shipments.length ? "pointer" : "not-allowed",fontFamily:ui.fontBody}}>
+                  🖨 طباعة المانيفست
+                </button>
+                <button onClick={exportCsv} disabled={!manifest.shipments.length}
+                  style={{padding:"7px 14px",background:ui.cardBg,color:ui.text,border:ui.border,borderRadius:5,fontSize:12,cursor: manifest.shipments.length ? "pointer" : "not-allowed",opacity: manifest.shipments.length ? 1 : 0.55,fontFamily:ui.fontBody}}>
+                  ⬇ تصدير CSV
+                </button>
+              </div>
+
+              <div style={{border:ui.border,borderRadius:ui.radius,overflow:"hidden",overflowX:"auto"}}>
+                <table style={{width:"100%",borderCollapse:"collapse",fontFamily:ui.fontBody,minWidth:760}}>
+                  <thead>
+                    <tr style={{background:ui.sideBg,borderBottom:"0.5px solid #E5E5E5"}}>
+                      {["#","AWB","رقم الطلب","العميل","العنوان","الوزن","تكلفة","COD"].map(h => (
+                        <th key={h} style={{padding:"9px 10px",textAlign:"right",fontSize:11,color:ui.textSub,fontWeight:500,whiteSpace:"nowrap"}}>{h}</th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {manifest.shipments.length === 0 ? (
+                      <tr><td colSpan={8} style={{padding:"30px 10px",textAlign:"center",color:ui.textSub,fontSize:12.5}}>لا توجد شحنات لهذا التاريخ مع هذه الشركة</td></tr>
+                    ) : manifest.shipments.map((s, i) => (
+                      <tr key={s.id} style={{borderTop:"0.5px solid #EEE"}}>
+                        <td style={{padding:"8px 10px",fontSize:11.5,color:ui.textSub}}>{i + 1}</td>
+                        <td style={{padding:"8px 10px",fontSize:11.5,fontFamily:"monospace",color:ui.text}}>{s.awb_number || "—"}</td>
+                        <td style={{padding:"8px 10px",fontSize:11.5,fontFamily:"monospace",color:ui.text}}>{s.order_number || s.order_id || "—"}</td>
+                        <td style={{padding:"8px 10px",fontSize:12,color:ui.text}}>
+                          {s.customer_name || "—"}
+                          {s.customer_phone && <div style={{fontSize:10.5,color:ui.textSub,fontFamily:"monospace"}}>{s.customer_phone}</div>}
+                        </td>
+                        <td style={{padding:"8px 10px",fontSize:11.5,color:ui.text,maxWidth:260}}>
+                          {s.customer_city && <b>{s.customer_city} — </b>}{s.customer_address || "—"}
+                          {s.zone_name && <div style={{fontSize:10,color:ui.textSub}}>{s.zone_name}</div>}
+                        </td>
+                        <td style={{padding:"8px 10px",fontSize:11.5,color:ui.text,whiteSpace:"nowrap"}}>{(Number(s.weight_kg) || 0).toFixed(2)}</td>
+                        <td style={{padding:"8px 10px",fontSize:11.5,color:ui.text,whiteSpace:"nowrap"}}>{(Number(s.courier_cost) || 0).toLocaleString()} ج</td>
+                        <td style={{padding:"8px 10px",fontSize:11.5,color: (Number(s.customer_paid_cod) || 0) > 0 ? "#92400E" : ui.textSub,fontWeight: (Number(s.customer_paid_cod) || 0) > 0 ? 600 : 400,whiteSpace:"nowrap"}}>
+                          {(Number(s.customer_paid_cod) || 0) > 0 ? `${(Number(s.customer_paid_cod) || 0).toLocaleString()} ج` : "—"}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
 }
 
 // ─── SupplierFormModal — module-scope so typing in any field doesn't ───────

@@ -4195,6 +4195,53 @@ app.get('/api/shipments/aggregates', (_req, res) => {
   } catch (e) { console.error('GET /api/shipments/aggregates', e); res.status(500).json({ error: e.message }); }
 });
 
+// GET /api/shipping/manifest — daily handoff manifest for one courier.
+// Phase 3 slice 3. Returns every shipment whose shipped_at date matches the
+// requested day for the given courier. Used by the admin "تسليم لشركة الشحن"
+// modal: CSV download + window.print() printable view (per user preference
+// — non-AWB PDFs go through native print, AWB stays on jsPDF for the
+// CODE128 barcode). is_test guard so smoke shipments stay invisible.
+app.get('/api/shipping/manifest', (req, res) => {
+  try {
+    const courierId = String(req.query.courier_id || '').trim();
+    const date      = String(req.query.date || '').trim(); // YYYY-MM-DD
+    if (!courierId) return res.status(400).json({ error: 'courier_id required' });
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return res.status(400).json({ error: 'date (YYYY-MM-DD) required' });
+
+    const courier = db.prepare('SELECT * FROM couriers WHERE id = ?').get(courierId);
+    if (!courier) return res.status(404).json({ error: 'courier not found' });
+
+    const rows = db.prepare(`
+      SELECT s.*, o.order_number, o.name AS customer_name, o.phone AS customer_phone,
+             o.address AS customer_address, o.city AS customer_city, o.total AS order_total,
+             o.payment_method AS order_payment_method,
+             z.name_ar AS zone_name,
+             c.name AS courier_name
+      FROM shipments s
+      LEFT JOIN orders         o ON o.id = s.order_id
+      LEFT JOIN shipping_zones z ON z.id = s.zone_id
+      LEFT JOIN couriers       c ON c.id = s.courier_id
+      WHERE s.courier_id = ?
+        AND DATE(s.shipped_at) = ?
+        AND (s.is_test = 0 OR s.is_test IS NULL)
+      ORDER BY s.shipped_at, s.awb_number
+    `).all(courierId, date);
+
+    const totals = rows.reduce((acc, r) => {
+      acc.count    += 1;
+      acc.weight   += Number(r.weight_kg)            || 0;
+      acc.cod      += Number(r.customer_paid_cod)    || 0;
+      acc.shipping += Number(r.courier_cost)         || 0;
+      return acc;
+    }, { count: 0, weight: 0, cod: 0, shipping: 0 });
+    totals.weight   = Math.round(totals.weight * 100) / 100;
+    totals.cod      = Math.round(totals.cod);
+    totals.shipping = Math.round(totals.shipping);
+
+    res.json({ courier, date, shipments: rows, totals });
+  } catch (e) { console.error('GET /api/shipping/manifest', e); res.status(500).json({ error: e.message }); }
+});
+
 // GET single shipment (by AWB or internal id).
 app.get('/api/shipments/:key', (req, res) => {
   try {
