@@ -2063,6 +2063,7 @@ function AdminDash({ go }) {
   const [shipCouriers,    setShipCouriers]    = useState([]);
   const [shipZones,       setShipZones]       = useState([]);
   const [shipSelected,    setShipSelected]    = useState({}); // { [id]: true } for bulk
+  const [bulkAwbBusy,     setBulkAwbBusy]     = useState(false); // throttles bulk AWB print
   const [shipDetailAwb,   setShipDetailAwb]   = useState(null);
   const [shipDetail,      setShipDetail]      = useState(null);
 
@@ -7283,9 +7284,38 @@ function AdminDash({ go }) {
                       style={{padding:"8px 14px",background:ui.cardBg,color:ui.text,border:ui.border,borderRadius:6,fontSize:12.5,cursor:"pointer",fontFamily:ui.fontBody}}>
                       تصدير CSV
                     </button>
-                    <button disabled title="سيتم تفعيل طباعة البوليصات المجمعة في المرحلة الثالثة (jsPDF + bwip-js)"
-                      style={{padding:"8px 14px",background:ui.text,color:"#fff",border:"none",borderRadius:6,fontSize:12.5,cursor:"not-allowed",fontFamily:ui.fontBody,opacity:0.55}}>
-                      طباعة بوليصات مجمعة
+                    <button
+                      disabled={selectedIds.length === 0 || bulkAwbBusy}
+                      onClick={async () => {
+                        if (selectedIds.length === 0 || bulkAwbBusy) return;
+                        setBulkAwbBusy(true);
+                        try {
+                          // Hydrate each selected shipment — list rows lack the nested
+                          // order/items/zone/courier blocks that generateAwbPdf renders.
+                          const rows = (Array.isArray(shipments) ? shipments : []).filter(r => shipSelected[r.id]);
+                          const hydrated = await Promise.all(rows.map(async r => {
+                            const key = r.awb_number || r.id;
+                            try {
+                              const res = await fetch(`/api/shipments/${encodeURIComponent(key)}`);
+                              if (!res.ok) return null;
+                              return await res.json();
+                            } catch { return null; }
+                          }));
+                          const valid = hydrated.filter(Boolean);
+                          if (!valid.length) { window.alert("تعذّر تحميل بيانات الشحنات المحددة"); return; }
+                          if (valid.length < rows.length) {
+                            const ok = window.confirm(`تم تحميل ${valid.length} من ${rows.length} شحنة. المتابعة؟`);
+                            if (!ok) return;
+                          }
+                          await generateAwbPdf({ bulk: valid, sender: storeCfg, action: "save" });
+                        } catch (e) {
+                          console.error("[awb] bulk print failed", e);
+                          window.alert("تعذّر إنشاء البوليصات المجمعة: " + (e.message || e));
+                        } finally { setBulkAwbBusy(false); }
+                      }}
+                      title={selectedIds.length === 0 ? "حدد شحنات أولاً من الجدول" : `طباعة ${selectedIds.length} بوليصة في PDF واحد`}
+                      style={{padding:"8px 14px",background:selectedIds.length === 0 ? "#9CA3AF" : ui.text,color:"#fff",border:"none",borderRadius:6,fontSize:12.5,cursor:(selectedIds.length === 0 || bulkAwbBusy) ? "not-allowed" : "pointer",fontFamily:ui.fontBody,opacity:(selectedIds.length === 0 || bulkAwbBusy) ? 0.55 : 1}}>
+                      {bulkAwbBusy ? "...جاري الإنشاء" : selectedIds.length > 0 ? `طباعة ${selectedIds.length} بوليصة` : "طباعة بوليصات مجمعة"}
                     </button>
                   </div>
                 </div>
