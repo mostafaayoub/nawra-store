@@ -1712,6 +1712,144 @@ function cancelStockForOrder(order, items) {
   db.prepare('UPDATE orders SET stock_released = 1 WHERE id = ?').run(String(order.id));
 }
 
+// \u2500\u2500 Order state machine + reservation engine (Phase 1 slice 1.2) \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+// applyStockTransition is the single chokepoint for stock movements driven
+// by order status changes. The caller opens a db.transaction (BEGIN IMMEDIATE
+// for race safety on POST); this function reads the order, computes the
+// effect per the Part B table, validates non-negative balances, updates
+// products, writes stock_movements + order_activity_log rows, and updates
+// the legacy stock_applied / stock_released / is_refused flags for
+// backward compat. Idempotent: re-entry with the same (from, to) is a noop.
+
+// Valid order status transitions. Anything not listed here is rejected
+// by PATCH /api/orders with 422.
+const ORDER_STATUS_TRANSITIONS = {
+  '\u062c\u062f\u064a\u062f':         new Set(['\u0642\u064a\u062f \u0627\u0644\u062a\u062c\u0647\u064a\u0632', '\u0645\u0644\u063a\u064a']),
+  '\u0642\u064a\u062f \u0627\u0644\u062a\u062c\u0647\u064a\u0632':  new Set(['\u062c\u0627\u0647\u0632 \u0644\u0644\u0634\u062d\u0646', '\u0645\u0644\u063a\u064a']),
+  '\u062c\u0627\u0647\u0632 \u0644\u0644\u0634\u062d\u0646':   new Set(['\u062a\u0645 \u0627\u0644\u0634\u062d\u0646', '\u0645\u0644\u063a\u064a']),
+  '\u062a\u0645 \u0627\u0644\u0634\u062d\u0646':     new Set(['\u0645\u0643\u062a\u0645\u0644', '\u0631\u0641\u0636 \u0627\u0644\u0627\u0633\u062a\u0644\u0627\u0645']),
+  '\u0645\u0643\u062a\u0645\u0644':        new Set(),  // terminal
+  '\u0631\u0641\u0636 \u0627\u0644\u0627\u0633\u062a\u0644\u0627\u0645': new Set(),  // terminal
+  '\u0645\u0644\u063a\u064a':         new Set(),  // terminal
+};
+function isValidOrderTransition(from, to) {
+  if (!from) return to === '\u062c\u062f\u064a\u062f'; // first creation
+  const allowed = ORDER_STATUS_TRANSITIONS[from];
+  return !!(allowed && allowed.has(to));
+}
+
+// Determine the stock effect for a transition. 'order' is the current
+// orders row (needed to know if stock was reserved at all, for cancel).
+function stockEffectFor(fromStatus, toStatus, order) {
+  if (toStatus === '\u0642\u064a\u062f \u0627\u0644\u062a\u062c\u0647\u064a\u0632' && fromStatus === '\u062c\u062f\u064a\u062f')      return 'reserve';
+  if (toStatus === '\u0645\u0643\u062a\u0645\u0644'        && fromStatus === '\u062a\u0645 \u0627\u0644\u0634\u062d\u0646')  return 'fulfill';        // reserved -= qty
+  if (toStatus === '\u0631\u0641\u0636 \u0627\u0644\u0627\u0633\u062a\u0644\u0627\u0645' && fromStatus === '\u062a\u0645 \u0627\u0644\u0634\u062d\u0646')  return 'release_to_pool'; // reserved -= qty, available += qty
+  if (toStatus === '\u0645\u0644\u063a\u064a') {
+    // Only unwind stock if it was reserved AND not yet released.
+    if (order && order.stock_applied && !order.stock_released) return 'release_to_pool';
+    return 'noop';
+  }
+  return 'noop';
+}
+
+// Write one row to order_activity_log. Cheap; called even on noop
+// transitions so the support timeline is complete.
+function writeOrderActivity({ orderId, fromStatus, toStatus, actor, notes, metadata, isTest }) {
+  const id = `oal_${Date.now().toString(36)}_${Math.random().toString(36).slice(2,5)}`;
+  db.prepare(`
+    INSERT INTO order_activity_log (id, order_id, from_status, to_status, actor_id, actor_name, notes, metadata, is_test)
+    VALUES (?,?,?,?,?,?,?,?,?)
+  `).run(
+    id, String(orderId), fromStatus || null, toStatus,
+    (actor && actor.id) || null, (actor && actor.name) || null,
+    notes || null, JSON.stringify(metadata || {}), isTest ? 1 : 0
+  );
+  return id;
+}
+
+function applyStockTransition({ orderId, fromStatus, toStatus, items, actor }) {
+  const order = db.prepare('SELECT * FROM orders WHERE id = ?').get(String(orderId));
+  if (!order) return { skipped: true, reason: 'order_not_found' };
+
+  // Idempotency: an exact (from, to) already logged means we already applied.
+  const dup = db.prepare(
+    'SELECT 1 FROM order_activity_log WHERE order_id = ? AND from_status IS ? AND to_status = ?'
+  ).get(String(orderId), fromStatus || null, toStatus);
+  if (dup) return { skipped: true, reason: 'already_applied' };
+
+  const lineItems = items || (() => { try { return JSON.parse(order.items || '[]'); } catch { return []; } })();
+  const effect = stockEffectFor(fromStatus, toStatus, order);
+  const isTest = order.is_test === 1;
+
+  const deltas = [];
+  if (effect !== 'noop') {
+    for (const it of lineItems) {
+      const qty = Number(it.qty) || 0;
+      if (!qty) continue;
+      const p = findProductForItem(it);
+      if (!p) continue;
+      const stock    = Number(p.stock) || 0;
+      const reserved = Number(p.stock_reserved) || 0;
+      let newAvail = stock, newRes = reserved, type, reason, qDelta = 0;
+      switch (effect) {
+        case 'reserve':
+          if (stock < qty) {
+            // Insufficient stock. Throw with structured info for caller to
+            // convert to 409. The outer txn rolls back on throw, so partial
+            // reservations don't leak.
+            const err = new Error('insufficient_stock');
+            err.code = 'INSUFFICIENT_STOCK';
+            err.product_id = p.id; err.product_name = p.name;
+            err.available = stock; err.requested = qty;
+            throw err;
+          }
+          newAvail = stock - qty;
+          newRes   = reserved + qty;
+          type = 'customer_order'; reason = '\u062d\u062c\u0632 \u0644\u0637\u0644\u0628 \u0639\u0645\u064a\u0644'; qDelta = -qty;
+          break;
+        case 'fulfill':
+          newRes = Math.max(0, reserved - qty);
+          type = 'shipped'; reason = '\u062a\u0645 \u062a\u0633\u0644\u064a\u0645 \u0627\u0644\u0637\u0644\u0628'; qDelta = 0;
+          break;
+        case 'release_to_pool':
+          newRes   = Math.max(0, reserved - qty);
+          newAvail = stock + qty;
+          type   = (toStatus === '\u0631\u0641\u0636 \u0627\u0644\u0627\u0633\u062a\u0644\u0627\u0645') ? 'refused_delivery' : 'order_cancelled';
+          reason = (toStatus === '\u0631\u0641\u0636 \u0627\u0644\u0627\u0633\u062a\u0644\u0627\u0645') ? '\u0631\u0641\u0636 \u0627\u0644\u0627\u0633\u062a\u0644\u0627\u0645' : '\u0625\u0644\u063a\u0627\u0621 \u0637\u0644\u0628';
+          qDelta = qty;
+          break;
+      }
+      db.prepare('UPDATE products SET stock = ?, stock_reserved = ? WHERE id = ?').run(newAvail, newRes, p.id);
+      recordMovement({
+        product_id: p.id, product_name: p.name,
+        type, quantity_delta: qDelta,
+        balance_after_available: newAvail,
+        balance_after_reserved:  newRes,
+        balance_after_damaged:   p.stock_damaged || 0,
+        reason, reference: String(orderId),
+        user_id: (actor && actor.id) || null,
+        user_name: (actor && actor.name) || null,
+      });
+      deltas.push({ product_id: p.id, available_delta: newAvail - stock, reserved_delta: newRes - reserved });
+    }
+  }
+
+  // Legacy flag updates (downstream finance code still reads stock_applied /
+  // stock_released for back-compat with pre-state-machine orders).
+  if (effect === 'reserve' && !order.stock_applied) {
+    db.prepare('UPDATE orders SET stock_applied = 1 WHERE id = ?').run(String(orderId));
+  }
+  if ((effect === 'fulfill' || effect === 'release_to_pool') && !order.stock_released) {
+    db.prepare('UPDATE orders SET stock_released = 1 WHERE id = ?').run(String(orderId));
+  }
+  if (toStatus === '\u0631\u0641\u0636 \u0627\u0644\u0627\u0633\u062a\u0644\u0627\u0645') {
+    db.prepare('UPDATE orders SET is_refused = 1 WHERE id = ?').run(String(orderId));
+  }
+
+  writeOrderActivity({ orderId, fromStatus, toStatus, actor, isTest });
+  return { skipped: false, deltas, effect };
+}
+
 // \u2500\u2500 Messages helper \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
 function sendMessage({ from_user_id, from_user_name, to_user_id, type, subject, body, metadata }) {
   if (!to_user_id) return null;
