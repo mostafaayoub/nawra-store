@@ -1518,6 +1518,26 @@ function findProductForItem(item) {
 }
 const SUPER_ADMIN_FALLBACK = 'nawraskincare@gmail.com';
 
+// ── Permission tier helper (Phase 3 slice 5) ──────────────────────────────
+// Two-tier model: super-admin = SUPER_ADMIN_FALLBACK (the single store
+// owner email), staff = anyone else who can sign into admin. The request
+// identifies the actor via the `X-Actor-Email` header (preferred) or
+// `actor_email` field in the body (POST/PATCH fallback). Sessions are
+// admin-authenticated already at the app shell — this header is added by
+// the frontend fetch wrapper for sensitive endpoints. Returns boolean.
+function actorIsSuper(req) {
+  const fromHeader = String(req.headers['x-actor-email'] || '').trim().toLowerCase();
+  const fromBody   = String((req.body && req.body.actor_email) || '').trim().toLowerCase();
+  const email      = fromHeader || fromBody;
+  return email && email === SUPER_ADMIN_FALLBACK.toLowerCase();
+}
+function requireSuperAdmin(req, res, next) {
+  if (!actorIsSuper(req)) {
+    return res.status(403).json({ error: 'super_admin_required', message: 'هذا الإجراء يتطلب صلاحيات المدير العام' });
+  }
+  if (typeof next === 'function') next();
+}
+
 // Append a single movement row. The caller passes the *post-event* balances so
 // the history is fully self-describing without needing to replay earlier rows.
 // All stock mutations on the products table also go through here.
@@ -3934,7 +3954,7 @@ app.get('/api/shipping/zones', (req, res) => {
     res.json(rows);
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
-app.post('/api/shipping/zones', (req, res) => {
+app.post('/api/shipping/zones', requireSuperAdmin, (req, res) => {
   try {
     const z = req.body || {};
     if (!z.name_ar) return res.status(400).json({ error: 'name_ar required' });
@@ -3962,7 +3982,7 @@ app.post('/api/shipping/zones', (req, res) => {
     res.json(out);
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
-app.patch('/api/shipping/zones/:id', (req, res) => {
+app.patch('/api/shipping/zones/:id', requireSuperAdmin, (req, res) => {
   try {
     const cur = db.prepare('SELECT * FROM shipping_zones WHERE id = ?').get(req.params.id);
     if (!cur) return res.status(404).json({ error: 'not found' });
@@ -3992,7 +4012,7 @@ app.patch('/api/shipping/zones/:id', (req, res) => {
     res.json(out);
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
-app.delete('/api/shipping/zones/:id', (req, res) => {
+app.delete('/api/shipping/zones/:id', requireSuperAdmin, (req, res) => {
   try {
     const using = db.prepare("SELECT COUNT(*) AS n FROM shipments WHERE zone_id = ?").get(req.params.id).n;
     if (using > 0) return res.status(400).json({ error: `zone is used by ${using} shipment(s); set active=0 instead` });
@@ -4016,7 +4036,7 @@ app.get('/api/shipping/couriers', (req, res) => {
     res.json(rows);
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
-app.post('/api/shipping/couriers', (req, res) => {
+app.post('/api/shipping/couriers', requireSuperAdmin, (req, res) => {
   try {
     const c = req.body || {};
     if (!c.name) return res.status(400).json({ error: 'name required' });
@@ -4042,7 +4062,7 @@ app.post('/api/shipping/couriers', (req, res) => {
     res.json(out);
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
-app.patch('/api/shipping/couriers/:id', (req, res) => {
+app.patch('/api/shipping/couriers/:id', requireSuperAdmin, (req, res) => {
   try {
     const cur = db.prepare('SELECT * FROM couriers WHERE id = ?').get(req.params.id);
     if (!cur) return res.status(404).json({ error: 'not found' });
@@ -4069,7 +4089,7 @@ app.patch('/api/shipping/couriers/:id', (req, res) => {
     res.json(out);
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
-app.delete('/api/shipping/couriers/:id', (req, res) => {
+app.delete('/api/shipping/couriers/:id', requireSuperAdmin, (req, res) => {
   try {
     const using = db.prepare("SELECT COUNT(*) AS n FROM shipments WHERE courier_id = ?").get(req.params.id).n;
     if (using > 0) return res.status(400).json({ error: `courier is used by ${using} shipment(s); set active=0 instead` });
@@ -4201,7 +4221,7 @@ app.get('/api/shipments/aggregates', (_req, res) => {
 // modal: CSV download + window.print() printable view (per user preference
 // — non-AWB PDFs go through native print, AWB stays on jsPDF for the
 // CODE128 barcode). is_test guard so smoke shipments stay invisible.
-app.get('/api/shipping/manifest', (req, res) => {
+app.get('/api/shipping/manifest', requireSuperAdmin, (req, res) => {
   try {
     const courierId = String(req.query.courier_id || '').trim();
     const date      = String(req.query.date || '').trim(); // YYYY-MM-DD

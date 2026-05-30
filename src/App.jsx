@@ -7285,12 +7285,14 @@ function AdminDash({ go }) {
                       style={{padding:"8px 14px",background:ui.cardBg,color:ui.text,border:ui.border,borderRadius:6,fontSize:12.5,cursor:"pointer",fontFamily:ui.fontBody}}>
                       تصدير CSV
                     </button>
-                    <button onClick={() => setManifestOpen(true)}
-                      title="كشف يومي بالشحنات المُسلَّمة لمندوب شركة الشحن — للطباعة والتوقيع"
-                      style={{padding:"8px 14px",background:ui.cardBg,color:ui.text,border:ui.border,borderRadius:6,fontSize:12.5,cursor:"pointer",fontFamily:ui.fontBody}}>
-                      📋 مانيفست تسليم
-                    </button>
-                    <button
+                    {isSuper && (
+                      <button onClick={() => setManifestOpen(true)}
+                        title="كشف يومي بالشحنات المُسلَّمة لمندوب شركة الشحن — للطباعة والتوقيع"
+                        style={{padding:"8px 14px",background:ui.cardBg,color:ui.text,border:ui.border,borderRadius:6,fontSize:12.5,cursor:"pointer",fontFamily:ui.fontBody}}>
+                        📋 مانيفست تسليم
+                      </button>
+                    )}
+                    {isSuper && <button
                       disabled={selectedIds.length === 0 || bulkAwbBusy}
                       onClick={async () => {
                         if (selectedIds.length === 0 || bulkAwbBusy) return;
@@ -7322,7 +7324,7 @@ function AdminDash({ go }) {
                       title={selectedIds.length === 0 ? "حدد شحنات أولاً من الجدول" : `طباعة ${selectedIds.length} بوليصة في PDF واحد`}
                       style={{padding:"8px 14px",background:selectedIds.length === 0 ? "#9CA3AF" : ui.text,color:"#fff",border:"none",borderRadius:6,fontSize:12.5,cursor:(selectedIds.length === 0 || bulkAwbBusy) ? "not-allowed" : "pointer",fontFamily:ui.fontBody,opacity:(selectedIds.length === 0 || bulkAwbBusy) ? 0.55 : 1}}>
                       {bulkAwbBusy ? "...جاري الإنشاء" : selectedIds.length > 0 ? `طباعة ${selectedIds.length} بوليصة` : "طباعة بوليصات مجمعة"}
-                    </button>
+                    </button>}
                   </div>
                 </div>
 
@@ -7559,6 +7561,7 @@ function AdminDash({ go }) {
                 {manifestOpen && (
                   <CourierManifestModal
                     couriers={shipCouriers}
+                    actorEmail={(authUser && authUser.email) || ""}
                     onClose={() => setManifestOpen(false)}
                     ui={ui}
                     mob={mob}
@@ -9327,6 +9330,7 @@ function AdminDash({ go }) {
                 {settingsTab === "shipping" && (
                   <ShippingSettingsPanel
                     ui={ui} mob={mob} isSuper={isSuper}
+                    actorEmail={(authUser && authUser.email) || ""}
                     storeCfg={storeCfg} setStoreCfg={setStoreCfg}
                     saveSetting={saveSetting}
                     shipping={shipping} setShipping={setShipping}
@@ -10740,7 +10744,11 @@ const ChartLegend = React.memo(function ChartLegend({ items, ui, total }) {
 // Section D: General — free threshold, auto weight calc, default product weight,
 //            payment method, processing days, delay alert, signature default,
 //            default special instructions.
-function ShippingSettingsPanel({ ui, mob, isSuper, storeCfg, setStoreCfg, saveSetting, shipping, setShipping }) {
+function ShippingSettingsPanel({ ui, mob, isSuper, actorEmail, storeCfg, setStoreCfg, saveSetting, shipping, setShipping }) {
+  // Phase 3 slice 5: every zone/courier mutating fetch carries X-Actor-Email
+  // so the server-side requireSuperAdmin gate can identify the caller. Read
+  // endpoints stay open to any signed-in admin (staff can view zones).
+  const authedHeaders = (extra) => ({ "Content-Type":"application/json", "X-Actor-Email": actorEmail || "", ...(extra || {}) });
   const [zones, setZones]       = useState([]);
   const [couriers, setCouriers] = useState([]);
   const [zonesBusy, setZonesBusy] = useState(false);
@@ -10799,7 +10807,7 @@ function ShippingSettingsPanel({ ui, mob, isSuper, storeCfg, setStoreCfg, saveSe
     setZonesBusy(true);
     try {
       const r = await fetch("/api/shipping/zones", {
-        method:"POST", headers:{"Content-Type":"application/json"},
+        method:"POST", headers: authedHeaders(),
         body: JSON.stringify({ ...zoneDraft, governorates: Array.isArray(zoneDraft.governorates) ? zoneDraft.governorates : [] }),
       });
       if (r.ok) { setZoneDraft({ name_ar:"" }); reload(); flash("تمت إضافة المنطقة"); }
@@ -10808,7 +10816,7 @@ function ShippingSettingsPanel({ ui, mob, isSuper, storeCfg, setStoreCfg, saveSe
   const patchZone = async (id, patch) => {
     try {
       const r = await fetch(`/api/shipping/zones/${id}`, {
-        method:"PATCH", headers:{"Content-Type":"application/json"},
+        method:"PATCH", headers: authedHeaders(),
         body: JSON.stringify(patch),
       });
       if (r.ok) reload();
@@ -10817,7 +10825,7 @@ function ShippingSettingsPanel({ ui, mob, isSuper, storeCfg, setStoreCfg, saveSe
   const deleteZone = async (z) => {
     if (!window.confirm(`حذف منطقة "${z.name_ar}"؟ (سيتم منع الحذف إذا كانت مرتبطة بشحنات)`)) return;
     try {
-      const r = await fetch(`/api/shipping/zones/${z.id}`, { method:"DELETE" });
+      const r = await fetch(`/api/shipping/zones/${z.id}`, { method:"DELETE", headers: authedHeaders() });
       const d = await r.json().catch(()=>({}));
       if (!r.ok) { window.alert(d.error || "تعذّر الحذف"); return; }
       reload(); flash("تم الحذف");
@@ -10830,7 +10838,7 @@ function ShippingSettingsPanel({ ui, mob, isSuper, storeCfg, setStoreCfg, saveSe
     setCourBusy(true);
     try {
       const r = await fetch("/api/shipping/couriers", {
-        method:"POST", headers:{"Content-Type":"application/json"},
+        method:"POST", headers: authedHeaders(),
         body: JSON.stringify({ ...courDraft }),
       });
       if (r.ok) { setCourDraft({ name:"" }); reload(); flash("تمت إضافة الشركة"); }
@@ -10839,7 +10847,7 @@ function ShippingSettingsPanel({ ui, mob, isSuper, storeCfg, setStoreCfg, saveSe
   const patchCourier = async (id, patch) => {
     try {
       const r = await fetch(`/api/shipping/couriers/${id}`, {
-        method:"PATCH", headers:{"Content-Type":"application/json"},
+        method:"PATCH", headers: authedHeaders(),
         body: JSON.stringify(patch),
       });
       if (r.ok) reload();
@@ -10848,7 +10856,7 @@ function ShippingSettingsPanel({ ui, mob, isSuper, storeCfg, setStoreCfg, saveSe
   const deleteCourier = async (c) => {
     if (!window.confirm(`حذف "${c.name}"؟ (سيتم منع الحذف إذا كانت مرتبطة بشحنات)`)) return;
     try {
-      const r = await fetch(`/api/shipping/couriers/${c.id}`, { method:"DELETE" });
+      const r = await fetch(`/api/shipping/couriers/${c.id}`, { method:"DELETE", headers: authedHeaders() });
       const d = await r.json().catch(()=>({}));
       if (!r.ok) { window.alert(d.error || "تعذّر الحذف"); return; }
       reload(); flash("تم الحذف");
@@ -13727,7 +13735,7 @@ async function generateAwbPdf({ ship, bulk, sender, action = "save" } = {}) {
 // optimized HTML doc and triggers window.print() — keeps print CSS from
 // interfering with the admin UI and aligns with user preference for
 // window.print() over jsPDF on non-AWB outputs.
-function CourierManifestModal({ couriers, onClose, ui, mob }) {
+function CourierManifestModal({ couriers, actorEmail, onClose, ui, mob }) {
   const today = new Date().toISOString().slice(0, 10);
   const activeCouriers = (Array.isArray(couriers) ? couriers : []).filter(c => c.active !== 0 && c.active !== false);
   const [courierId, setCourierId] = useState(activeCouriers[0] ? String(activeCouriers[0].id) : "");
@@ -13744,7 +13752,9 @@ function CourierManifestModal({ couriers, onClose, ui, mob }) {
     if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) { setErr("اختر تاريخاً صحيحاً"); return; }
     setErr(""); setBusy(true); setManifest(null);
     try {
-      const r = await fetch(`/api/shipping/manifest?courier_id=${encodeURIComponent(courierId)}&date=${encodeURIComponent(date)}`);
+      const r = await fetch(`/api/shipping/manifest?courier_id=${encodeURIComponent(courierId)}&date=${encodeURIComponent(date)}`, {
+        headers: { "X-Actor-Email": actorEmail || "" },
+      });
       if (!r.ok) { const j = await r.json().catch(() => ({})); throw new Error(j.error || `HTTP ${r.status}`); }
       const data = await r.json();
       setManifest(data);
