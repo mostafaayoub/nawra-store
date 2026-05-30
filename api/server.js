@@ -3890,6 +3890,21 @@ function computeShippingFee(zone, weight, orderTotal, globalFreeThreshold) {
   return { fee, free: false, reason: 'tiered', zone_id: z.id, base, base_weight: baseW, extra_per_kg: perKg };
 }
 
+// Read shipping_delay_alert_days from settings.store (set by Settings →
+// Shipping → General). Phase 3 slice 6. Returns 5 as fallback to match
+// the frontend default. Threshold applies from shipped_at — a shipment
+// is considered delayed when status='shipped' and now - shipped_at >
+// threshold (in days).
+function getDelayThresholdDays() {
+  try {
+    const row = db.prepare("SELECT value FROM settings WHERE key = 'store'").get();
+    const store = row ? JSON.parse(row.value || '{}') : {};
+    const v = Number(store.shipping_delay_alert_days);
+    if (Number.isFinite(v) && v > 0) return v;
+  } catch {}
+  return 5;
+}
+
 // Read shipping_default_free_threshold from settings.store (set by the
 // Phase-2 Settings → Shipping section D). Falls back to legacy
 // settings.shipping.free_shipping_min_order. Returns 0 when neither is set.
@@ -4202,6 +4217,21 @@ app.get('/api/shipments/aggregates', (_req, res) => {
     const customerPaidMonth  = monthRows.reduce((s, r) => s + (Number(r.customer_paid_shipping) || 0), 0);
     const shippingMargin     = customerPaidMonth - courierCostMonth;
 
+    // Phase 3 slice 6: count shipments delayed past the configurable
+    // threshold (settings.store.shipping_delay_alert_days, default 5).
+    // A shipment is delayed when status='shipped' AND now - shipped_at
+    // exceeds the threshold (days). Frontend uses delay_threshold_days
+    // to render row badges without an extra fetch.
+    const delayThreshold = getDelayThresholdDays();
+    const nowMs = Date.now();
+    const delayedCount = byStatus('shipped').filter(s => {
+      if (!s.shipped_at) return false;
+      const t = new Date(String(s.shipped_at).replace(' ', 'T') + 'Z').getTime();
+      if (!Number.isFinite(t)) return false;
+      const days = (nowMs - t) / 86400000;
+      return days > delayThreshold;
+    }).length;
+
     res.json({
       counts,
       delivered_current_month: deliveredCurrent,
@@ -4211,6 +4241,8 @@ app.get('/api/shipments/aggregates', (_req, res) => {
       courier_cost_month:      Math.round(courierCostMonth),
       customer_paid_month:     Math.round(customerPaidMonth),
       shipping_margin_month:   Math.round(shippingMargin),
+      delayed_count:           delayedCount,
+      delay_threshold_days:    delayThreshold,
     });
   } catch (e) { console.error('GET /api/shipments/aggregates', e); res.status(500).json({ error: e.message }); }
 });

@@ -7330,9 +7330,15 @@ function AdminDash({ go }) {
 
                 {/* KPI cards (5) */}
                 <div style={{display:"grid",gridTemplateColumns:mob?"1fr 1fr":"repeat(5,1fr)",gap:10,marginBottom:10}}>
-                  <div style={{background:ui.cardBg,border:ui.border,borderRadius:ui.radius,padding:"14px 16px",borderTop:`3px solid ${(counts.shipped || 0) > 10 ? "#F59E0B" : "#3B82F6"}`}}>
+                  <div style={{background:ui.cardBg,border:ui.border,borderRadius:ui.radius,padding:"14px 16px",borderTop:`3px solid ${(ag.delayed_count || 0) > 0 ? "#DC2626" : ((counts.shipped || 0) > 10 ? "#F59E0B" : "#3B82F6")}`}}>
                     <div style={{fontSize:11.5,color:ui.textSub,fontFamily:ui.fontBody,marginBottom:5}}>شحنات قيد التوصيل</div>
                     <div style={{fontSize:mob?17:21,color:ui.text,fontFamily:ui.fontHead,fontWeight:500}}>{counts.shipped || 0}</div>
+                    {(ag.delayed_count || 0) > 0 && (
+                      <div title={`${ag.delayed_count} شحنة تجاوزت ${ag.delay_threshold_days || 5} أيام منذ الشحن`}
+                        style={{fontSize:11,marginTop:4,color:"#B91C1C",fontFamily:ui.fontBody,fontWeight:500}}>
+                        ⚠ {ag.delayed_count} متأخرة (&gt; {ag.delay_threshold_days || 5} أيام)
+                      </div>
+                    )}
                   </div>
                   <div style={{background:ui.cardBg,border:ui.border,borderRadius:ui.radius,padding:"14px 16px",borderTop:"3px solid #16A34A"}}>
                     <div style={{fontSize:11.5,color:ui.textSub,fontFamily:ui.fontBody,marginBottom:5}}>تم تسليمها هذا الشهر</div>
@@ -7476,8 +7482,19 @@ function AdminDash({ go }) {
                           const customerPaid = (Number(r.customer_paid_shipping)||0) + (Number(r.customer_paid_cod)||0);
                           const isLate = r.status === "shipped" && r.expected_delivery_date
                             && r.expected_delivery_date < new Date().toISOString().slice(0,10);
+                          // Phase 3 slice 6: delayed = shipped > threshold days ago.
+                          // Threshold comes from /aggregates (server reads from
+                          // settings.store.shipping_delay_alert_days, default 5).
+                          const delayThr = Number(ag.delay_threshold_days) || 5;
+                          let daysSinceShipped = null;
+                          if (r.status === "shipped" && r.shipped_at) {
+                            const t = new Date(String(r.shipped_at).replace(" ", "T") + "Z").getTime();
+                            if (Number.isFinite(t)) daysSinceShipped = Math.floor((Date.now() - t) / 86400000);
+                          }
+                          const isDelayed = daysSinceShipped != null && daysSinceShipped > delayThr;
+                          const rowBg = isDelayed ? "#FEE2E2" : (isLate ? "#FEF2F2" : "transparent");
                           return (
-                            <tr key={r.id} style={{borderTop:"0.5px solid #EEE", background: isLate ? "#FEF2F2" : "transparent"}}>
+                            <tr key={r.id} style={{borderTop:"0.5px solid #EEE", background: rowBg}}>
                               <td style={{padding:"9px 10px"}}>
                                 <input type="checkbox" checked={!!shipSelected[r.id]}
                                   onChange={e => setShipSelected(p => ({...p, [r.id]: e.target.checked}))}/>
@@ -7506,8 +7523,14 @@ function AdminDash({ go }) {
                                 {r.expected_delivery_date || "—"}
                                 {isLate && <span style={{marginInlineStart:4,fontSize:10}}>⚠</span>}
                               </td>
-                              <td style={{padding:"9px 12px"}}>
+                              <td style={{padding:"9px 12px",whiteSpace:"nowrap"}}>
                                 <span style={{fontSize:10.5,padding:"3px 10px",borderRadius:20,background:b.bg,color:b.fg,fontFamily:ui.fontBody,whiteSpace:"nowrap"}}>{b.l}</span>
+                                {isDelayed && (
+                                  <span title={`متأخر ${daysSinceShipped} يوم منذ الشحن (الحد ${delayThr})`}
+                                    style={{fontSize:10,padding:"3px 8px",borderRadius:20,background:"#FEE2E2",color:"#B91C1C",fontFamily:ui.fontBody,marginInlineStart:5,fontWeight:600}}>
+                                    ⚠ متأخر
+                                  </span>
+                                )}
                               </td>
                               <td style={{padding:"9px 12px",textAlign:"left",whiteSpace:"nowrap"}}>
                                 <button title="عرض التفاصيل" onClick={() => setShipDetailAwb(r.awb_number || r.id)}
