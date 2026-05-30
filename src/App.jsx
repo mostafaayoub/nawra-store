@@ -2065,6 +2065,8 @@ function AdminDash({ go }) {
     q: "", supplier_id: "all", from: "", to: ""
   });
   const [supplierPaymentDetail,   setSupplierPaymentDetail]   = useState(null);
+  // SupplierFormModal: null when closed, { initial: null|supplier } when open.
+  const [supplierFormState, setSupplierFormState] = useState(null);
 
   const refreshPurchases = useCallback(async () => {
     try {
@@ -7968,6 +7970,7 @@ function AdminDash({ go }) {
                 authUser={authUser}
                 onSaved={() => { refreshPurchases(); refreshPurchasesAggs(); goPurchases(); }}
                 onCancel={goPurchases}
+                onAddSupplier={(onSavedCb) => setSupplierFormState({ initial: null, onSavedCb })}
                 ui={ui}
                 mob={mob}
               />
@@ -8111,6 +8114,7 @@ function AdminDash({ go }) {
               authUser={authUser}
               onSaved={() => { refreshSupplierPayments(); refreshSupplierPaymentsAggs(); refreshPurchases(); refreshPurchasesAggs(); goSupplierPayments(); }}
               onCancel={goSupplierPayments}
+              onAddSupplier={(onSavedCb) => setSupplierFormState({ initial: null, onSavedCb })}
               ui={ui}
               mob={mob}
             />
@@ -8406,6 +8410,10 @@ function AdminDash({ go }) {
                     <h2 style={{fontSize:18,fontWeight:600,color:ui.text,fontFamily:ui.fontBody,margin:0}}>الموردين</h2>
                     <div style={{fontSize:12,color:ui.textSub,fontFamily:ui.fontBody,marginTop:2}}>إدارة الموردين والحسابات</div>
                   </div>
+                  <button onClick={() => setSupplierFormState({ initial: null })}
+                    style={{padding:"8px 14px",background:ui.text,color:"#fff",border:"none",borderRadius:6,fontSize:12.5,cursor:"pointer",fontFamily:ui.fontBody,fontWeight:500}}>
+                    + مورد جديد
+                  </button>
                 </div>
 
                 {/* KPI cards (4) */}
@@ -8450,9 +8458,13 @@ function AdminDash({ go }) {
                   <div style={{background:ui.cardBg,border:ui.border,borderRadius:ui.radius,padding:"56px 20px",textAlign:"center"}}>
                     <div style={{fontSize:42,marginBottom:10}}>🏭</div>
                     <div style={{fontSize:15,color:ui.text,fontFamily:ui.fontBody,fontWeight:600,marginBottom:6}}>لا يوجد موردين بعد</div>
-                    <div style={{fontSize:12.5,color:ui.textSub,fontFamily:ui.fontBody,maxWidth:420,margin:"0 auto"}}>
-                      يتم إضافة الموردين تلقائياً عند إنشاء فاتورة شراء (من قائمة "فاتورة شراء جديدة")
+                    <div style={{fontSize:12.5,color:ui.textSub,fontFamily:ui.fontBody,maxWidth:420,margin:"0 auto 14px"}}>
+                      أضف أول مورد لتبدأ في تسجيل فواتير الشراء ومتابعة الذمم
                     </div>
+                    <button onClick={() => setSupplierFormState({ initial: null })}
+                      style={{padding:"9px 18px",background:ui.text,color:"#fff",border:"none",borderRadius:6,fontSize:13,cursor:"pointer",fontFamily:ui.fontBody,fontWeight:500}}>
+                      + مورد جديد
+                    </button>
                   </div>
                 ) : filtered.length === 0 ? (
                   <div style={{background:ui.cardBg,border:ui.border,borderRadius:ui.radius,padding:"40px",textAlign:"center",color:ui.textSub,fontFamily:ui.fontBody,fontSize:13}}>
@@ -8497,9 +8509,27 @@ function AdminDash({ go }) {
                               <td style={{padding:"9px 12px",textAlign:"left",whiteSpace:"nowrap"}}>
                                 <a href={`#admin/suppliers/${encodeURIComponent(s.id)}`}
                                   title="عرض التفاصيل"
-                                  style={{background:"transparent",border:"none",cursor:"pointer",padding:4,color:"#1D4ED8",fontSize:14,textDecoration:"none"}}>
+                                  style={{background:"transparent",border:"none",cursor:"pointer",padding:4,color:"#1D4ED8",fontSize:14,textDecoration:"none",marginInlineStart:4}}>
                                   👁
                                 </a>
+                                <button onClick={() => setSupplierFormState({ initial: s })}
+                                  title="تعديل المورد"
+                                  style={{background:"transparent",border:"none",cursor:"pointer",padding:4,color:"#6B7280",fontSize:13,marginInlineStart:4}}>
+                                  ✏️
+                                </button>
+                                <button onClick={async () => {
+                                  if (!window.confirm(`حذف المورد "${s.name}"؟ (سيتم منع الحذف إذا كان مرتبطاً بفواتير).`)) return;
+                                  try {
+                                    const r = await fetch(`/api/suppliers/${encodeURIComponent(s.id)}`, { method: "DELETE" });
+                                    const d = await r.json().catch(()=>({}));
+                                    if (!r.ok) { window.alert(d.error || `فشل الحذف (${r.status})`); return; }
+                                    refreshSuppliers(); refreshSuppliersAggs();
+                                  } catch (e) { window.alert(e.message); }
+                                }}
+                                  title="حذف المورد"
+                                  style={{background:"transparent",border:"none",cursor:"pointer",padding:4,color:"#DC2626",fontSize:14,marginInlineStart:4}}>
+                                  🗑
+                                </button>
                               </td>
                             </tr>
                           );
@@ -9506,6 +9536,28 @@ function AdminDash({ go }) {
 
         </main>
       </div>
+
+      {/* Supplier form modal — opened by Suppliers list, Purchase form, and
+          Supplier Payment form. supplierFormState shape:
+            { initial: null|supplier, onSavedCb?: (newSupplier) => void } */}
+      {supplierFormState && (
+        <SupplierFormModal
+          initial={supplierFormState.initial}
+          ui={ui}
+          mob={mob}
+          onClose={() => setSupplierFormState(null)}
+          onSaved={(newSup) => {
+            refreshSuppliers(); refreshSuppliersAggs();
+            // If detail page for this supplier is open, refresh it too.
+            if (supplierDetailId && newSup && newSup.id === supplierDetailId) {
+              refreshSupplierDetail(supplierDetailId);
+            }
+            const cb = supplierFormState.onSavedCb;
+            setSupplierFormState(null);
+            if (typeof cb === "function") { try { cb(newSup); } catch {} }
+          }}
+        />
+      )}
     </div>
   );
 }
@@ -11517,42 +11569,21 @@ function ExpenseSettingsPanel({ ui, mob, isSuper, storeCfg, setStoreCfg, saveSet
         )}
       </div>
 
-      {/* SUPPLIERS ───────────────────────────────────────────────────────── */}
+      {/* SUPPLIERS — moved to /#admin/suppliers as a first-class admin page.
+          This panel section becomes a redirect notice so anyone looking
+          here lands on the proper place. The supplier CRUD here had no
+          access to invoice/balance data, which is now central to suppliers. */}
       <div style={card}>
-        <div style={cardTitle}>الموردين ({sups.length})</div>
-        <div style={{overflowX:"auto"}}>
-          <table style={{width:"100%",borderCollapse:"collapse",direction:"rtl",fontFamily:ui.fontBody,minWidth:560}}>
-            <thead>
-              <tr style={{background:ui.sideBg,borderBottom:"0.5px solid #E5E5E5"}}>
-                {["الاسم","الهاتف","الإيميل","ملاحظات",""].map(h=>(
-                  <th key={h} style={{padding:"10px 12px",textAlign:"right",fontSize:11.5,color:ui.textSub,fontWeight:500}}>{h}</th>
-                ))}
-              </tr>
-            </thead>
-            <tbody>
-              {sups.map(s => (
-                <tr key={s.id} style={{borderTop:"0.5px solid #EEE"}}>
-                  <td style={{padding:"8px 12px",fontSize:13,color:ui.text,fontFamily:ui.fontBody}}>{s.name}</td>
-                  <td style={{padding:"8px 12px",fontSize:12,color:ui.textSub,fontFamily:"monospace"}}>{s.phone || "—"}</td>
-                  <td style={{padding:"8px 12px",fontSize:12,color:ui.textSub,fontFamily:"monospace"}}>{s.email || "—"}</td>
-                  <td style={{padding:"8px 12px",fontSize:11.5,color:ui.textSub,fontFamily:ui.fontBody,maxWidth:240,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{s.notes || "—"}</td>
-                  <td style={{padding:"8px 12px",textAlign:"left"}}>
-                    <button onClick={()=>deleteSupplier(s)} style={{background:"transparent",border:"none",color:"#DC2626",cursor:"pointer",fontSize:14}}>×</button>
-                  </td>
-                </tr>
-              ))}
-              <tr style={{borderTop:"0.5px solid #EEE",background:"#FAFAFA"}}>
-                <td style={{padding:"8px 12px"}}><input style={{...inputStyle,padding:"6px 9px"}} value={supDraft.name} onChange={e=>setSupDraft({...supDraft,name:e.target.value})} placeholder="مورد جديد..."/></td>
-                <td style={{padding:"8px 12px"}}><input style={{...inputStyle,padding:"6px 9px",direction:"ltr",textAlign:"left"}} value={supDraft.phone} onChange={e=>setSupDraft({...supDraft,phone:e.target.value})} placeholder="01000000000"/></td>
-                <td style={{padding:"8px 12px"}}><input style={{...inputStyle,padding:"6px 9px",direction:"ltr",textAlign:"left"}} value={supDraft.email} onChange={e=>setSupDraft({...supDraft,email:e.target.value})} placeholder="email@..."/></td>
-                <td style={{padding:"8px 12px"}}><input style={{...inputStyle,padding:"6px 9px"}} value={supDraft.notes} onChange={e=>setSupDraft({...supDraft,notes:e.target.value})} placeholder="ملاحظات"/></td>
-                <td style={{padding:"8px 12px",textAlign:"left"}}>
-                  <button onClick={addSupplier} disabled={busy || !supDraft.name.trim()}
-                    style={{background: supDraft.name.trim() ? ui.text : "#9CA3AF",color:"#fff",border:"none",padding:"6px 14px",borderRadius:4,fontSize:12,fontFamily:ui.fontBody,cursor: supDraft.name.trim()?"pointer":"not-allowed"}}>إضافة</button>
-                </td>
-              </tr>
-            </tbody>
-          </table>
+        <div style={cardTitle}>الموردين</div>
+        <div style={{padding:"14px 16px",background:"#EFF6FF",border:"0.5px solid #BFDBFE",borderRadius:6}}>
+          <div style={{fontSize:13,color:"#1E3A8A",fontFamily:ui.fontBody,marginBottom:8,lineHeight:1.6}}>
+            أُصبح الموردين قسماً مستقلاً في الشريط الجانبي تحت "المشتريات والمخزون".
+            تجد هناك إدارة كاملة بالموردين مع رصيد كل مورد، فواتيره، ودفعاته.
+          </div>
+          <a href="#admin/suppliers"
+            style={{display:"inline-block",padding:"7px 14px",background:ui.text,color:"#fff",border:"none",borderRadius:5,fontSize:12,fontFamily:ui.fontBody,textDecoration:"none",fontWeight:500}}>
+            فتح صفحة الموردين ←
+          </a>
         </div>
       </div>
     </div>
@@ -13566,12 +13597,126 @@ async function generateAwbPdf({ ship, bulk, sender, action = "save" } = {}) {
   return doc;
 }
 
+// ─── SupplierFormModal — module-scope so typing in any field doesn't ───────
+// trigger AdminDash re-renders and lose focus. Used by the Suppliers list
+// page (new + edit) AND by the supplier dropdowns inside PurchaseInvoiceForm
+// + SupplierPaymentForm (quick-add). When `initial` is null/undefined it's
+// "new"; otherwise it's "edit" pre-populated with the existing supplier.
+function SupplierFormModal({ initial, onSaved, onClose, ui, mob }) {
+  const isEdit = !!(initial && initial.id);
+  const [name,    setName]    = useState(isEdit ? (initial.name || "") : "");
+  const [phone,   setPhone]   = useState(isEdit ? (initial.phone || "") : "");
+  const [email,   setEmail]   = useState(isEdit ? (initial.email || "") : "");
+  const [notes,   setNotes]   = useState(isEdit ? (initial.notes || "") : "");
+  const [supType, setSupType] = useState(isEdit ? (initial.supplier_type || "other") : "other");
+  const [terms,   setTerms]   = useState(isEdit ? (Number(initial.default_payment_terms_days) || 0) : 0);
+  const [active,  setActive]  = useState(isEdit ? (initial.active !== 0 && initial.active !== false) : true);
+  const [busy, setBusy] = useState(false);
+  const [err,  setErr]  = useState("");
+
+  const inputStyle = { padding:"7px 10px",border:ui.border,borderRadius:5,fontFamily:ui.fontBody,fontSize:12.5,color:ui.text,outline:"none",boxSizing:"border-box",width:"100%" };
+  const lbl        = { fontSize:11.5,color:ui.textSub,fontFamily:ui.fontBody,marginBottom:3,display:"block" };
+
+  const onSave = async () => {
+    if (!name.trim()) { setErr("اسم المورد مطلوب"); return; }
+    setErr(""); setBusy(true);
+    try {
+      const body = {
+        name: name.trim(), phone: phone.trim() || null, email: email.trim() || null,
+        notes: notes.trim() || null, supplier_type: supType, default_payment_terms_days: Number(terms) || 0,
+        active: active ? 1 : 0,
+      };
+      const url    = isEdit ? `/api/suppliers/${encodeURIComponent(initial.id)}` : "/api/suppliers";
+      const method = isEdit ? "PATCH" : "POST";
+      const r = await fetch(url, { method, headers:{"Content-Type":"application/json"}, body: JSON.stringify(body) });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok) { setErr(d.error || `فشل الحفظ (${r.status})`); return; }
+      if (onSaved) onSaved(d);
+    } catch (e) { setErr(e.message || String(e)); }
+    finally { setBusy(false); }
+  };
+
+  return (
+    <div onClick={onClose}
+      style={{position:"fixed",inset:0,background:"rgba(0,0,0,.55)",zIndex:900,display:"flex",alignItems:"center",justifyContent:"center",padding:mob?10:24,direction:"rtl",overflowY:"auto"}}>
+      <div onClick={e => e.stopPropagation()}
+        style={{background:ui.cardBg,maxWidth:520,width:"100%",borderRadius:8,boxShadow:"0 12px 48px rgba(0,0,0,.25)",overflow:"hidden"}}>
+        <div style={{padding:"14px 18px",borderBottom:"0.5px solid #EEE",display:"flex",alignItems:"center",justifyContent:"space-between"}}>
+          <h3 style={{fontSize:15,fontWeight:600,color:ui.text,fontFamily:ui.fontBody,margin:0}}>
+            {isEdit ? `تعديل المورد: ${initial.name}` : "إضافة مورد جديد"}
+          </h3>
+          <button onClick={onClose} style={{background:"none",border:"none",fontSize:18,color:ui.textSub,cursor:"pointer",lineHeight:1}}>✕</button>
+        </div>
+        <div style={{padding:14}}>
+          {err && (
+            <div style={{background:"#FEE2E2",border:"0.5px solid #FCA5A5",borderRadius:6,padding:"7px 11px",marginBottom:10,fontSize:12,color:"#991B1B",fontFamily:ui.fontBody}}>
+              {err}
+            </div>
+          )}
+          <div style={{display:"grid",gridTemplateColumns:mob?"1fr":"1fr 1fr",gap:10}}>
+            <div style={{gridColumn: mob ? "auto" : "1 / span 2"}}>
+              <label style={lbl}>اسم المورد <span style={{color:"#DC2626"}}>*</span></label>
+              <input value={name} onChange={e=>setName(e.target.value)} autoFocus style={inputStyle}/>
+            </div>
+            <div>
+              <label style={lbl}>الهاتف</label>
+              <input value={phone} onChange={e=>setPhone(e.target.value)} placeholder="01000000000" style={{...inputStyle, direction:"ltr", textAlign:"left", fontFamily:"monospace"}}/>
+            </div>
+            <div>
+              <label style={lbl}>الإيميل</label>
+              <input value={email} onChange={e=>setEmail(e.target.value)} placeholder="supplier@example.com" style={{...inputStyle, direction:"ltr", textAlign:"left"}}/>
+            </div>
+            <div>
+              <label style={lbl}>نوع المورد</label>
+              <select value={supType} onChange={e=>setSupType(e.target.value)} style={inputStyle}>
+                <option value="distributor">موزع رسمي</option>
+                <option value="merchant">تاجر</option>
+                <option value="importer">مستورد</option>
+                <option value="other">آخر</option>
+              </select>
+            </div>
+            <div>
+              <label style={lbl}>شروط الدفع الافتراضية (يوم)</label>
+              <input type="number" min={0} step={1} value={terms} onChange={e=>setTerms(e.target.value)}
+                style={{...inputStyle, direction:"ltr", textAlign:"left", fontFamily:"monospace"}}/>
+              <div style={{fontSize:10.5,color:ui.textSub,fontFamily:ui.fontBody,marginTop:3}}>0 = كاش فوري · أكثر من 0 = آجل N يوم</div>
+            </div>
+            <div style={{gridColumn: mob ? "auto" : "1 / span 2"}}>
+              <label style={lbl}>ملاحظات داخلية</label>
+              <textarea rows={2} value={notes} onChange={e=>setNotes(e.target.value)}
+                style={{...inputStyle, fontFamily:ui.fontBody, resize:"vertical"}}/>
+            </div>
+            {isEdit && (
+              <div style={{gridColumn: mob ? "auto" : "1 / span 2", display:"flex", alignItems:"center", gap:8, padding:"7px 0"}}>
+                <input type="checkbox" id="sup-active" checked={active} onChange={e=>setActive(e.target.checked)}/>
+                <label htmlFor="sup-active" style={{fontSize:12.5,color:ui.text,fontFamily:ui.fontBody,cursor:"pointer"}}>
+                  المورد نشط (يظهر في القوائم المنسدلة)
+                </label>
+              </div>
+            )}
+          </div>
+        </div>
+        <div style={{padding:"10px 14px",borderTop:"0.5px solid #EEE",background:"#F9FAFB",display:"flex",justifyContent:"flex-end",gap:8}}>
+          <button onClick={onClose} disabled={busy}
+            style={{padding:"7px 13px",background:ui.cardBg,color:ui.text,border:ui.border,borderRadius:5,fontSize:12,cursor:"pointer",fontFamily:ui.fontBody}}>
+            إلغاء
+          </button>
+          <button onClick={onSave} disabled={busy || !name.trim()}
+            style={{padding:"7px 15px",background:(busy||!name.trim())?"#9CA3AF":ui.text,color:"#fff",border:"none",borderRadius:5,fontSize:12,cursor:(busy||!name.trim())?"not-allowed":"pointer",fontFamily:ui.fontBody,fontWeight:500}}>
+            {busy ? "جاري الحفظ..." : (isEdit ? "حفظ التعديلات" : "إضافة المورد")}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ─── SupplierPaymentForm — module-scope (input focus preservation) ──────────
 // Records a payment to a supplier with per-invoice allocations. The form
 // loads the supplier's unpaid invoices when supplier is selected and lets
 // the admin allocate the payment amount across them. Validates that
 // sum(allocations) === payment.amount before allowing save.
-function SupplierPaymentForm({ suppliers, authUser, onSaved, onCancel, ui, mob }) {
+function SupplierPaymentForm({ suppliers, authUser, onSaved, onCancel, onAddSupplier, ui, mob }) {
   const today = new Date().toISOString().slice(0, 10);
   const [supplierId,    setSupplierId]    = useState("");
   const [amount,        setAmount]        = useState(0);
@@ -13696,7 +13841,15 @@ function SupplierPaymentForm({ suppliers, authUser, onSaved, onCancel, ui, mob }
             <div style={cardTitle}>معلومات الدفعة</div>
             <div style={{display:"grid",gridTemplateColumns:mob?"1fr":"1fr 1fr",gap:10}}>
               <div>
-                <label style={lbl}>المورد <span style={{color:"#DC2626"}}>*</span></label>
+                <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:3}}>
+                  <label style={{...lbl, marginBottom:0}}>المورد <span style={{color:"#DC2626"}}>*</span></label>
+                  {typeof onAddSupplier === "function" && (
+                    <button type="button" onClick={() => onAddSupplier((sup) => sup && setSupplierId(sup.id))}
+                      style={{background:"transparent",border:"none",color:"#1D4ED8",cursor:"pointer",fontSize:11,fontFamily:ui.fontBody,padding:0}}>
+                      + مورد جديد
+                    </button>
+                  )}
+                </div>
                 <select value={supplierId} onChange={e=>setSupplierId(e.target.value)} style={inputStyle}>
                   <option value="">— اختر مورداً —</option>
                   {(suppliers || []).map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
@@ -13828,7 +13981,7 @@ function SupplierPaymentForm({ suppliers, authUser, onSaved, onCancel, ui, mob }
 //
 // Landed-cost preview: live computation of allocated_landed_cost +
 // effective_unit_cost per line so the admin sees the WAC impact before save.
-function PurchaseInvoiceForm({ mode, initial, suppliers, products, authUser, onSaved, onCancel, ui, mob }) {
+function PurchaseInvoiceForm({ mode, initial, suppliers, products, authUser, onSaved, onCancel, onAddSupplier, ui, mob }) {
   const isEdit = mode === "edit" && initial;
   const today  = new Date().toISOString().slice(0, 10);
 
@@ -14024,7 +14177,15 @@ function PurchaseInvoiceForm({ mode, initial, suppliers, products, authUser, onS
                   style={{...inputStyle, fontFamily:"monospace", background:"#F9FAFB", color:ui.textSub}}/>
               </div>
               <div>
-                <label style={lbl}>المورد <span style={{color:"#DC2626"}}>*</span></label>
+                <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:3}}>
+                  <label style={{...lbl, marginBottom:0}}>المورد <span style={{color:"#DC2626"}}>*</span></label>
+                  {typeof onAddSupplier === "function" && (
+                    <button type="button" onClick={() => onAddSupplier((sup) => sup && setSupplierId(sup.id))}
+                      style={{background:"transparent",border:"none",color:"#1D4ED8",cursor:"pointer",fontSize:11,fontFamily:ui.fontBody,padding:0}}>
+                      + مورد جديد
+                    </button>
+                  )}
+                </div>
                 <select value={supplierId} onChange={e=>setSupplierId(e.target.value)} style={inputStyle}>
                   <option value="">— اختر مورداً —</option>
                   {(suppliers || []).map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
