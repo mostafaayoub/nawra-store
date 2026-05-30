@@ -2077,6 +2077,48 @@ function AdminDash({ go }) {
     try { const r = await fetch(`/api/supplier-payments/${encodeURIComponent(key)}`); if (r.ok) setSupplierPaymentDetail(await r.json()); else setSupplierPaymentDetail(null); } catch { setSupplierPaymentDetail(null); }
   }, []);
 
+  // ── Phase 2 subroute parsers ────────────────────────────────────────────
+  // MUST live above the useEffects below — they're referenced in the deps
+  // arrays which evaluate immediately during render. Previously declared
+  // ~600 lines later alongside go-helpers, which produced a TDZ
+  // ReferenceError on every AdminDash render (the `_t` crash on 2026-05-29).
+  // Each parser is a pure read of window.location.hash; re-evaluates on
+  // each render via the hashchange listener (forceHashTick) further down.
+  const purchaseFormRoute = (() => {
+    if (typeof window === "undefined") return null;
+    const h = window.location.hash || "";
+    if (h === "#admin/purchases/new") return { mode: "new" };
+    const m = h.match(/^#admin\/purchases\/([^/]+)\/edit$/);
+    if (m) return { mode: "edit", id: decodeURIComponent(m[1]) };
+    return null;
+  })();
+  const purchaseDetailKey = (() => {
+    if (typeof window === "undefined") return null;
+    const h = window.location.hash || "";
+    if (h === "#admin/purchases/new") return null;
+    const m = h.match(/^#admin\/purchases\/([^/]+)$/);
+    return m ? decodeURIComponent(m[1]) : null;
+  })();
+  const supplierDetailId = (() => {
+    if (typeof window === "undefined") return null;
+    const h = window.location.hash || "";
+    const m = h.match(/^#admin\/suppliers\/([^/]+)$/);
+    return m ? decodeURIComponent(m[1]) : null;
+  })();
+  const supplierPaymentFormRoute = (() => {
+    if (typeof window === "undefined") return null;
+    const h = window.location.hash || "";
+    if (h === "#admin/supplier-payments/new") return { mode: "new" };
+    return null;
+  })();
+  const supplierPaymentDetailKey = (() => {
+    if (typeof window === "undefined") return null;
+    const h = window.location.hash || "";
+    if (h === "#admin/supplier-payments/new") return null;
+    const m = h.match(/^#admin\/supplier-payments\/([^/]+)$/);
+    return m ? decodeURIComponent(m[1]) : null;
+  })();
+
   useEffect(() => {
     if (tab === "purchases" && !purchaseFormRoute && !purchaseDetailKey) {
       refreshPurchases(); refreshPurchasesAggs(); refreshSuppliers();
@@ -2670,22 +2712,10 @@ function AdminDash({ go }) {
   const goReturn       = (retNum) => { window.location.hash = `#admin/returns/${encodeURIComponent(retNum)}`; };
   const goReturnsList  = ()       => { if (window.location.hash !== "#admin") window.location.hash = "#admin"; setTab("returns"); };
 
-  // Purchases subroutes — #admin/purchases/new | /:id/edit | /:id (details)
-  const purchaseFormRoute = (() => {
-    if (typeof window === "undefined") return null;
-    const h = window.location.hash || "";
-    if (h === "#admin/purchases/new") return { mode: "new" };
-    const m = h.match(/^#admin\/purchases\/([^/]+)\/edit$/);
-    if (m) return { mode: "edit", id: decodeURIComponent(m[1]) };
-    return null;
-  })();
-  const purchaseDetailKey = (() => {
-    if (typeof window === "undefined") return null;
-    const h = window.location.hash || "";
-    if (h === "#admin/purchases/new") return null;
-    const m = h.match(/^#admin\/purchases\/([^/]+)$/);
-    return m ? decodeURIComponent(m[1]) : null;
-  })();
+  // Phase 2 subroute parsers were here originally; they've been moved up
+  // (~600 lines earlier) so the useEffect deps arrays that reference them
+  // don't TDZ on every render. Their associated tab-sync useEffects and
+  // go-helpers stay here, since both run AFTER the parser declarations now.
   useEffect(() => {
     if ((purchaseFormRoute || purchaseDetailKey) && tab !== "purchases") setTab("purchases");
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -2695,13 +2725,6 @@ function AdminDash({ go }) {
   const goPurchaseEdit    = (id)  => { window.location.hash = `#admin/purchases/${encodeURIComponent(id)}/edit`; };
   const goPurchaseDetail  = (key) => { window.location.hash = `#admin/purchases/${encodeURIComponent(key)}`; };
 
-  // Suppliers subroutes — #admin/suppliers/:id
-  const supplierDetailId = (() => {
-    if (typeof window === "undefined") return null;
-    const h = window.location.hash || "";
-    const m = h.match(/^#admin\/suppliers\/([^/]+)$/);
-    return m ? decodeURIComponent(m[1]) : null;
-  })();
   useEffect(() => {
     if (supplierDetailId && tab !== "suppliers") setTab("suppliers");
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -2709,20 +2732,6 @@ function AdminDash({ go }) {
   const goSuppliers     = ()    => { if (window.location.hash !== "#admin") window.location.hash = "#admin"; setTab("suppliers"); };
   const goSupplier      = (id)  => { window.location.hash = `#admin/suppliers/${encodeURIComponent(id)}`; };
 
-  // Supplier payments subroutes — #admin/supplier-payments/new | /:id
-  const supplierPaymentFormRoute = (() => {
-    if (typeof window === "undefined") return null;
-    const h = window.location.hash || "";
-    if (h === "#admin/supplier-payments/new") return { mode: "new" };
-    return null;
-  })();
-  const supplierPaymentDetailKey = (() => {
-    if (typeof window === "undefined") return null;
-    const h = window.location.hash || "";
-    if (h === "#admin/supplier-payments/new") return null;
-    const m = h.match(/^#admin\/supplier-payments\/([^/]+)$/);
-    return m ? decodeURIComponent(m[1]) : null;
-  })();
   useEffect(() => {
     if ((supplierPaymentFormRoute || supplierPaymentDetailKey) && tab !== "supplier-payments") setTab("supplier-payments");
   // eslint-disable-next-line react-hooks/exhaustive-deps
