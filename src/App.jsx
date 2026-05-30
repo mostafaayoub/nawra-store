@@ -11803,6 +11803,13 @@ function ProductForm({
   const [feedback, setFeedback] = useState(null);       // { kind, text }
   const [loading, setLoading] = useState(!ADD);
   const [original, setOriginal] = useState(null);       // for dirty check
+  // Phase 3: stock + cost on a product are now DERIVED from purchase
+  // invoices, not user-entered. The form fields below are locked.
+  // This state captures the read-only values for display.
+  const [purchaseDerived, setPurchaseDerived] = useState({
+    wac: 0, stock: 0, total_purchased_qty: 0,
+    last_purchase_date: null, last_purchase_price: null,
+  });
   const [autoSavedAt, setAutoSavedAt] = useState(null); // Date | null
   const [slugStatus, setSlugStatus] = useState("idle"); // idle | checking | ok | taken | invalid
   const [confirmDel, setConfirmDel] = useState(false);
@@ -11876,6 +11883,14 @@ function ProductForm({
         setF(filled);
         setOriginal(JSON.stringify(filled));
         setSlugTouched(true); // existing slug — don't auto-overwrite
+        // Phase 3: derived purchase fields for the locked display block.
+        setPurchaseDerived({
+          wac:                 Number(p.weighted_average_cost) || Number(p.cost) || 0,
+          stock:               Number(p.stock) || 0,
+          total_purchased_qty: Number(p.total_purchased_qty) || 0,
+          last_purchase_date:  p.last_purchase_date || null,
+          last_purchase_price: Number(p.last_purchase_price) || null,
+        });
       } catch (e) {
         setFeedback({ kind:"err", text:`فشل تحميل المنتج: ${e.message}` });
       } finally { if (!cancelled) setLoading(false); }
@@ -12481,20 +12496,34 @@ function ProductForm({
                   disabled={f.has_variants || onlyStock}/>
                 <div style={helperText}>اتركه فارغاً إن لم يكن هناك خصم</div>
               </div>
-              {canSeeCost && (
-                <div style={{marginBottom:12}}>
-                  <label style={labelStyle}>التكلفة (للحسابات الداخلية)</label>
-                  <input {...numProps("dec")} style={inputStyle} value={f.cost}
-                    onChange={e=>update({ cost: cleanNumDec(e.target.value) })}/>
-                  {margin !== null ? (
-                    <div style={{fontSize:11.5,marginTop:4,fontFamily:ui.fontBody,color: margin >= 30 ? "#16A34A" : margin >= 10 ? "#D97706" : "#DC2626"}}>
-                      هامش الربح: {margin}%
-                    </div>
-                  ) : (
-                    <div style={helperText}>سعر شراء المنتج — تظهر منه نسبة الربح</div>
-                  )}
-                </div>
-              )}
+              {canSeeCost && (() => {
+                // Phase 3 lockdown: cost is now DERIVED from purchase invoices
+                // via Weighted Average Cost. The input is read-only with a
+                // tooltip; the actual WAC + last-purchase info renders below.
+                const wac = purchaseDerived.wac;
+                const lockedStyle = { ...inputStyle, background:"#F3F4F6", color:ui.textSub, cursor:"not-allowed" };
+                return (
+                  <div style={{marginBottom:12}}>
+                    <label style={labelStyle}>التكلفة (متوسط مرجح — WAC)</label>
+                    <input
+                      {...numProps("dec")}
+                      style={lockedStyle}
+                      value={wac > 0 ? wac.toFixed(2) : ""}
+                      readOnly
+                      disabled
+                      title="تُحدّد القيمة تلقائياً من فواتير الشراء"/>
+                    {margin !== null && wac > 0 ? (
+                      <div style={{fontSize:11.5,marginTop:4,fontFamily:ui.fontBody,color: margin >= 30 ? "#16A34A" : margin >= 10 ? "#D97706" : "#DC2626"}}>
+                        هامش الربح: {margin}%
+                      </div>
+                    ) : (
+                      <div style={helperText}>
+                        🔒 تُحدّد القيمة تلقائياً من فواتير الشراء — <a href="#admin/purchases" style={{color:"#1D4ED8",textDecoration:"none"}}>إدارة المشتريات</a>
+                      </div>
+                    )}
+                  </div>
+                );
+              })()}
               {/* Per-unit shipping weight in kilograms. Read by the auto
                   weight-calc on order/checkout: weight × qty summed per line,
                   falls back to settings.store.shipping_default_product_weight
@@ -12513,18 +12542,70 @@ function ProductForm({
                 <div style={helperText}>يتم اقتراحه تلقائياً (BRND-NAME-NNN)</div>
               </div>
             </div>
+            {/* Phase 3 lockdown: stock + alert_threshold are now derived/managed
+                outside the product form. Stock comes from purchase invoices
+                (or stock adjustments via the Inventory page). Alert threshold
+                will move to a future Inventory Settings panel. */}
             <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
               <div>
                 <label style={labelStyle}>الكمية المتاحة</label>
-                <input {...numProps("int")} style={inputStyle} value={f.stock}
-                  onChange={e=>update({ stock: cleanNumInt(e.target.value) })}
-                  disabled={f.has_variants}/>
+                <input
+                  {...numProps("int")}
+                  style={{ ...inputStyle, background:"#F3F4F6", color:ui.textSub, cursor:"not-allowed" }}
+                  value={String(purchaseDerived.stock || 0)}
+                  readOnly disabled
+                  title="تُحدّد الكمية من فواتير الشراء وحركات المخزون"/>
+                <div style={helperText}>
+                  🔒 يُدار من <a href="#admin/inventory" style={{color:"#1D4ED8",textDecoration:"none"}}>صفحة المخزون</a>
+                </div>
               </div>
-              <div style={onlyStock ? disabledStyle : {}}>
+              <div>
                 <label style={labelStyle}>حد التنبيه</label>
-                <input {...numProps("int")} style={inputStyle} value={f.alert_threshold}
-                  onChange={e=>update({ alert_threshold: cleanNumInt(e.target.value) })}
-                  disabled={onlyStock}/>
+                <input
+                  {...numProps("int")}
+                  style={{ ...inputStyle, background:"#F3F4F6", color:ui.textSub, cursor:"not-allowed" }}
+                  value={String(f.alert_threshold || 5)}
+                  readOnly disabled
+                  title="ينتقل إلى إعدادات المخزون في مرحلة قادمة"/>
+                <div style={helperText}>🔒 سينقل إلى إعدادات المخزون</div>
+              </div>
+            </div>
+
+            {/* Phase 3: read-only derived block — purchase history at a glance */}
+            <div style={{marginTop:12,padding:"10px 12px",background:"#F9FAFB",border:"0.5px solid #E5E7EB",borderRadius:6}}>
+              <div style={{fontSize:11.5,color:ui.textSub,fontFamily:ui.fontBody,marginBottom:6,fontWeight:500}}>
+                مشتقات الشراء (Read-Only)
+              </div>
+              {(purchaseDerived.wac === 0 && purchaseDerived.stock === 0 && purchaseDerived.total_purchased_qty === 0) ? (
+                <div style={{padding:"8px 10px",background:"#FFFBEB",border:"0.5px solid #FDE68A",borderRadius:5,fontSize:12,color:"#92400E",fontFamily:ui.fontBody}}>
+                  ⚠ لا توجد فواتير شراء بعد. <a href="#admin/purchases/new" style={{color:"#1D4ED8",textDecoration:"none",fontWeight:500}}>أضف فاتورة شراء</a> لتسجيل الكمية والتكلفة.
+                </div>
+              ) : (
+                <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8,fontSize:12,fontFamily:ui.fontBody}}>
+                  <div>
+                    <div style={{color:ui.textSub,fontSize:11}}>متوسط التكلفة (WAC)</div>
+                    <div style={{color:ui.text,fontWeight:500,fontFamily:"monospace"}}>{(purchaseDerived.wac || 0).toLocaleString()} ج</div>
+                  </div>
+                  <div>
+                    <div style={{color:ui.textSub,fontSize:11}}>الكمية الحالية</div>
+                    <div style={{color:ui.text,fontWeight:500,fontFamily:"monospace"}}>{purchaseDerived.stock || 0}</div>
+                  </div>
+                  <div>
+                    <div style={{color:ui.textSub,fontSize:11}}>إجمالي الشراء (كل العمر)</div>
+                    <div style={{color:ui.text,fontWeight:500,fontFamily:"monospace"}}>{purchaseDerived.total_purchased_qty || 0} وحدة</div>
+                  </div>
+                  <div>
+                    <div style={{color:ui.textSub,fontSize:11}}>آخر فاتورة شراء</div>
+                    <div style={{color:ui.text,fontWeight:500,fontSize:11.5}}>
+                      {purchaseDerived.last_purchase_date
+                        ? `${String(purchaseDerived.last_purchase_date).slice(0,10)} · ${(purchaseDerived.last_purchase_price||0).toLocaleString()} ج`
+                        : <span style={{color:ui.textSub,fontStyle:"italic"}}>—</span>}
+                    </div>
+                  </div>
+                </div>
+              )}
+              <div style={{marginTop:8,fontSize:11,color:ui.textSub,fontFamily:ui.fontBody}}>
+                <a href="#admin/purchases" style={{color:"#1D4ED8",textDecoration:"none"}}>عرض كل فواتير الشراء →</a>
               </div>
             </div>
           </div>
