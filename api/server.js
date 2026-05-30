@@ -4418,24 +4418,35 @@ app.patch('/api/shipments/:key', (req, res) => {
       // cancelled  → order ملغي ONLY if no other active shipment exists
       //              for the same order (a re-shipment is still active).
       // returned   → no order status change (returns module handles it).
-      // is_test guard keeps smoke shipments from mutating real orders even
-      // if they share an order_id by mistake.
-      if (cur.order_id && cur.is_test !== 1) {
-        const o = db.prepare('SELECT status FROM orders WHERE id = ? AND (is_test = 0 OR is_test IS NULL)').get(cur.order_id);
-        if (o) {
+      //
+      // is_test handling: cascade is allowed when ship.is_test === order.is_test
+      // (real→real and test→test both fine — test rows purge together via the
+      // is_test=1 cleanup). It's BLOCKED when test ship → real order, which
+      // would leak smoke data into prod aggregations. The inbox notification
+      // is skipped on test rows since the messages table has no is_test
+      // column to purge with.
+      if (cur.order_id) {
+        const o = db.prepare('SELECT status, is_test FROM orders WHERE id = ?').get(cur.order_id);
+        const isTestShip  = cur.is_test === 1;
+        const isTestOrder = !!(o && o.is_test === 1);
+        const cascadeAllowed = !!o && !(isTestShip && !isTestOrder);
+        const notifyInbox    = cascadeAllowed && !isTestShip && !isTestOrder;
+        if (cascadeAllowed) {
           if (b.status === 'delivered' && o.status !== 'مكتمل' && o.status !== 'ملغي') {
             db.prepare("UPDATE orders SET status = 'مكتمل' WHERE id = ?").run(cur.order_id);
-            try {
-              sendMessage({
-                from_user_id: null,
-                from_user_name: 'نظام الشحن',
-                to_user_id: SUPER_ADMIN_FALLBACK,
-                type: 'info',
-                subject: `تم تسليم الطلب — تحديث تلقائي`,
-                body: `تم تسليم الشحنة ${cur.awb_number || ''} وتحويل الطلب إلى "مكتمل".`,
-                metadata: { kind: 'shipment_autosync', order_id: cur.order_id, awb: cur.awb_number, to_status: 'مكتمل', requires_action: false },
-              });
-            } catch {}
+            if (notifyInbox) {
+              try {
+                sendMessage({
+                  from_user_id: null,
+                  from_user_name: 'نظام الشحن',
+                  to_user_id: SUPER_ADMIN_FALLBACK,
+                  type: 'info',
+                  subject: `تم تسليم الطلب — تحديث تلقائي`,
+                  body: `تم تسليم الشحنة ${cur.awb_number || ''} وتحويل الطلب إلى "مكتمل".`,
+                  metadata: { kind: 'shipment_autosync', order_id: cur.order_id, awb: cur.awb_number, to_status: 'مكتمل', requires_action: false },
+                });
+              } catch {}
+            }
           } else if (b.status === 'cancelled' && o.status !== 'ملغي' && o.status !== 'مكتمل') {
             // Only cascade if no other ACTIVE shipment for this order.
             const stillActive = db.prepare(
@@ -4443,17 +4454,19 @@ app.patch('/api/shipments/:key', (req, res) => {
             ).get(cur.order_id, cur.id).n;
             if (stillActive === 0) {
               db.prepare("UPDATE orders SET status = 'ملغي' WHERE id = ?").run(cur.order_id);
-              try {
-                sendMessage({
-                  from_user_id: null,
-                  from_user_name: 'نظام الشحن',
-                  to_user_id: SUPER_ADMIN_FALLBACK,
-                  type: 'info',
-                  subject: `تم إلغاء الشحنة — تحديث تلقائي`,
-                  body: `تم إلغاء الشحنة ${cur.awb_number || ''} ولا توجد شحنة بديلة، تم تحويل الطلب إلى "ملغي".`,
-                  metadata: { kind: 'shipment_autosync', order_id: cur.order_id, awb: cur.awb_number, to_status: 'ملغي', requires_action: false },
-                });
-              } catch {}
+              if (notifyInbox) {
+                try {
+                  sendMessage({
+                    from_user_id: null,
+                    from_user_name: 'نظام الشحن',
+                    to_user_id: SUPER_ADMIN_FALLBACK,
+                    type: 'info',
+                    subject: `تم إلغاء الشحنة — تحديث تلقائي`,
+                    body: `تم إلغاء الشحنة ${cur.awb_number || ''} ولا توجد شحنة بديلة، تم تحويل الطلب إلى "ملغي".`,
+                    metadata: { kind: 'shipment_autosync', order_id: cur.order_id, awb: cur.awb_number, to_status: 'ملغي', requires_action: false },
+                  });
+                } catch {}
+              }
             }
           }
         }
