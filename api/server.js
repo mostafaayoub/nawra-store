@@ -3867,7 +3867,7 @@ app.patch('/api/returns/:id', (req, res) => {
     // the same paid_by + cost stamped so finance / refund-amount logic
     // can read them later.
     let autoReturnShipment = null;
-    if (newStatus === 'approved' && cur.status !== 'approved' && !cur.is_test) {
+    if (newStatus === 'approved' && cur.status !== 'approved') {
       try {
         const existingReturn = db.prepare(
           "SELECT id, awb_number FROM shipments WHERE order_id = ? AND shipment_type = 'return' LIMIT 1"
