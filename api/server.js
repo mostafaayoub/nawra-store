@@ -1979,6 +1979,14 @@ app.post('/api/orders', (req, res) => {
         actor: { id: userEmail || null, name: name || null },
         notes: 'order_created', isTest,
       });
+
+      // Phase 1 slice 1.7: online prepaid \u2192 settle Cash In on creation.
+      // 'cash' is COD (settles on delivery via PATCH); any other method
+      // (visa/wallet/transfer) is treated as already-settled because the
+      // gateway confirmed before we accepted the order with payment_status=paid.
+      if ((payment_status || 'unpaid') === 'paid') {
+        db.prepare("UPDATE orders SET payment_settled_at = COALESCE(payment_settled_at, created_at) WHERE id = ?").run(String(id));
+      }
     });
 
     try { createTx(); }
