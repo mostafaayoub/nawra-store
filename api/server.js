@@ -3499,6 +3499,134 @@ app.post('/api/returns', (req, res) => {
   } catch (e) { console.error('POST /api/returns', e); res.status(500).json({ error: e.message }); }
 });
 
+// PATCH /api/returns/:id/received-at-warehouse (Phase 1 slice 1.9, Part E Stage 4)
+// Admin opens the warehouse inspection screen and classifies each return_item
+// as سليم (good → restock to stock_available) or تالف (damaged → stock_damaged).
+// Body:
+//   {
+//     items: [{ return_item_id, classification: 'good'|'damaged' }],
+//     actor_id?, actor_name?
+//   }
+// Effects (atomic in db.transaction):
+//   1. UPDATE each return_items row: condition, restock_action
+//   2. UPDATE products.stock or stock_damaged per classification, write
+//      stock_movements row referencing the return_number
+//   3. Stamp returns.received_at_warehouse_at = now, stock_settled = 1
+//   4. Insert pending_refunds row (status='pending', refund_method copied
+//      from the return) so the Balance Sheet liability bucket reflects
+//      the soon-to-be-paid refund. Phase 4 aggregateFinance will reverse
+//      Revenue+COGS based on this timestamp.
+// is_test guard: skip real stock updates + pending_refund creation when
+// the return is a smoke row.
+app.patch('/api/returns/:id/received-at-warehouse', (req, res) => {
+  try {
+    const key = req.params.id;
+    const cur = (key.startsWith('RET-')
+      ? db.prepare('SELECT * FROM returns WHERE return_number = ?').get(key)
+      : db.prepare('SELECT * FROM returns WHERE id = ?').get(key));
+    if (!cur) return res.status(404).json({ error: 'not found' });
+    if (cur.received_at_warehouse_at) {
+      return res.status(409).json({ error: 'already_received', received_at: cur.received_at_warehouse_at });
+    }
+    if (cur.status !== 'approved') {
+      return res.status(409).json({ error: 'not_approved', message: `الإرجاع في حالة "${cur.status}" — لا بد من الموافقة عليه أولاً`, current: cur.status });
+    }
+    const b = req.body || {};
+    const classifications = Array.isArray(b.items) ? b.items : [];
+    if (!classifications.length) {
+      return res.status(400).json({ error: 'items_required', message: 'يجب تصنيف كل صنف (سليم/تالف)' });
+    }
+    const actor = { id: b.actor_id || null, name: b.actor_name || null };
+    const isTest = cur.is_test === 1;
+
+    const result = { applied: [], pending_refund: null };
+    try {
+      db.transaction(() => {
+        for (const cls of classifications) {
+          const itemId = cls.return_item_id;
+          const klass  = String(cls.classification || '').toLowerCase();
+          if (!itemId || !['good','damaged'].includes(klass)) continue;
+          const item = db.prepare('SELECT * FROM return_items WHERE id = ? AND return_id = ?').get(itemId, cur.id);
+          if (!item) continue;
+          const restockAction = klass === 'good' ? 'restock_available' : 'move_to_damaged';
+          const condition     = klass === 'good' ? 'good' : 'full_damage';
+          db.prepare("UPDATE return_items SET condition = ?, restock_action = ? WHERE id = ?").run(condition, restockAction, itemId);
+          // Apply stock change unless this is a smoke return.
+          if (!isTest && item.product_id) {
+            const product = db.prepare('SELECT * FROM products WHERE id = ?').get(item.product_id);
+            if (product) {
+              const qty = Number(item.quantity) || 0;
+              if (qty > 0) {
+                if (klass === 'good') {
+                  const newAvail = (Number(product.stock) || 0) + qty;
+                  db.prepare('UPDATE products SET stock = ? WHERE id = ?').run(newAvail, product.id);
+                  recordMovement({
+                    product_id: product.id, product_name: product.name,
+                    type: 'return_good', quantity_delta: +qty,
+                    balance_after_available: newAvail,
+                    balance_after_reserved:  Number(product.stock_reserved) || 0,
+                    balance_after_damaged:   Number(product.stock_damaged) || 0,
+                    reason: `مرتجع سليم — رجع للمخزون (${cur.return_number})`,
+                    reference: cur.return_number,
+                    unit_cost: Number(product.cost) || 0,
+                    user_id: actor.id, user_name: actor.name,
+                  });
+                  result.applied.push({ return_item_id: itemId, classification: 'good', qty, new_stock: newAvail });
+                } else {
+                  const newDam = (Number(product.stock_damaged) || 0) + qty;
+                  db.prepare('UPDATE products SET stock_damaged = ? WHERE id = ?').run(newDam, product.id);
+                  recordMovement({
+                    product_id: product.id, product_name: product.name,
+                    type: 'damaged', quantity_delta: 0,
+                    balance_after_available: Number(product.stock) || 0,
+                    balance_after_reserved:  Number(product.stock_reserved) || 0,
+                    balance_after_damaged:   newDam,
+                    reason: `مرتجع تالف — هالك (${cur.return_number})`,
+                    reference: cur.return_number,
+                    unit_cost: Number(product.cost) || 0,
+                    user_id: actor.id, user_name: actor.name,
+                  });
+                  result.applied.push({ return_item_id: itemId, classification: 'damaged', qty, new_stock_damaged: newDam });
+                }
+              }
+            }
+          } else {
+            result.applied.push({ return_item_id: itemId, classification: klass, skipped: isTest ? 'is_test' : 'no_product' });
+          }
+        }
+        db.prepare("UPDATE returns SET received_at_warehouse_at = datetime('now'), stock_settled = 1, inspection_status = ?, inspected_at = datetime('now'), updated_at = datetime('now') WHERE id = ?")
+          .run('good', cur.id); // legacy inspection_status kept for back-compat (the per-line condition is the new source of truth)
+
+        // Compute refund amount. Customer-pays return shipping deducts from
+        // refund (ADJ 1 + Part E). Store-pays leaves the refund intact.
+        const grossRefund = Number(cur.amount) || 0;
+        let netRefund = grossRefund;
+        if (cur.return_shipping_paid_by === 'customer') {
+          netRefund = Math.max(0, grossRefund - (Number(cur.return_courier_cost) || 0));
+        }
+        const refundMethod = cur.refund_method || null;
+
+        // Pending refund liability — Balance Sheet bucket (Part I).
+        // Skip on test rows: messages/pending_refunds are visible globally.
+        if (netRefund > 0) {
+          const prId = `pr_${Date.now().toString(36)}_${Math.random().toString(36).slice(2,5)}`;
+          db.prepare(`
+            INSERT INTO pending_refunds (id, return_id, amount, refund_method, status, is_test)
+            VALUES (?, ?, ?, ?, 'pending', ?)
+          `).run(prId, cur.id, netRefund, refundMethod, isTest ? 1 : 0);
+          result.pending_refund = { id: prId, amount: netRefund, refund_method: refundMethod };
+        }
+      })();
+    } catch (e) {
+      console.error('[returns/received-at-warehouse] tx failed:', e);
+      return res.status(500).json({ error: e.message });
+    }
+
+    const fresh = db.prepare('SELECT * FROM returns WHERE id = ?').get(cur.id);
+    res.json({ ok: true, return: hydrateReturn ? hydrateReturn(fresh) : fresh, ...result });
+  } catch (e) { console.error('PATCH /api/returns/:id/received-at-warehouse error:', e); res.status(500).json({ error: e.message }); }
+});
+
 app.patch('/api/returns/:id', (req, res) => {
   try {
     const r = req.body || {};
