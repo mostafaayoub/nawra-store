@@ -3585,6 +3585,91 @@ app.patch('/api/returns/:id', (req, res) => {
     vals.push(cur.id);
     db.prepare(`UPDATE returns SET ${sets.join(', ')} WHERE id = ?`).run(...vals);
 
+    // ── Auto return-shipment on approval (Phase 1 slice 1.6) ────────────
+    // When a return transitions to 'approved' AND there's no return-leg
+    // shipment yet, create one with shipment_type='return',
+    // parent_shipment_id = original outbound shipment, courier_cost from
+    // the customer's zone, and return_shipping_paid_by derived from the
+    // return_reasons.shipping_paid_by (ADJ 1). The 'returns' table gets
+    // the same paid_by + cost stamped so finance / refund-amount logic
+    // can read them later.
+    let autoReturnShipment = null;
+    if (newStatus === 'approved' && cur.status !== 'approved' && !cur.is_test) {
+      try {
+        const existingReturn = db.prepare(
+          "SELECT id, awb_number FROM shipments WHERE order_id = ? AND shipment_type = 'return' LIMIT 1"
+        ).get(cur.order_id);
+        if (!existingReturn) {
+          const outbound = db.prepare(
+            "SELECT * FROM shipments WHERE order_id = ? AND shipment_type = 'outbound' ORDER BY created_at LIMIT 1"
+          ).get(cur.order_id);
+          const orderRow = db.prepare('SELECT * FROM orders WHERE id = ?').get(cur.order_id);
+          // Read shipping_paid_by from the reason (ADJ 1). Default 'store'.
+          const reasonId = r.reason_id || cur.reason_id;
+          const reasonRow = reasonId
+            ? db.prepare('SELECT shipping_paid_by FROM return_reasons WHERE id = ?').get(reasonId)
+            : null;
+          const paidBy = (reasonRow && reasonRow.shipping_paid_by) || 'store';
+          // Reuse outbound zone if present; else match by city.
+          let zone = null;
+          if (outbound && outbound.zone_id) {
+            zone = db.prepare('SELECT * FROM shipping_zones WHERE id = ?').get(outbound.zone_id);
+          }
+          if (!zone && orderRow) zone = matchZoneByGovernorate(orderRow.city);
+          const weight = outbound ? (Number(outbound.weight_kg) || 0) : 0.3;
+          const globalFree = (() => {
+            try {
+              const x = db.prepare("SELECT value FROM settings WHERE key='store'").get();
+              const s = x ? JSON.parse(x.value || '{}') : {};
+              return Number(s.shipping_default_free_threshold) || 0;
+            } catch { return 0; }
+          })();
+          // Return-leg uses the same zone-based fee. No free-shipping discount
+          // applies on returns (customer-pays returns deduct from refund, not
+          // from cart total), so pass orderTotal=0 to keep tiered pricing.
+          const quote = computeShippingFee(zone, weight, 0, globalFree);
+          const returnCourierCost = Number(quote.fee) || 0;
+          // Pick a courier: prefer the outbound shipment's courier; else default active.
+          let courierId = outbound ? outbound.courier_id : null;
+          if (!courierId) {
+            const def = db.prepare("SELECT id FROM couriers WHERE is_default = 1 AND active = 1 LIMIT 1").get()
+                     || db.prepare("SELECT id FROM couriers WHERE active = 1 LIMIT 1").get();
+            if (def) courierId = def.id;
+          }
+          const shipId = `sh_${Date.now().toString(36)}_${Math.random().toString(36).slice(2,5)}`;
+          const awb = allocateReturnAwbNumber();
+          db.prepare(`
+            INSERT INTO shipments
+              (id, awb_number, order_id, courier_id, zone_id, weight_kg, courier_cost,
+               customer_paid_shipping, customer_paid_cod, status,
+               shipment_type, parent_shipment_id, is_test)
+            VALUES (?,?,?,?,?,?,?, 0, 0, 'ready', 'return', ?, ?)
+          `).run(
+            shipId, awb, cur.order_id, courierId, zone ? zone.id : null, weight,
+            returnCourierCost,
+            outbound ? outbound.id : null,
+            cur.is_test ? 1 : 0,
+          );
+          logShipmentHistory({
+            shipment_id: shipId, from_status: null, to_status: 'ready',
+            notes: 'تم إنشاء شحنة الإرجاع تلقائياً عند الموافقة',
+            actor_id: actor, actor_name: actorName,
+          });
+          // Stamp the return row with the cost + who-pays so refund math can read it.
+          db.prepare(
+            "UPDATE returns SET return_courier_cost = ?, return_shipping_paid_by = ? WHERE id = ?"
+          ).run(returnCourierCost, paidBy, cur.id);
+          autoReturnShipment = {
+            id: shipId, awb_number: awb, courier_id: courierId,
+            zone_id: zone ? zone.id : null, courier_cost: returnCourierCost,
+            shipping_paid_by: paidBy, parent_shipment_id: outbound ? outbound.id : null,
+          };
+        } else {
+          autoReturnShipment = { reused: true, ...existingReturn };
+        }
+      } catch (e) { console.warn('[returns] auto return-shipment skipped:', e.message); }
+    }
+
     // ── Phase 2 side-effects ───────────────────────────────────────────
     // When a return transitions to 'refunded' we trigger three integrations.
     // Each is wrapped in try/catch so a downstream failure doesn't block the
@@ -3733,7 +3818,7 @@ app.patch('/api/returns/:id', (req, res) => {
       else if (newStatus === 'rejected') sendReturnEmail('rejected', cur.id, { reason: r.rejection_reason || null });
       else if (newStatus === 'refunded') sendReturnEmail('refunded', cur.id, { store_credit: sideEffects.store_credit });
     }
-    res.json({ ...hydrateReturn(fresh), inspectionApplied, sideEffects });
+    res.json({ ...hydrateReturn(fresh), inspectionApplied, sideEffects, auto_return_shipment: autoReturnShipment });
   } catch (e) { console.error('PATCH /api/returns', e); res.status(500).json({ error: e.message }); }
 });
 
@@ -4205,13 +4290,23 @@ app.get('/api/stock-changes', (_req, res) => {
 const SHIPMENT_STATUSES = new Set(['ready','shipped','delivered','returned','cancelled']);
 
 // Sequential AWB allocator wrapped in a txn so two simultaneous POSTs can't
-// pick the same number. Starts at 1 in a fresh DB.
+// pick the same number. Starts at 1 in a fresh DB. Outbound waybills use
+// the AWB-XXXX pattern; return-leg waybills use AWB-RET-XXXX (Phase 1
+// slice 1.6) so the two sequences are visually distinguishable and don't
+// collide in the same numeric space.
 const allocateAwbNumber = db.transaction(() => {
   const row = db.prepare(
-    "SELECT COALESCE(MAX(CAST(SUBSTR(awb_number, 5) AS INTEGER)), 0) AS m FROM shipments WHERE awb_number LIKE 'AWB-%'"
+    "SELECT COALESCE(MAX(CAST(SUBSTR(awb_number, 5) AS INTEGER)), 0) AS m FROM shipments WHERE awb_number LIKE 'AWB-%' AND awb_number NOT LIKE 'AWB-RET-%'"
   ).get();
   const n = (row.m || 0) + 1;
   return `AWB-${String(n).padStart(4, '0')}`;
+});
+const allocateReturnAwbNumber = db.transaction(() => {
+  const row = db.prepare(
+    "SELECT COALESCE(MAX(CAST(SUBSTR(awb_number, 9) AS INTEGER)), 0) AS m FROM shipments WHERE awb_number LIKE 'AWB-RET-%'"
+  ).get();
+  const n = (row.m || 0) + 1;
+  return `AWB-RET-${String(n).padStart(4, '0')}`;
 });
 
 // Purchase invoice number (PUR-XXXX) + supplier payment number (PAY-XXXX).
