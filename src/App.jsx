@@ -884,25 +884,54 @@ function CartSide({ open, close, go }) {
   const selAddr = savedAddrs.find(a => a.id === selAddrId) || null;
   const destGovernorate = selAddr ? selAddr.governorate : (f.city || "");
 
-  // Fetch live shipping fee whenever governorate or cart total changes.
-  // Falls back silently to the legacy `ship` value if the API errors.
+  // Phase 2 slice 2.5 (Part J) — fetch live shipping fee whenever governorate
+  // or cart total changes. Normalizes the governorate string (trim + drop
+  // zero-width chars) before sending so a stray space doesn't break the
+  // zone match. Resets liveShip to null AT the start of the effect so the
+  // UI doesn't keep showing a stale quote while the new one is in flight.
+  const [liveShipLoading, setLiveShipLoading] = useState(false);
   useEffect(() => {
-    if (!destGovernorate || tot <= 0) { setLiveShip(null); return; }
+    if (!destGovernorate || tot <= 0) { setLiveShip(null); setLiveShipLoading(false); return; }
     let cancelled = false;
-    const qs = new URLSearchParams({ governorate: destGovernorate, total: String(tot) });
+    setLiveShipLoading(true);
+    setLiveShip(null);
+    // Strip zero-width chars (U+200B..U+200D + U+FEFF) and trim whitespace
+    // so a stray invisible character pasted from a copy-source doesn't
+    // break the zone string match on the server.
+    const norm = String(destGovernorate).replace(/\u200B|\u200C|\u200D|\uFEFF/g, "").trim();
+    const qs = new URLSearchParams({ governorate: norm, total: String(tot) });
     fetch(`/api/shipping/calculate?${qs}`)
       .then(r => r.ok ? r.json() : null)
-      .then(d => { if (!cancelled && d) setLiveShip(d); })
-      .catch(() => {});
+      .then(d => {
+        if (cancelled) return;
+        setLiveShipLoading(false);
+        if (d) {
+          setLiveShip(d);
+          if (d.reason === 'no_zone') {
+            // Admin-side console warning so the issue is visible during
+            // dev/testing if a governorate is missing from zone seeds.
+            console.warn(`[storefront] zone lookup failed for governorate: "${norm}"`);
+          }
+        }
+      })
+      .catch(() => { if (!cancelled) setLiveShipLoading(false); });
     return () => { cancelled = true; };
   }, [destGovernorate, tot]);
 
-  // The fee actually shown to the customer + recorded on the order. Prefer
-  // the live quote when we have one; fall back to the CartProvider flat fee.
-  const effShip = liveShip ? (Number(liveShip.fee) || 0) : ship;
-  const effFreeNote = liveShip ? !!liveShip.free : (effShip === 0);
+  // The fee actually shown to the customer + recorded on the order.
+  // Phase 2 slice 2.5: ONLY fall back to the flat default when NO
+  // governorate has been entered. Once a governorate is selected, we
+  // either show the live quote (always preferred) or wait for it (null).
+  // This eliminates the previous bug where typing الغربية still showed
+  // the 50-EGP default because the flat-fee fallback hid the live quote.
+  const hasDest = !!destGovernorate;
+  const effShip = hasDest
+    ? (liveShip ? (Number(liveShip.fee) || 0) : null)   // null while loading
+    : ship;                                              // pre-checkout estimate
+  const effFreeNote = liveShip ? !!liveShip.free : (!hasDest && effShip === 0);
   const effZoneName = liveShip && liveShip.zone ? liveShip.zone.name_ar : null;
   const effEtaDays  = liveShip && liveShip.zone ? `${liveShip.zone.min_days}-${liveShip.zone.max_days}` : null;
+  const noZoneMatch = !!(liveShip && liveShip.reason === 'no_zone');
 
   // Load user's saved addresses when entering checkout step
   useEffect(() => {
@@ -952,7 +981,7 @@ function CartSide({ open, close, go }) {
         qty: i.qty, price: i.price,
         img: i.img || null,
       })),
-      total: tot + effShip, status: "جديد",
+      total: tot + (effShip || 0), status: "جديد",
       // New fields — recorded so admin Order Details can show the breakdown,
       // payment method, and any customer note. Defaults: cash-on-delivery, unpaid.
       subtotal: tot,
@@ -1040,9 +1069,22 @@ function CartSide({ open, close, go }) {
                   <span style={{fontFamily:C.fe}}>{i.price*i.qty} {t("egp")}</span>
                 </div>
               ))}
+              {/* Shipping line — separates clearly when loading vs computed */}
+              {hasDest && (
+                <div style={{ display:"flex", justifyContent:"space-between", fontSize:12, color:C.dk, fontFamily:C.fb, marginTop:4, borderTop:"1px dashed rgba(196,149,106,.15)", paddingTop:5 }}>
+                  <span>الشحن{effZoneName ? ` (${effZoneName})` : ""}</span>
+                  <span style={{fontFamily:C.fe}}>
+                    {liveShipLoading ? "...جاري الحساب" :
+                     noZoneMatch    ? <span style={{color:"#B91C1C"}}>تعذّر تحديد المنطقة</span> :
+                     effShip == null ? "—" :
+                     effShip === 0   ? <span style={{color:"#16A34A"}}>مجاني</span> :
+                     `${effShip} ${t("egp")}`}
+                  </span>
+                </div>
+              )}
               <div style={{ display:"flex", justifyContent:"space-between", fontFamily:C.fe, fontSize:15, borderTop:"1px solid rgba(196,149,106,.12)", paddingTop:8, marginTop:6, color:C.dk, fontWeight:500 }}>
                 <span style={{fontFamily:C.fa,fontSize:13}}>{t("cartTotal")}</span>
-                <span>{tot+effShip} {t("egp")}</span>
+                <span>{tot + (effShip || 0)} {t("egp")}</span>
               </div>
             </div>
 
@@ -1172,12 +1214,30 @@ function CartSide({ open, close, go }) {
                   <span style={{ fontFamily: C.fb, fontSize: 11, color: C.mu, letterSpacing: "0.04em" }}>{t("cartTotal")}</span>
                   <span style={{ fontFamily: C.fe, fontSize: 20, fontWeight: 500, color: C.dk }}>{tot} {t("egp")}</span>
                 </div>
-                {effShip > 0 && !effFreeNote && (
+                {/* Phase 2 slice 2.5 — clarify the shipping line.
+                    No governorate yet → show "حسب المحافظة" (TBD).
+                    With governorate + live quote → show real fee + zone.
+                    Loading → "...جاري الحساب". no_zone → red warning. */}
+                {!hasDest && (
+                  <div style={{ fontSize: 11, color: C.mu, marginBottom: 6, fontFamily: C.fb, fontStyle: "italic" }}>
+                    + الشحن يُحتسب بعد اختيار المحافظة
+                  </div>
+                )}
+                {hasDest && liveShipLoading && (
+                  <div style={{ fontSize: 11, color: C.mu, marginBottom: 6, fontFamily: C.fb }}>
+                    + ...جاري حساب الشحن
+                  </div>
+                )}
+                {hasDest && noZoneMatch && (
+                  <div style={{ fontSize: 11, color: "#B91C1C", marginBottom: 6, fontFamily: C.fb }}>
+                    ⚠ تعذّر تحديد منطقة الشحن للمحافظة المحددة
+                  </div>
+                )}
+                {hasDest && effShip > 0 && !effFreeNote && !noZoneMatch && (
                   <div style={{ fontSize: 11, color: C.mu, marginBottom: 6, fontFamily: C.fb }}>
                     + {effShip} {t("egp")}
                     {effZoneName ? ` · ${effZoneName}` : ""}
                     {effEtaDays ? ` · ${effEtaDays} يوم` : ""}
-                    {!liveShip && <> | {Math.max(0, freeShipMin - tot)} {t("cartShipAdd")}</>}
                   </div>
                 )}
                 {effFreeNote && <div style={{ fontSize: 11, color: "#2E6B3E", marginBottom: 6, fontFamily: C.fb }}>{t("cartShipFree")}{effZoneName ? ` · ${effZoneName}` : ""}</div>}
