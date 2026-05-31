@@ -3627,6 +3627,137 @@ app.patch('/api/returns/:id/received-at-warehouse', (req, res) => {
   } catch (e) { console.error('PATCH /api/returns/:id/received-at-warehouse error:', e); res.status(500).json({ error: e.message }); }
 });
 
+// PATCH /api/returns/:id/issue-refund (Phase 1 slice 1.10, Part E Stage 5)
+// Admin clicks the "إصدار رد المبلغ" button after warehouse-receipt.
+// Body: { refund_method?, refund_reference?, actor_id?, actor_name? }
+//   refund_method: cash | transfer | wallet | original | store_credit
+//   (defaults to whatever was already on the return row)
+//
+// Atomic effects (db.transaction):
+//   1. UPDATE returns: status='refunded', refunded_at=now, processed_at=now,
+//      processed_by, refund_method, refund_reference
+//   2. UPDATE pending_refunds SET status='issued', settled_at=now WHERE return_id=...
+//      → clears the Balance Sheet liability bucket (Part I)
+//   3. For cash/transfer/wallet/original: insert an expense row so
+//      Cash Out reflects the outflow (existing finance pattern reused
+//      from the PATCH /api/returns refunded branch)
+//   4. For store_credit: bump users.store_credit_balance with the
+//      configured bonus_pct
+//
+// Validation:
+//   - 404 not found
+//   - 409 not_received_at_warehouse (must do stage 4 first)
+//   - 409 already_refunded (idempotent)
+app.patch('/api/returns/:id/issue-refund', (req, res) => {
+  try {
+    const key = req.params.id;
+    const cur = (key.startsWith('RET-')
+      ? db.prepare('SELECT * FROM returns WHERE return_number = ?').get(key)
+      : db.prepare('SELECT * FROM returns WHERE id = ?').get(key));
+    if (!cur) return res.status(404).json({ error: 'not found' });
+    if (cur.refunded_at || cur.status === 'refunded') {
+      return res.status(409).json({ error: 'already_refunded', refunded_at: cur.refunded_at });
+    }
+    if (!cur.received_at_warehouse_at) {
+      return res.status(409).json({ error: 'not_received_at_warehouse', message: 'يجب تأكيد استلام البضاعة في المستودع أولاً' });
+    }
+    const b = req.body || {};
+    const refundMethod = (b.refund_method || cur.refund_method || 'cash').toLowerCase();
+    const refundReference = b.refund_reference || cur.refund_reference || null;
+    const actor = b.actor_id || null;
+    const actorName = b.actor_name || null;
+    const isTest = cur.is_test === 1;
+
+    // Net refund amount mirrors slice 1.9 logic so the same number the
+    // pending_refunds row carries is what gets paid out.
+    const grossRefund = Number(cur.amount) || 0;
+    let netRefund = grossRefund;
+    if (cur.return_shipping_paid_by === 'customer') {
+      netRefund = Math.max(0, grossRefund - (Number(cur.return_courier_cost) || 0));
+    }
+
+    const result = { expense_id: null, store_credit: null, pending_refund_cleared: null };
+    try {
+      db.transaction(() => {
+        db.prepare(`
+          UPDATE returns
+          SET status = 'refunded',
+              refunded_at = datetime('now'),
+              processed_at = COALESCE(processed_at, datetime('now')),
+              processed_by = COALESCE(processed_by, ?),
+              refund_method = ?,
+              refund_reference = COALESCE(?, refund_reference),
+              updated_at = datetime('now')
+          WHERE id = ?
+        `).run(actor, refundMethod, refundReference, cur.id);
+
+        // Clear the pending liability.
+        const clearInfo = db.prepare(
+          "UPDATE pending_refunds SET status = 'issued', settled_at = datetime('now') WHERE return_id = ? AND status = 'pending'"
+        ).run(cur.id);
+        result.pending_refund_cleared = clearInfo.changes;
+
+        // Cash Out via expenses row (skip on test, skip on store_credit /
+        // original — original-payment refunds don't create a separate
+        // cash-out event because the gateway handles the reversal).
+        const cashOutMethods = new Set(['cash','transfer','wallet']);
+        if (!isTest && cashOutMethods.has(refundMethod) && netRefund > 0) {
+          const expId = `ex_${Date.now().toString(36)}_${Math.random().toString(36).slice(2,5)}`;
+          const catRow = db.prepare("SELECT id, key FROM expense_categories WHERE key = 'returns'").get();
+          const today = new Date().toISOString().slice(0, 10);
+          db.prepare(`
+            INSERT INTO expenses (id, category, category_id, description, quantity, unit_price, amount,
+                                  date, notes, type, payment_method, status,
+                                  approved_by, approved_at, created_by, source_ref, is_test)
+            VALUES (?, ?, ?, ?, 1, ?, ?, ?, ?, 'variable', ?, 'approved', ?, datetime('now'), ?, ?, ?)
+          `).run(
+            expId, catRow ? catRow.key : 'returns', catRow ? catRow.id : null,
+            `استرداد مرتجع ${cur.return_number} — ${cur.customer || cur.customer_email || '—'}`,
+            netRefund, netRefund,
+            today, `طريقة: ${refundMethod}${refundReference ? ` · مرجع: ${refundReference}` : ''}`,
+            refundMethod,
+            actor || SUPER_ADMIN_FALLBACK,
+            actor || SUPER_ADMIN_FALLBACK,
+            `return:${cur.id}`,
+            0,
+          );
+          result.expense_id = expId;
+        }
+
+        // Store credit method: bump customer balance with bonus_pct.
+        if (!isTest && refundMethod === 'store_credit') {
+          let bonusPct = 5;
+          try {
+            const row = db.prepare("SELECT value FROM settings WHERE key='store'").get();
+            const store = row ? JSON.parse(row.value || '{}') : {};
+            const rcfg = (store.returns || {});
+            const bp = Number(rcfg.store_credit_bonus_pct);
+            if (Number.isFinite(bp) && bp >= 0 && bp <= 100) bonusPct = bp;
+          } catch {}
+          const base = netRefund;
+          const bonus = Math.round(base * bonusPct) / 100;
+          const credit = base + bonus;
+          const email = cur.customer_id || cur.customer_email;
+          if (email) {
+            const u = db.prepare('SELECT email, store_credit_balance FROM users WHERE LOWER(email) = LOWER(?)').get(email);
+            if (u) {
+              const newBal = (Number(u.store_credit_balance) || 0) + credit;
+              db.prepare('UPDATE users SET store_credit_balance = ? WHERE LOWER(email) = LOWER(?)').run(newBal, email);
+              result.store_credit = { email, base, bonus_pct: bonusPct, bonus, credit, new_balance: newBal };
+            }
+          }
+        }
+      })();
+    } catch (e) {
+      console.error('[returns/issue-refund] tx failed:', e);
+      return res.status(500).json({ error: e.message });
+    }
+
+    const fresh = db.prepare('SELECT * FROM returns WHERE id = ?').get(cur.id);
+    res.json({ ok: true, return: hydrateReturn ? hydrateReturn(fresh) : fresh, net_refund: netRefund, ...result });
+  } catch (e) { console.error('PATCH /api/returns/:id/issue-refund error:', e); res.status(500).json({ error: e.message }); }
+});
+
 app.patch('/api/returns/:id', (req, res) => {
   try {
     const r = req.body || {};
