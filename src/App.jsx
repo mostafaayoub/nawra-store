@@ -461,7 +461,12 @@ function useMob() {
   return m;
 }
 
-const PRODS = [
+// Phase 2 slice 2.6: hardcoded seed catalog is now ONLY a historical
+// artifact. ProdsProvider fetches /api/products at mount + on storefront
+// nav; every consumer falls back to [] not PRODS when the API is empty
+// or still loading. Kept here under _ prefix so lint doesn't complain
+// and so anyone restoring a fresh DB has reference seed data.
+const _PRODS_LEGACY_SEED = [
   {
     id:1, brand:"CERAVE",
     nameAr:"غسول الوجه المرطب",      nameEn:"Hydrating Facial Cleanser",
@@ -817,7 +822,7 @@ function Nav({ r, go, openCart, user, onLogout }) {
             <ul style={{ display: "flex", gap: 22, listStyle: "none", margin: 0, padding: 0 }}>
               {links.map(([h, l]) => <li key={h}><span onClick={() => go(h)} style={{ cursor: "pointer", color: r === h ? C.go : C.dk, fontSize: 13.5, fontFamily: C.fb, fontWeight: 500, letterSpacing: "0.02em" }}>{l}</span></li>)}
             </ul>
-            <SearchBar go={go} allProds={navProds == null ? PRODS : navProds} />
+            <SearchBar go={go} allProds={Array.isArray(navProds) ? navProds : []} />
           </div>
         )}
         <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
@@ -9992,7 +9997,7 @@ function SearchBar({ go, allProds }) {
   const [open, setOpen] = useState(false);
   const mob = useMob();
   const results = q.length > 1
-    ? (allProds||PRODS).filter(p => {
+    ? (Array.isArray(allProds) ? allProds : []).filter(p => {
         const ql = q.toLowerCase();
         return (p.nameAr||p.name||"").includes(q)
           || (p.nameEn||"").toLowerCase().includes(ql)
@@ -10176,7 +10181,7 @@ function Home({ go, allProds }) {
   const { user } = useAuth();
   const { t, dir } = useLang();
   const cartCtxForBanner = useCart();
-  const homProds = allProds || _p || PRODS;
+  const homProds = Array.isArray(allProds) ? allProds : (Array.isArray(_p) ? _p : []);
   const mob = useMob();
   const px = mob ? "16px" : "56px";
   const feats = [["🚚",t("feat1"),t("feat1d")],["💳",t("feat2"),t("feat2d")],["✅",t("feat3"),t("feat3d")],["↩️",t("feat4"),t("feat4d")]];
@@ -10355,12 +10360,14 @@ function Home({ go, allProds }) {
 
 function Products({ go, allProds }) {
   const { prods: _p } = useProds();
-  allProds = allProds || _p || PRODS;
+  // Phase 2 slice 2.6: don't fall back to hardcoded PRODS — surface
+  // empty state when the API legitimately returns no products.
+  allProds = Array.isArray(allProds) ? allProds : (Array.isArray(_p) ? _p : []);
   const { t, dir } = useLang();
   const mob = useMob();
   const [fil, setFil] = useState("__all__");
   const [srt, setSrt] = useState("d");
-  const prodsData = (allProds && allProds.length) ? allProds : PRODS;
+  const prodsData = allProds;
   const brandKeys = [...new Set(prodsData.map(p => p.brand))];
   let list = fil === "__all__" ? prodsData : prodsData.filter(p => p.brand === fil);
   if (srt === "a") list = [...list].sort((a, b) => a.price - b.price);
@@ -10396,13 +10403,14 @@ function Products({ go, allProds }) {
 
 function ProdDetail({ id, go, allProds }) {
   const { prods: _p } = useProds();
-  allProds = allProds || _p || PRODS;
+  // Phase 2 slice 2.6: drop hardcoded PRODS fallback.
+  allProds = Array.isArray(allProds) ? allProds : (Array.isArray(_p) ? _p : []);
   const { add } = useCart();
   const { show } = useToast();
   const mob = useMob();
   const [qty, setQty] = useState(1);
   const [tab, setTab] = useState("d");
-  const prodsData = (allProds && allProds.length) ? allProds : PRODS;
+  const prodsData = allProds;
   const p = prodsData.find(x => x.id === id);
   const { t, lang, dir } = useLang();
   if (!p) return <div style={{ padding: 60, textAlign: "center" }}>{t("prodNotFound")}</div>;
@@ -17348,7 +17356,7 @@ export default function App() {
   return (
     <LangProvider>
       <AuthProvider>
-        <ProdsProvider initialProds={PRODS}>
+        <ProdsProvider>
           <CartProvider>
             <ToastProvider>
               {/* Fonts loaded in index.html: Noto Serif Arabic, Cairo, Cormorant Garamond */}
@@ -17376,10 +17384,11 @@ function AppInner() {
       if (!user || !isAdminRole(user.role)) { go("#login"); return null; }
       return <AdminDash go={go} />;
     }
-    // prods === null → fetch hasn't resolved yet, fall back to hardcoded PRODS
-    // for a non-blank first paint. After fetch resolves, use prods (possibly
-    // empty), so deleted products disappear and added ones appear.
-    const allProds = prods == null ? PRODS : prods;
+    // Phase 2 slice 2.6: while prods is loading we pass an empty array
+    // (downstream components render their own loading/empty states) so a
+    // momentary blank is preferable to flashing stale fake products that
+    // can't be purchased. After fetch resolves, use prods as-is.
+    const allProds = Array.isArray(prods) ? prods : [];
     if (pid) return <ProdDetail id={pid} go={go} allProds={allProds} />;
     switch (route) {
       case "#products": return <Products go={go} allProds={allProds} />;
