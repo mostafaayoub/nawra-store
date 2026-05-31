@@ -2063,22 +2063,25 @@ app.patch('/api/orders/:id', (req, res) => {
       .get(req.params.id, Number(req.params.id) || -1);
     if (!cur) return res.status(404).json({ error: 'not found' });
 
+    // \u2500\u2500 State machine enforcement (Phase 1 slice 1.4) \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+    // When the request changes status, validate against the allowed-edge
+    // table. Reject invalid transitions with 422. Then apply the stock
+    // effect + activity log atomically with the order UPDATE (below).
     const items = (() => { try { return JSON.parse(cur.items || '[]'); } catch { return []; } })();
-
-    // Stock lifecycle reacts to status transitions (only when status actually changes).
-    if (status && status !== cur.status) {
-      if (status === '\u062a\u0645 \u0627\u0644\u0634\u062d\u0646' && !cur.stock_released) {
-        shipStockForOrder(cur, items);
-      } else if (status === '\u0645\u0644\u063a\u064a') {
-        cancelStockForOrder(cur, items);
-      }
+    const isStatusChange = !!(status && status !== cur.status);
+    if (isStatusChange && !isValidOrderTransition(cur.status, status)) {
+      return res.status(422).json({
+        error: 'invalid_transition',
+        message: `cannot move order from "${cur.status}" to "${status}"`,
+        from: cur.status, to: status,
+      });
     }
 
-    // Append to status_history when the status changes.
+    // Append to legacy status_history JSON (frontend renders it directly).
     let history = [];
     try { history = JSON.parse(cur.status_history || '[]'); } catch {}
     if (!Array.isArray(history)) history = [];
-    if (status && status !== cur.status) {
+    if (isStatusChange) {
       history.push({
         status,
         at: new Date().toISOString(),
@@ -2114,8 +2117,38 @@ app.patch('/api/orders/:id', (req, res) => {
     }
 
     vals.push(cur.id);
-    const info = db.prepare(`UPDATE orders SET ${sets.join(', ')} WHERE id = ?`).run(...vals);
-    if (!info.changes) return res.status(404).json({ error: 'not found' });
+
+    // Wrap the UPDATE + applyStockTransition in one db.transaction so a
+    // failed stock effect (e.g. INSUFFICIENT_STOCK on confirm) leaves the
+    // order at its previous status. Returns 409 with structured error on
+    // stock conflict, so the FE can show the alternatives modal.
+    const actor = { id: actor_id || null, name: actor_name || null };
+    const txResult = { changes: 0 };
+    try {
+      db.transaction(() => {
+        const info = db.prepare(`UPDATE orders SET ${sets.join(', ')} WHERE id = ?`).run(...vals);
+        txResult.changes = info.changes;
+        if (isStatusChange) {
+          applyStockTransition({
+            orderId: cur.id,
+            fromStatus: cur.status,
+            toStatus: status,
+            items,
+            actor,
+          });
+        }
+      })();
+    } catch (e) {
+      if (e && e.code === 'INSUFFICIENT_STOCK') {
+        return res.status(409).json({
+          error: 'insufficient_stock',
+          product_id: e.product_id, product_name: e.product_name,
+          available: e.available, requested: e.requested,
+        });
+      }
+      throw e;
+    }
+    if (!txResult.changes) return res.status(404).json({ error: 'not found' });
 
     const fresh = db.prepare('SELECT * FROM orders WHERE id = ?').get(cur.id);
     // Log cancellation to the customer's activity timeline.
@@ -4741,7 +4774,26 @@ app.patch('/api/shipments/:key', (req, res) => {
         const notifyInbox    = cascadeAllowed && !isTestShip && !isTestOrder;
         if (cascadeAllowed) {
           if (b.status === 'delivered' && o.status !== 'مكتمل' && o.status !== 'ملغي') {
+            // Route through the state machine so the reservation drops and
+            // the activity_log entry is written. The order PATCH handler
+            // would do the same; we mirror its behaviour here for the auto-
+            // sync path so direct UPDATE never bypasses applyStockTransition.
             db.prepare("UPDATE orders SET status = 'مكتمل' WHERE id = ?").run(cur.order_id);
+            try {
+              applyStockTransition({
+                orderId: cur.order_id,
+                fromStatus: o.status,
+                toStatus: 'مكتمل',
+                actor: { id: null, name: 'نظام الشحن' },
+              });
+            } catch (err) { console.warn('[autosync] applyStockTransition delivered:', err.message); }
+            // Mirror the COD payment-settled side-effect of PATCH /api/orders.
+            try {
+              const order = db.prepare('SELECT * FROM orders WHERE id = ?').get(cur.order_id);
+              if (order && order.payment_method === 'cash' && order.payment_status !== 'paid') {
+                db.prepare("UPDATE orders SET payment_status = 'paid', payment_settled_at = COALESCE(payment_settled_at, datetime('now')) WHERE id = ?").run(cur.order_id);
+              }
+            } catch {}
             if (notifyInbox) {
               try {
                 sendMessage({
@@ -4762,6 +4814,14 @@ app.patch('/api/shipments/:key', (req, res) => {
             ).get(cur.order_id, cur.id).n;
             if (stillActive === 0) {
               db.prepare("UPDATE orders SET status = 'ملغي' WHERE id = ?").run(cur.order_id);
+              try {
+                applyStockTransition({
+                  orderId: cur.order_id,
+                  fromStatus: o.status,
+                  toStatus: 'ملغي',
+                  actor: { id: null, name: 'نظام الشحن' },
+                });
+              } catch (err) { console.warn('[autosync] applyStockTransition cancelled:', err.message); }
               if (notifyInbox) {
                 try {
                   sendMessage({
