@@ -2063,7 +2063,12 @@ app.get('/api/orders/:id', (req, res) => {
     const row = db.prepare('SELECT * FROM orders WHERE id = ? OR order_number = ?')
       .get(req.params.id, Number(req.params.id) || -1);
     if (!row) return res.status(404).json({ error: 'not found' });
-    res.json(hydrateOrder(row));
+    // Phase 2 slice 2.2: include the ADJ 3 audit timeline so the order
+    // details page can render it without a second round-trip.
+    const activity = db.prepare(
+      'SELECT id, from_status, to_status, actor_id, actor_name, notes, created_at FROM order_activity_log WHERE order_id = ? ORDER BY created_at'
+    ).all(row.id);
+    res.json({ ...hydrateOrder(row), activity_log: activity });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 

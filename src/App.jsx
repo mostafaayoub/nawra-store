@@ -10441,7 +10441,25 @@ function Footer({ go }) {
 }
 
 // ─── Order Timeline (4-step status indicator) ─────────────────────────────────
-const ORDER_STATUSES = ["جديد", "قيد التجهيز", "تم الشحن", "مكتمل", "ملغي"];
+const ORDER_STATUSES = ["جديد", "قيد التجهيز", "جاهز للشحن", "تم الشحن", "مكتمل", "رفض الاستلام", "ملغي"];
+
+// Phase 2 slice 2.2: mirror of the server-side state machine
+// (api/server.js ORDER_STATUS_TRANSITIONS). Used by the order details page
+// to render ONLY valid next-step buttons. The cancel transition is handled
+// by a separate inline button + confirmation modal — we exclude 'ملغي'
+// from the inline forward-progress row.
+const ORDER_NEXT_TRANSITIONS = {
+  'جديد':         ['قيد التجهيز'],
+  'قيد التجهيز':  ['جاهز للشحن'],
+  'جاهز للشحن':   ['تم الشحن'],
+  'تم الشحن':     ['مكتمل', 'رفض الاستلام'],
+  'مكتمل':        [],
+  'رفض الاستلام': [],
+  'ملغي':         [],
+};
+function nextOrderStatuses(current) {
+  return ORDER_NEXT_TRANSITIONS[current] || [];
+}
 function OrderTimeline({ status }) {
   const { t, lang } = useLang();
   const STEPS = [
@@ -15730,6 +15748,19 @@ function OrderDetailPage({
     setStatusToast({ kind, message });
     setTimeout(() => setStatusToast(t => (t && t.message === message ? null : t)), ms);
   };
+  // Phase 2 slice 2.2 — ADJ 3 audit timeline from order_activity_log.
+  // Fetched separately on mount + after every status change so the timeline
+  // reflects the latest server state.
+  const [activityLog, setActivityLog] = useState([]);
+  useEffect(() => {
+    if (!orderId) return;
+    let cancelled = false;
+    fetch(`/api/orders/${encodeURIComponent(orderId)}`)
+      .then(r => r.ok ? r.json() : null)
+      .then(d => { if (!cancelled && d && Array.isArray(d.activity_log)) setActivityLog(d.activity_log); })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, [orderId, order && order.status]);
 
   useEffect(() => { injectPrintStyles(); }, []);
   // Re-render every minute so relative "since X" timestamps stay current.
@@ -16077,10 +16108,40 @@ function OrderDetailPage({
             </section>
           )}
 
-          {/* Activity timeline */}
+          {/* Activity timeline (ADJ 3): prefer order_activity_log when
+              available, fall back to legacy status_history JSON. The audit
+              log carries finer-grained transition info (actor email + null
+              from_status on creation) and is persisted in its own table
+              so support can audit it independently. */}
           <section style={{background:ui.cardBg,border:ui.border,borderRadius:ui.radius,padding:"16px 18px"}}>
-            <h3 style={{fontFamily:ui.fontBody,fontSize:13,fontWeight:600,color:ui.text,margin:"0 0 12px"}}>🕒 سجل النشاط</h3>
-            {history.length === 0 ? (
+            <h3 style={{fontFamily:ui.fontBody,fontSize:13,fontWeight:600,color:ui.text,margin:"0 0 12px"}}>
+              🕒 سجل النشاط
+              {Array.isArray(activityLog) && activityLog.length > 0 && (
+                <span style={{fontSize:10.5,fontWeight:400,color:ui.textSub,marginInlineStart:8}}>
+                  (سجل التدقيق · {activityLog.length} حدث)
+                </span>
+              )}
+            </h3>
+            {(Array.isArray(activityLog) && activityLog.length > 0) ? (
+              <div style={{position:"relative"}}>
+                <div style={{position:"absolute",top:6,bottom:6,insetInlineStart:9,width:2,background:"#E5E7EB"}}/>
+                {activityLog.slice().reverse().map((a, i) => (
+                  <div key={a.id} style={{position:"relative",paddingInlineStart:28,paddingBottom:14}}>
+                    <div style={{position:"absolute",insetInlineStart:3,top:3,width:14,height:14,borderRadius:"50%",
+                      background: i === 0 ? "#22C55E" : "#9CA3AF",border:"3px solid #fff",boxShadow:"0 0 0 1px #E5E7EB"}}/>
+                    <div style={{fontSize:13,color:ui.text,fontFamily:ui.fontBody,fontWeight:500}}>
+                      {a.from_status ? `${a.from_status} → ${a.to_status}` : `إنشاء — ${a.to_status}`}
+                    </div>
+                    <div style={{fontSize:11.5,color:ui.textSub,fontFamily:ui.fontBody,marginTop:2}}>
+                      {a.actor_name || a.actor_id || "—"} · {fmtDate(a.created_at)}
+                    </div>
+                    {a.notes && (
+                      <div style={{fontSize:12,color:ui.textSub,fontFamily:ui.fontBody,marginTop:3,fontStyle:"italic"}}>{a.notes}</div>
+                    )}
+                  </div>
+                ))}
+              </div>
+            ) : history.length === 0 ? (
               <p style={{margin:0,fontSize:12,color:ui.textSub,fontFamily:ui.fontBody}}>لا توجد أحداث مسجلة</p>
             ) : (
               <div style={{position:"relative"}}>
@@ -16182,14 +16243,21 @@ function OrderDetailPage({
           boxShadow:"0 -8px 24px rgba(0,0,0,.06)",
           display:"flex",alignItems:"center",gap:10,flexWrap:"wrap",
         }}>
-          <span style={{fontSize:12,color:ui.textSub,fontFamily:ui.fontBody,marginInlineEnd:4}}>تحديث الحالة:</span>
-          {ORDER_STATUSES.filter(s => s !== "ملغي").map(s => {
-            const isCurrent = order.status === s;
+          <span style={{fontSize:12,color:ui.textSub,fontFamily:ui.fontBody,marginInlineEnd:4}}>الحالة الحالية:</span>
+          <span style={{padding:"5px 12px",background:ui.text,color:"#fff",borderRadius:6,fontFamily:ui.fontBody,fontSize:12.5,fontWeight:600}}>
+            {order.status}
+          </span>
+          {nextOrderStatuses(order.status).length > 0 && (
+            <span style={{fontSize:12,color:ui.textSub,fontFamily:ui.fontBody,marginInlineEnd:4}}>التالي:</span>
+          )}
+          {nextOrderStatuses(order.status).map(s => {
+            const isRefused = s === 'رفض الاستلام';
+            const isReady   = s === 'قيد التجهيز';
             const handleClick = async () => {
               // Phase 2 slice 2.1: 'قيد التجهيز' from 'جديد' opens the
               // courier picker (server requires courier_id). All other
               // transitions go straight through; errors surface via toast.
-              if (s === 'قيد التجهيز' && order.status === 'جديد') {
+              if (isReady && order.status === 'جديد') {
                 setCourierPickerOpen(true);
                 return;
               }
@@ -16198,22 +16266,27 @@ function OrderDetailPage({
               else if (r && r.ok) flashToast('success', `الحالة الآن: ${s}`);
             };
             return (
-              <button key={s} disabled={isCurrent} onClick={handleClick}
+              <button key={s} onClick={handleClick}
                 style={{
                   padding:"7px 14px",
-                  background: isCurrent ? ui.text : "transparent",
-                  color:      isCurrent ? "#fff"  : ui.text,
-                  border: `1px solid ${isCurrent ? ui.text : "#D1D5DB"}`,
+                  background: isRefused ? "#FEE2E2" : "transparent",
+                  color: isRefused ? "#B91C1C" : ui.text,
+                  border: `1px solid ${isRefused ? "#FCA5A5" : "#D1D5DB"}`,
                   borderRadius:6,fontFamily:ui.fontBody,fontSize:12.5,
-                  cursor: isCurrent ? "default" : "pointer",
-                  fontWeight: isCurrent ? 600 : 400,
+                  cursor:"pointer",fontWeight: isRefused ? 600 : 500,
                 }}>
-                {s}
+                {isRefused ? '⚠ ' : '→ '}{s}
               </button>
             );
           })}
+          {nextOrderStatuses(order.status).length === 0 && order.status !== 'ملغي' && (
+            <span style={{fontSize:12,color:ui.textSub,fontFamily:ui.fontBody,fontStyle:"italic"}}>
+              الطلب وصل لحالة نهائية
+            </span>
+          )}
           <div style={{flex:1}}/>
-          {order.status !== "ملغي" && (
+          {/* Cancel allowed only while pre-shipment per Part B */}
+          {['جديد','قيد التجهيز','جاهز للشحن'].includes(order.status) && (
             <button onClick={()=>{ setCancelReason(""); setCancelOpen(true); }}
               style={{padding:"7px 14px",background:"transparent",border:"1px solid #FCA5A5",
                 color:"#B91C1C",borderRadius:6,fontFamily:ui.fontBody,fontSize:12.5,cursor:"pointer",fontWeight:600}}>
