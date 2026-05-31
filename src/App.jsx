@@ -2722,7 +2722,7 @@ function AdminDash({ go }) {
   // the customer's MyOrders page pick up the change in real time.
   const updateOrderStatus = async (id, statusOrPatch, extra = {}) => {
     // Backwards-compatible: callers can pass either (id, "تم الشحن") OR
-    // (id, { status, cancellation_reason, payment_status, note, ... })
+    // (id, { status, cancellation_reason, payment_status, note, courier_id, ... })
     const patch = typeof statusOrPatch === "string"
       ? { status: statusOrPatch, ...extra }
       : { ...statusOrPatch, ...extra };
@@ -2730,30 +2730,64 @@ function AdminDash({ go }) {
     const actor_id   = (authUser && authUser.email) || null;
     const actor_name = (authUser && (authUser.name || authUser.email)) || "الإدارة";
 
-    // Optimistic local update
+    // Remember the previous status so we can roll back the optimistic write
+    // if the server rejects the transition (Phase 1 state machine: 422 on
+    // invalid edges, 400 on missing courier_id, 409 on insufficient stock).
+    const prevSnapshot = orderList.find(o => o.id === id);
     setOrderList(prev => prev.map(o => o.id === id ? { ...o, ...patch } : o));
     setStatusEdit({});
     let fresh = null;
+    let result = { ok: true, order: null, autoShipment: null };
     try {
       const r = await fetch(`/api/orders/${id}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ ...patch, actor_id, actor_name }),
       });
+      const data = await r.json().catch(() => null);
       if (r.ok) {
-        const data = await r.json().catch(() => null);
         if (data && data.order) {
           fresh = data.order;
           setOrderList(prev => prev.map(o => o.id === id ? { ...o, ...fresh } : o));
         }
+        result = { ok: true, order: fresh, autoShipment: data && data.auto_shipment };
+      } else {
+        // Roll back optimistic update on server error.
+        if (prevSnapshot) {
+          setOrderList(prev => prev.map(o => o.id === id ? prevSnapshot : o));
+        }
+        const code = (data && data.error) || `http_${r.status}`;
+        // Map server errors to user-facing Arabic messages.
+        const messages = {
+          invalid_transition:   `لا يمكن نقل الطلب من "${data && data.from}" إلى "${data && data.to}"`,
+          courier_id_required:  'اختر شركة الشحن أولاً (الزر سيفتح نافذة الاختيار)',
+          no_active_courier:    'فعّل شركة شحن من الإعدادات قبل تأكيد الطلب',
+          invalid_courier:      'شركة الشحن المختارة غير موجودة أو غير مفعّلة',
+          insufficient_stock:   `المخزون غير كافٍ — متاح ${data && data.available} فقط (مطلوب ${data && data.requested})`,
+        };
+        result = {
+          ok: false,
+          error: code,
+          message: messages[code] || (data && data.message) || `خطأ من الخادم (HTTP ${r.status})`,
+          data,
+        };
+        // Don't pop a generic alert here — callers (CourierPickerModal,
+        // status buttons) decide whether to show inline or toast.
+        console.warn('[updateOrderStatus]', code, data);
       }
-    } catch {}
+    } catch (e) {
+      if (prevSnapshot) {
+        setOrderList(prev => prev.map(o => o.id === id ? prevSnapshot : o));
+      }
+      result = { ok: false, error: 'network_error', message: 'تعذّر الاتصال بالخادم' };
+      console.error('[updateOrderStatus] network', e);
+    }
     try {
       const orders = JSON.parse(localStorage.getItem("nawra_orders") || "[]");
       localStorage.setItem("nawra_orders",
-        JSON.stringify(orders.map(o => o.id === id ? { ...o, ...patch, ...(fresh||{}) } : o)));
+        JSON.stringify(orders.map(o => o.id === id ? { ...o, ...(fresh || prevSnapshot || patch) } : o)));
     } catch {}
-    return fresh;
+    return result;
   };
 
   const statCard = (label, value, color="#2A1F0E") => (
@@ -15578,6 +15612,100 @@ function ReturnDetailsView({ ret, retKey, ui, mob, isSuper, authUser, onBack, on
   );
 }
 
+// ─── CourierPickerModal (Phase 2 slice 2.1) ───────────────────────────────
+// Opens when admin clicks "تأكيد الطلب" on a جديد order. Picks an active
+// courier; if exactly one is active it pre-selects + still requires confirm.
+// If zero are active, blocks the confirm and points the admin to Settings.
+// onConfirm receives the chosen courier_id; the caller does the PATCH
+// /api/orders status='قيد التجهيز' + courier_id and surfaces the
+// auto_shipment.awb_number toast on success.
+function CourierPickerModal({ orderId, orderNumber, onConfirm, onClose, isPatching, ui, mob }) {
+  const [couriers, setCouriers] = useState([]);
+  const [courierId, setCourierId] = useState("");
+  const [loading, setLoading]   = useState(true);
+  const [err, setErr]           = useState("");
+
+  useEffect(() => {
+    let cancelled = false;
+    fetch("/api/shipping/couriers?all=1")
+      .then(r => r.ok ? r.json() : [])
+      .then(rows => {
+        if (cancelled) return;
+        const list = (Array.isArray(rows) ? rows : []).filter(c => c.active);
+        setCouriers(list);
+        if (list.length === 1) setCourierId(list[0].id); // auto-select sole option
+        setLoading(false);
+      })
+      .catch(() => { if (!cancelled) { setLoading(false); setErr("تعذّر تحميل شركات الشحن"); } });
+    return () => { cancelled = true; };
+  }, []);
+
+  const blocked = !loading && couriers.length === 0;
+  const close = () => { if (!isPatching) onClose(); };
+
+  return (
+    <div onClick={close} style={{position:"fixed",inset:0,background:"rgba(0,0,0,.55)",zIndex:900,display:"flex",alignItems:"center",justifyContent:"center",padding:16,direction:"rtl"}}>
+      <div onClick={e=>e.stopPropagation()}
+        style={{background:ui.cardBg,maxWidth:460,width:"100%",borderRadius:8,padding:mob?16:22,boxShadow:"0 12px 48px rgba(0,0,0,.25)"}}>
+        <h3 style={{fontSize:16,fontWeight:600,color:ui.text,fontFamily:ui.fontBody,margin:"0 0 4px"}}>تأكيد الطلب</h3>
+        <div style={{fontSize:12.5,color:ui.textSub,fontFamily:ui.fontBody,marginBottom:16}}>
+          الطلب #{orderNumber || orderId} — اختر شركة الشحن وسيتم إنشاء بوليصة تلقائياً
+        </div>
+
+        {loading && (
+          <div style={{padding:"14px 0",fontSize:12.5,color:ui.textSub,fontFamily:ui.fontBody}}>
+            ...جاري تحميل شركات الشحن
+          </div>
+        )}
+
+        {!loading && blocked && (
+          <div style={{padding:14,background:"#FEF3C7",border:"1px solid #FCD34D",borderRadius:6,fontSize:12.5,color:"#92400E",fontFamily:ui.fontBody,marginBottom:12}}>
+            ⚠ لا توجد شركة شحن مفعّلة. <a href="#admin/settings" onClick={onClose} style={{color:"#92400E",textDecoration:"underline",fontWeight:600}}>افتح الإعدادات</a> وفعّل شركة شحن أولاً.
+          </div>
+        )}
+
+        {!loading && !blocked && (
+          <div style={{marginBottom:14}}>
+            <label style={{display:"block",fontSize:12,fontWeight:500,marginBottom:6,color:ui.text,fontFamily:ui.fontBody}}>
+              شركة الشحن
+            </label>
+            <select value={courierId} onChange={e => setCourierId(e.target.value)}
+              style={{padding:"8px 11px",border:ui.border,borderRadius:5,background:ui.cardBg,fontFamily:ui.fontBody,fontSize:13,color:ui.text,outline:"none",width:"100%",boxSizing:"border-box"}}>
+              <option value="">— اختر —</option>
+              {couriers.map(c => <option key={c.id} value={c.id}>{c.name}{c.is_default ? " (افتراضية)" : ""}</option>)}
+            </select>
+            {couriers.length === 1 && (
+              <div style={{fontSize:11,color:ui.textSub,marginTop:5,fontFamily:ui.fontBody}}>
+                تم اختيار الشركة الوحيدة المفعّلة تلقائياً — راجع ثم أكّد
+              </div>
+            )}
+          </div>
+        )}
+
+        {err && (
+          <div style={{padding:"7px 11px",background:"#FEE2E2",color:"#B91C1C",border:"0.5px solid #FECACA",borderRadius:5,fontSize:12,fontFamily:ui.fontBody,marginBottom:10}}>{err}</div>
+        )}
+
+        <div style={{display:"flex",gap:8,justifyContent:"flex-end"}}>
+          <button onClick={close} disabled={isPatching}
+            style={{padding:"8px 16px",background:"transparent",border:ui.border,borderRadius:6,fontSize:12.5,color:ui.textSub,fontFamily:ui.fontBody,cursor:isPatching?"wait":"pointer"}}>
+            تراجع
+          </button>
+          <button onClick={async () => {
+              setErr("");
+              const r = await onConfirm(courierId);
+              if (r && r.ok === false) setErr(r.message || "فشل تأكيد الطلب");
+            }}
+            disabled={!courierId || blocked || isPatching}
+            style={{padding:"8px 18px",background:(!courierId || blocked || isPatching)?"#9CA3AF":ui.text,color:"#fff",border:"none",borderRadius:6,fontSize:12.5,fontWeight:500,fontFamily:ui.fontBody,cursor:(!courierId || blocked || isPatching)?"not-allowed":"pointer"}}>
+            {isPatching ? "...جاري التأكيد" : "تأكيد + إنشاء شحنة"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function OrderDetailPage({
   order, orderId, onBack, onStatusChange, canManage,
   thumbForItem, payLabel, payStyle, badgeStyle, ui, mob, refreshOrders,
@@ -15593,6 +15721,15 @@ function OrderDetailPage({
   const [shipment,  setShipment]  = useState(null);
   const [shipBusy,  setShipBusy]  = useState(false);
   const [shipError, setShipError] = useState("");
+  // Phase 2 slice 2.1 — courier picker on confirm + transient toast for
+  // success/error feedback from the new state machine API.
+  const [courierPickerOpen, setCourierPickerOpen] = useState(false);
+  const [courierPickerBusy, setCourierPickerBusy] = useState(false);
+  const [statusToast, setStatusToast] = useState(null); // { kind:'success'|'error', message }
+  const flashToast = (kind, message, ms = 4000) => {
+    setStatusToast({ kind, message });
+    setTimeout(() => setStatusToast(t => (t && t.message === message ? null : t)), ms);
+  };
 
   useEffect(() => { injectPrintStyles(); }, []);
   // Re-render every minute so relative "since X" timestamps stay current.
@@ -16048,8 +16185,20 @@ function OrderDetailPage({
           <span style={{fontSize:12,color:ui.textSub,fontFamily:ui.fontBody,marginInlineEnd:4}}>تحديث الحالة:</span>
           {ORDER_STATUSES.filter(s => s !== "ملغي").map(s => {
             const isCurrent = order.status === s;
+            const handleClick = async () => {
+              // Phase 2 slice 2.1: 'قيد التجهيز' from 'جديد' opens the
+              // courier picker (server requires courier_id). All other
+              // transitions go straight through; errors surface via toast.
+              if (s === 'قيد التجهيز' && order.status === 'جديد') {
+                setCourierPickerOpen(true);
+                return;
+              }
+              const r = await onStatusChange(order.id, s);
+              if (r && r.ok === false) flashToast('error', r.message || 'فشل تحديث الحالة');
+              else if (r && r.ok) flashToast('success', `الحالة الآن: ${s}`);
+            };
             return (
-              <button key={s} disabled={isCurrent} onClick={()=>onStatusChange(order.id, s)}
+              <button key={s} disabled={isCurrent} onClick={handleClick}
                 style={{
                   padding:"7px 14px",
                   background: isCurrent ? ui.text : "transparent",
@@ -16120,6 +16269,42 @@ function OrderDetailPage({
               </button>
             </div>
           </div>
+        </div>
+      )}
+
+      {/* Phase 2 slice 2.1 — Courier picker modal (opens on قيد التجهيز) */}
+      {courierPickerOpen && (
+        <CourierPickerModal
+          orderId={order.id}
+          orderNumber={order.order_number}
+          isPatching={courierPickerBusy}
+          ui={ui} mob={mob}
+          onClose={() => setCourierPickerOpen(false)}
+          onConfirm={async (courierId) => {
+            setCourierPickerBusy(true);
+            const r = await onStatusChange(order.id, { status: 'قيد التجهيز', courier_id: courierId });
+            setCourierPickerBusy(false);
+            if (r && r.ok) {
+              setCourierPickerOpen(false);
+              const awb = r.autoShipment && r.autoShipment.awb_number;
+              flashToast('success', awb ? `تم تأكيد الطلب وإنشاء بوليصة ${awb}` : 'تم تأكيد الطلب');
+              refreshOrders && refreshOrders();
+            }
+            return r;
+          }}
+        />
+      )}
+
+      {/* Floating toast for status-change feedback */}
+      {statusToast && (
+        <div style={{position:"fixed",bottom:24,left:"50%",transform:"translateX(-50%)",zIndex:1000,
+                     background: statusToast.kind === 'success' ? "#DCFCE7" : "#FEE2E2",
+                     border: `1px solid ${statusToast.kind === 'success' ? "#86EFAC" : "#FECACA"}`,
+                     color: statusToast.kind === 'success' ? "#15803D" : "#B91C1C",
+                     padding:"10px 18px",borderRadius:8,fontSize:13,fontFamily:ui.fontBody,
+                     fontWeight:500,boxShadow:"0 8px 24px rgba(0,0,0,0.15)",direction:"rtl",
+                     maxWidth:420}}>
+          {statusToast.kind === 'success' ? '✓ ' : '⚠ '}{statusToast.message}
         </div>
       )}
     </div>
