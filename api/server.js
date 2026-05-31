@@ -7843,6 +7843,15 @@ app.get('/api/finance/balance-sheet', (_req, res) => {
     `).get();
     const receivables = Number(codPendingRow.amount) + Number(onlinePendingRow.amount);
 
+    // Phase 1 Part F: customer debts (e.g., shipping fee owed by a
+    // customer who refused delivery). Surfaces on Receivables and also
+    // augments total assets here.
+    const custDebtRow = db.prepare(`
+      SELECT COALESCE(SUM(amount), 0) AS amount FROM customer_debts
+      WHERE status = 'pending' AND ${NOT_TEST}
+    `).get();
+    const customerDebts = Number(custDebtRow.amount) || 0;
+
     // ── Liabilities ────────────────────────────────────────────────────
     // Purchase-invoice payables (received + not fully paid).
     const purInvPayRow = db.prepare(`
@@ -7855,25 +7864,41 @@ app.get('/api/finance/balance-sheet', (_req, res) => {
       SELECT COALESCE(SUM(amount), 0) AS amount FROM expenses
       WHERE status = 'approved' AND payment_date IS NULL AND ${NOT_TEST}
     `).get();
+    // Phase 1 Part I: pending refunds — approved returns whose money has
+    // not yet left the till. Distinct liability bucket so the Balance
+    // Sheet stops misclassifying unsettled refunds as "unpaid expenses".
+    const pendingRefundRow = db.prepare(`
+      SELECT COALESCE(SUM(amount), 0) AS amount FROM pending_refunds
+      WHERE status = 'pending' AND ${NOT_TEST}
+    `).get();
     const purchaseInvoicePayables = Number(purInvPayRow.amount) || 0;
     const expensePayables         = Number(expensePayRow.amount) || 0;
-    const payables                = purchaseInvoicePayables + expensePayables;
+    const pendingRefundsLiability = Number(pendingRefundRow.amount) || 0;
+    const payables                = purchaseInvoicePayables + expensePayables + pendingRefundsLiability;
 
-    const totalAssets      = Math.round(cash + inventory + receivables);
+    const receivablesTotal = receivables + customerDebts;
+    const totalAssets      = Math.round(cash + inventory + receivablesTotal);
     const totalLiabilities = Math.round(payables);
     const equity           = totalAssets - totalLiabilities;
 
     res.json({
       assets: {
-        cash:        Math.round(cash),
+        cash:           Math.round(cash),
         inventory,
-        receivables: Math.round(receivables),
-        total:       totalAssets,
+        receivables:    Math.round(receivablesTotal),
+        // Detail breakdown for the FE so it can show order-receivables
+        // and refusal-shipping-debts separately.
+        receivables_breakdown: {
+          orders_unpaid:  Math.round(receivables),
+          customer_debts: Math.round(customerDebts),
+        },
+        total:          totalAssets,
       },
       liabilities: {
-        supplier_payables: Math.round(purchaseInvoicePayables),
-        expense_payables:  Math.round(expensePayables),
-        total:             totalLiabilities,
+        supplier_payables:        Math.round(purchaseInvoicePayables),
+        expense_payables:         Math.round(expensePayables),
+        pending_refunds_liability: Math.round(pendingRefundsLiability),
+        total:                    totalLiabilities,
       },
       equity,
       opening_cash:        Math.round(openingCash),
@@ -7881,6 +7906,43 @@ app.get('/api/finance/balance-sheet', (_req, res) => {
       computed_at: new Date().toISOString(),
     });
   } catch (e) { console.error('GET /api/finance/balance-sheet', e); res.status(500).json({ error: e.message }); }
+});
+
+// GET /api/finance/pending-refunds (Phase 1 slice 1.11, Part I) ──────────
+// List of approved-but-not-yet-paid refunds for the Balance Sheet detail
+// drawer. is_test filtered.
+app.get('/api/finance/pending-refunds', (_req, res) => {
+  try {
+    const rows = db.prepare(`
+      SELECT pr.id, pr.return_id, pr.amount, pr.refund_method, pr.status,
+             pr.created_at, pr.settled_at,
+             r.return_number, r.customer, r.customer_email, r.order_id,
+             r.received_at_warehouse_at
+      FROM pending_refunds pr
+      LEFT JOIN returns r ON r.id = pr.return_id
+      WHERE pr.status = 'pending' AND (pr.is_test = 0 OR pr.is_test IS NULL)
+      ORDER BY pr.created_at DESC
+    `).all();
+    const total = rows.reduce((s, r) => s + (Number(r.amount) || 0), 0);
+    res.json({ rows, total: Math.round(total), count: rows.length });
+  } catch (e) { console.error('GET /api/finance/pending-refunds', e); res.status(500).json({ error: e.message }); }
+});
+
+// GET /api/finance/customer-debts (Phase 1 slice 1.11, Part F) ───────────
+// List of customer debts (currently only shipping-after-refusal) for the
+// Receivables detail drawer. is_test filtered. Supports ?status= filter
+// (pending | paid | written_off).
+app.get('/api/finance/customer-debts', (req, res) => {
+  try {
+    const status = req.query.status ? String(req.query.status) : 'pending';
+    const rows = db.prepare(`
+      SELECT * FROM customer_debts
+      WHERE status = ? AND (is_test = 0 OR is_test IS NULL)
+      ORDER BY created_at DESC
+    `).all(status);
+    const total = rows.reduce((s, r) => s + (Number(r.amount) || 0), 0);
+    res.json({ rows, total: Math.round(total), count: rows.length, status });
+  } catch (e) { console.error('GET /api/finance/customer-debts', e); res.status(500).json({ error: e.message }); }
 });
 
 app.get('/api/finance/key-metrics', (req, res) => {
