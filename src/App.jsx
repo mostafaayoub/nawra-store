@@ -598,9 +598,72 @@ function CartProvider({ children }) {
     return () => window.removeEventListener("nawra-shipping-saved", h);
   }, []);
 
-  const add = p => setCart(prev => { const ex = prev.find(i => i.id === p.id); return ex ? prev.map(i => i.id === p.id ? { ...i, qty: i.qty + 1 } : i) : [...prev, { ...p, qty: 1 }]; });
+  // Phase 2 slice 2.4 — real-time stock check on add/qty changes.
+  // Live stock comes from /api/products/:id; if the lookup fails (network
+  // error, product not yet in DB) we fall back to the cart item's local
+  // stock value so the legacy behavior still works. Returns
+  //   { ok:true } on success
+  //   { ok:false, available, requested } when capped
+  const fetchAvailable = async (productId) => {
+    try {
+      const r = await fetch(`/api/products/${encodeURIComponent(productId)}`);
+      if (!r.ok) return null;
+      const p = await r.json();
+      return Number(p && p.stock) || 0;
+    } catch { return null; }
+  };
+  const add = async (p) => {
+    const avail = await fetchAvailable(p.id);
+    // No DB row OR network failure → trust the local stock field
+    const cap = avail != null ? avail : (Number(p.stock) || Infinity);
+    const cur = (cart.find(i => i.id === p.id) || { qty: 0 }).qty;
+    const desired = cur + 1;
+    if (desired > cap) {
+      return { ok: false, available: cap, requested: desired, message: `الكمية المتاحة ${cap} قطعة فقط` };
+    }
+    setCart(prev => { const ex = prev.find(i => i.id === p.id); return ex ? prev.map(i => i.id === p.id ? { ...i, qty: desired, stock: cap } : i) : [...prev, { ...p, qty: 1, stock: cap }]; });
+    return { ok: true };
+  };
   const rem = id => setCart(prev => prev.filter(i => i.id !== id));
-  const upd = (id, q) => q <= 0 ? rem(id) : setCart(prev => prev.map(i => i.id === id ? { ...i, qty: q } : i));
+  const upd = async (id, q) => {
+    if (q <= 0) return rem(id);
+    const item = cart.find(i => i.id === id);
+    if (!item) return { ok: true };
+    const avail = await fetchAvailable(id);
+    const cap = avail != null ? avail : (Number(item.stock) || Infinity);
+    if (q > cap) {
+      // Cap silently to the maximum
+      setCart(prev => prev.map(i => i.id === id ? { ...i, qty: cap, stock: cap } : i));
+      return { ok: false, available: cap, requested: q, message: `الكمية المتاحة ${cap} قطعة فقط` };
+    }
+    setCart(prev => prev.map(i => i.id === id ? { ...i, qty: q, stock: cap } : i));
+    return { ok: true };
+  };
+  // Reconcile cart against live stock — called when the cart sidebar opens.
+  // Any item whose qty exceeds current stock_available is capped down with
+  // a notice the caller can surface to the user.
+  const reconcileWithStock = async () => {
+    const notices = [];
+    const ids = cart.map(i => i.id);
+    const updates = await Promise.all(ids.map(async (id) => {
+      const avail = await fetchAvailable(id);
+      return { id, avail };
+    }));
+    setCart(prev => prev.map(item => {
+      const u = updates.find(x => x.id === item.id);
+      if (!u || u.avail == null) return item;
+      if (u.avail <= 0) {
+        notices.push({ id: item.id, name: item.nameAr || item.name, action: 'removed', available: 0 });
+        return null; // mark for removal
+      }
+      if (item.qty > u.avail) {
+        notices.push({ id: item.id, name: item.nameAr || item.name, action: 'capped', from: item.qty, to: u.avail });
+        return { ...item, qty: u.avail, stock: u.avail };
+      }
+      return { ...item, stock: u.avail };
+    }).filter(Boolean));
+    return notices;
+  };
   const clr = () => setCart([]);
   const tot = cart.reduce((s, i) => s + i.price * i.qty, 0);
   const cnt = cart.reduce((s, i) => s + i.qty, 0);
@@ -613,7 +676,7 @@ function CartProvider({ children }) {
     return z ? Number(z.price) || 50 : 50;
   })();
   const ship = tot > 0 && tot < freeShipMin ? defaultZoneFee : 0;
-  return <Ctx.Provider value={{ cart, add, rem, upd, clr, tot, cnt, ship, freeShipMin, defaultZoneFee, shipCfg }}>{children}</Ctx.Provider>;
+  return <Ctx.Provider value={{ cart, add, rem, upd, clr, tot, cnt, ship, freeShipMin, defaultZoneFee, shipCfg, reconcileWithStock }}>{children}</Ctx.Provider>;
 }
 
 // ─── Router ──────────────────────────────────────────────────────────────────
@@ -790,7 +853,18 @@ function Nav({ r, go, openCart, user, onLogout }) {
 
 // ─── Cart Sidebar ─────────────────────────────────────────────────────────────
 function CartSide({ open, close, go }) {
-  const { cart, rem, upd, tot, ship, clr, freeShipMin } = useCart();
+  const { cart, rem, upd, tot, ship, clr, freeShipMin, reconcileWithStock } = useCart();
+  // Phase 2 slice 2.4 — reconciliation notices (from cart open) + 409 conflict
+  // modal (from POST /api/orders insufficient_stock response).
+  const [reconcileNotices, setReconcileNotices] = useState([]);
+  const [stockConflict, setStockConflict] = useState(null); // { product_name, available, requested, alternatives }
+  useEffect(() => {
+    if (!open) return;
+    reconcileWithStock().then(notices => {
+      if (notices && notices.length) setReconcileNotices(notices);
+    });
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open]);
   const { user } = useAuth();
   const { t, lang, dir } = useLang();
   const mob = useMob();
@@ -893,6 +967,18 @@ function CartSide({ open, close, go }) {
     };
     try {
       const res = await fetch("/api/orders", { method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify(order) });
+      // Phase 2 slice 2.4 — handle 409 insufficient_stock from race-safe POST.
+      // Surface the alternatives in a modal; auto-remove the unavailable line.
+      if (res.status === 409) {
+        const conflict = await res.json().catch(() => ({}));
+        if (conflict && conflict.error === 'insufficient_stock' && conflict.product_id) {
+          setStockConflict(conflict);
+          // Don't proceed to success — keep the cart open so the user can pick
+          // an alternative or remove the line.
+          rem(conflict.product_id);
+          return;
+        }
+      }
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       console.log("[Nawra] Order saved to API:", order.id);
     } catch (e) { console.warn("[Nawra] API fallback:", e.message); }
@@ -1041,6 +1127,18 @@ function CartSide({ open, close, go }) {
         ) : (
           <>
             <div style={{ flex: 1, overflowY: "auto", padding: "14px 20px" }}>
+              {/* Phase 2 slice 2.4 — stock reconciliation notice from cart-open */}
+              {reconcileNotices.length > 0 && (
+                <div style={{ background:"#FEF3C7", border:"1px solid #FCD34D", padding:"10px 12px", marginBottom:14, fontSize:12, color:"#92400E", fontFamily:C.fb, lineHeight:1.6 }}>
+                  <div style={{ fontWeight:600, marginBottom:5 }}>⚠ تحديث المخزون</div>
+                  {reconcileNotices.map((n, i) => (
+                    <div key={i}>
+                      • {n.name} — {n.action === 'removed' ? 'نفد المخزون، تم حذف المنتج من العربة' : `تم تخفيض الكمية إلى ${n.to} (متاح فقط)`}
+                    </div>
+                  ))}
+                  <button onClick={() => setReconcileNotices([])} style={{ marginTop:6, background:"transparent", border:"none", color:"#92400E", textDecoration:"underline", fontSize:11, cursor:"pointer", fontFamily:C.fb, padding:0 }}>إخفاء</button>
+                </div>
+              )}
               {!cart.length ? (
                 <div style={{ textAlign: "center", padding: "44px 16px", color: C.mu }}>
                   <div style={{ fontSize: 40, marginBottom: 12 }}>🛍️</div>
@@ -1092,6 +1190,44 @@ function CartSide({ open, close, go }) {
           </>
         )}
       </div>
+
+      {/* Phase 2 slice 2.4 — 409 insufficient_stock modal with alternatives */}
+      {stockConflict && (
+        <div onClick={() => setStockConflict(null)}
+          style={{ position:"fixed", inset:0, background:"rgba(0,0,0,.6)", zIndex:500, display:"flex", alignItems:"center", justifyContent:"center", padding:16, direction:dir }}>
+          <div onClick={e=>e.stopPropagation()}
+            style={{ background:C.wh, maxWidth:480, width:"100%", padding:24, borderRadius:4 }}>
+            <h3 style={{ fontFamily:C.fa, fontSize:18, fontWeight:600, color:C.dk, margin:"0 0 6px" }}>
+              نفد المنتج من المخزون
+            </h3>
+            <p style={{ fontSize:13, color:C.wa, fontFamily:C.fb, margin:"0 0 14px", lineHeight:1.7 }}>
+              <b>{stockConflict.product_name}</b> — متاح حالياً {stockConflict.available} قطعة فقط (طلبت {stockConflict.requested}).
+              تم حذف المنتج من العربة.
+              {Array.isArray(stockConflict.alternatives) && stockConflict.alternatives.length > 0 && (
+                <> جرّبي منتجات بديلة من نفس الفئة:</>
+              )}
+            </p>
+            {Array.isArray(stockConflict.alternatives) && stockConflict.alternatives.length > 0 && (
+              <div style={{ marginBottom:16 }}>
+                {stockConflict.alternatives.map(alt => (
+                  <div key={alt.id}
+                    style={{ display:"flex", alignItems:"center", gap:12, padding:"10px 12px", border:"1px solid rgba(196,149,106,.18)", marginBottom:8, background:C.cr }}>
+                    {alt.image && <img src={alt.image} alt="" style={{ width:48, height:48, objectFit:"cover" }}/>}
+                    <div style={{ flex:1, minWidth:0 }}>
+                      <div style={{ fontSize:13, fontFamily:C.fb, color:C.dk, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>{alt.name}</div>
+                      <div style={{ fontSize:11.5, color:C.mu, fontFamily:C.fe }}>{alt.price} {t("egp")} · متاح {alt.stock}</div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+            <Btn onClick={() => setStockConflict(null)}
+              style={{ width:"100%", padding:12, background:C.dk, color:C.cr, fontSize:13, letterSpacing:"0.05em", fontFamily:C.fb, fontWeight:600, border:"none" }}>
+              فهمت
+            </Btn>
+          </div>
+        </div>
+      )}
     </>
   );
 }
