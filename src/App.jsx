@@ -15091,6 +15091,43 @@ function ShipmentDetailsModal({ ship, awbKey, onClose, onPatch, onAppendNote, is
                     style={{padding:"9px 14px",background:"#15803D",color:"#fff",border:"none",borderRadius:5,fontSize:12.5,cursor:"pointer",fontFamily:ui.fontBody,width:"100%",marginBottom:6}}>
                     ✓ تأكيد التسليم للعميل
                   </button>
+                  {/* Phase 2 slice 2.3 — customer-refused-delivery (Part F).
+                      Hidden on return/refused_return shipments. Calls the new
+                      POST /api/shipments/:awb/customer-refused endpoint which
+                      atomically: sets order to رفض الاستلام, releases stock
+                      back to pool, creates a refused_return shipment, and
+                      logs a customer_debt for the outbound shipping fee. */}
+                  {(!ship.shipment_type || ship.shipment_type === 'outbound') && (
+                    <button onClick={async () => {
+                        if (!window.confirm(`تأكيد رفض الاستلام للشحنة ${ship.awb_number}؟\n\nسيتم:\n• تحويل الطلب إلى "رفض الاستلام"\n• إعادة المخزون إلى المتاح\n• إنشاء شحنة عودة (AWB-RET-XXXX)\n• تسجيل دين العميل بقيمة تكلفة الشحن`)) return;
+                        try {
+                          const actor_email = sender && sender.email;
+                          const r = await fetch(`/api/shipments/${encodeURIComponent(ship.awb_number)}/customer-refused`, {
+                            method: "POST",
+                            headers: { "Content-Type":"application/json", "X-Actor-Email": actor_email || "" },
+                            body: JSON.stringify({
+                              actor_id: actor_email || null,
+                              actor_name: (sender && sender.name) || "الإدارة",
+                              notes: "تم تسجيل رفض الاستلام من إدارة الشحنات",
+                            }),
+                          });
+                          const data = await r.json().catch(() => ({}));
+                          if (r.ok) {
+                            const retAwb = data.refused_return && data.refused_return.awb_number;
+                            const debt   = data.customer_debt && data.customer_debt.amount;
+                            window.alert(`✓ تم تسجيل رفض الاستلام\n\nشحنة العودة: ${retAwb || '—'}\nدين العميل: ${debt ? `${debt} ج` : '—'}`);
+                            onClose && onClose();
+                          } else {
+                            window.alert(`تعذّر تسجيل الرفض: ${data.message || data.error || `HTTP ${r.status}`}`);
+                          }
+                        } catch (e) {
+                          window.alert(`فشل الاتصال: ${e.message}`);
+                        }
+                      }}
+                      style={{padding:"9px 14px",background:"#FEE2E2",color:"#B91C1C",border:"1px solid #FCA5A5",borderRadius:5,fontSize:12.5,cursor:"pointer",fontFamily:ui.fontBody,width:"100%",marginBottom:6,fontWeight:600}}>
+                      ⚠ رفض الاستلام
+                    </button>
+                  )}
                   <button onClick={() => onPatch(ship.id, { status:"returned" })}
                     style={{padding:"9px 14px",background:"transparent",color:"#B91C1C",border:"1px solid #FCA5A5",borderRadius:5,fontSize:12.5,cursor:"pointer",fontFamily:ui.fontBody,width:"100%",marginBottom:6}}>
                     ↩ مرتجع للمتجر
