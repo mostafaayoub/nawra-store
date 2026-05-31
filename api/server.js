@@ -2077,6 +2077,42 @@ app.patch('/api/orders/:id', (req, res) => {
       });
     }
 
+    // \u2500\u2500 Auto-shipment on confirm (Phase 1 slice 1.5, ADJ 2) \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+    // \u062c\u062f\u064a\u062f \u2192 \u0642\u064a\u062f \u0627\u0644\u062a\u062c\u0647\u064a\u0632 REQUIRES a courier_id in the request body and
+    // an active courier must exist. Validate up-front so we fail fast
+    // before opening the write txn (and so the error messages are clear).
+    const isConfirmTransition = isStatusChange && cur.status === '\u062c\u062f\u064a\u062f' && status === '\u0642\u064a\u062f \u0627\u0644\u062a\u062c\u0647\u064a\u0632';
+    let autoShipCourier = null;
+    if (isConfirmTransition) {
+      const anyActive = db.prepare("SELECT id FROM couriers WHERE active = 1 LIMIT 1").get();
+      if (!anyActive) {
+        return res.status(409).json({
+          error: 'no_active_courier',
+          message: '\u0641\u0639\u0651\u0644 \u0634\u0631\u0643\u0629 \u0634\u062d\u0646 \u0645\u0646 \u0627\u0644\u0625\u0639\u062f\u0627\u062f\u0627\u062a \u0623\u0648\u0644\u0627\u064b \u0642\u0628\u0644 \u062a\u0623\u0643\u064a\u062f \u0627\u0644\u0637\u0644\u0628',
+        });
+      }
+      const courierId = req.body && req.body.courier_id;
+      if (!courierId) {
+        return res.status(400).json({
+          error: 'courier_id_required',
+          message: '\u0627\u062e\u062a\u0631 \u0634\u0631\u0643\u0629 \u0627\u0644\u0634\u062d\u0646 \u0644\u0647\u0630\u0627 \u0627\u0644\u0637\u0644\u0628',
+        });
+      }
+      autoShipCourier = db.prepare('SELECT * FROM couriers WHERE id = ? AND active = 1').get(courierId);
+      if (!autoShipCourier) {
+        return res.status(422).json({
+          error: 'invalid_courier',
+          message: '\u0634\u0631\u0643\u0629 \u0627\u0644\u0634\u062d\u0646 \u0627\u0644\u0645\u062e\u062a\u0627\u0631\u0629 \u063a\u064a\u0631 \u0645\u0648\u062c\u0648\u062f\u0629 \u0623\u0648 \u063a\u064a\u0631 \u0645\u0641\u0639\u0651\u0644\u0629',
+        });
+      }
+      // If the order already has an active shipment (admin manually shipped
+      // before confirming), don't create a duplicate; reuse it.
+      const existing = db.prepare(
+        "SELECT id, awb_number FROM shipments WHERE order_id = ? AND status NOT IN ('cancelled','returned') LIMIT 1"
+      ).get(cur.id);
+      if (existing) autoShipCourier = { ...autoShipCourier, _existingShipment: existing };
+    }
+
     // Append to legacy status_history JSON (frontend renders it directly).
     let history = [];
     try { history = JSON.parse(cur.status_history || '[]'); } catch {}
@@ -2118,12 +2154,12 @@ app.patch('/api/orders/:id', (req, res) => {
 
     vals.push(cur.id);
 
-    // Wrap the UPDATE + applyStockTransition in one db.transaction so a
-    // failed stock effect (e.g. INSUFFICIENT_STOCK on confirm) leaves the
-    // order at its previous status. Returns 409 with structured error on
-    // stock conflict, so the FE can show the alternatives modal.
+    // Wrap the UPDATE + applyStockTransition + auto-shipment in one txn so
+    // a failed stock effect (INSUFFICIENT_STOCK on confirm) leaves the
+    // order at its previous status AND no shipment is created. Returns
+    // 409 with structured error on stock conflict.
     const actor = { id: actor_id || null, name: actor_name || null };
-    const txResult = { changes: 0 };
+    const txResult = { changes: 0, autoShipment: null };
     try {
       db.transaction(() => {
         const info = db.prepare(`UPDATE orders SET ${sets.join(', ')} WHERE id = ?`).run(...vals);
@@ -2136,6 +2172,63 @@ app.patch('/api/orders/:id', (req, res) => {
             items,
             actor,
           });
+        }
+        // Auto-create the shipment (Phase 1 slice 1.5). Skip when an
+        // existing active shipment is detected.
+        if (isConfirmTransition && autoShipCourier && !autoShipCourier._existingShipment) {
+          const zone = matchZoneByGovernorate(cur.city);
+          const defaultWeight = (() => {
+            try {
+              const r = db.prepare("SELECT value FROM settings WHERE key='store'").get();
+              const s = r ? JSON.parse(r.value || '{}') : {};
+              const v = Number(s.shipping_default_product_weight);
+              return Number.isFinite(v) && v > 0 ? v : 0.3;
+            } catch { return 0.3; }
+          })();
+          const weight = computeOrderWeight(items, { defaultWeight });
+          let processing = 0;
+          try {
+            const r = db.prepare("SELECT value FROM settings WHERE key='store'").get();
+            const s = r ? JSON.parse(r.value || '{}') : {};
+            processing = Number(s.shipping_processing_days) || 0;
+          } catch {}
+          const days = (zone ? Number(zone.max_days) || 3 : 3) + processing;
+          const d = new Date(); d.setDate(d.getDate() + days);
+          const expectedDate = d.toISOString().slice(0, 10);
+          const globalFree = (() => {
+            try {
+              const r = db.prepare("SELECT value FROM settings WHERE key='store'").get();
+              const s = r ? JSON.parse(r.value || '{}') : {};
+              return Number(s.shipping_default_free_threshold) || 0;
+            } catch { return 0; }
+          })();
+          const quote = computeShippingFee(zone, weight, Number(cur.total) || 0, globalFree);
+          const customerPaidShipping = Number(cur.shipping_cost) || 0;
+          const customerPaidCod = (cur.payment_method === 'cash' && cur.payment_status !== 'paid')
+            ? (Number(cur.total) || 0) : 0;
+          const shipId = `sh_${Date.now().toString(36)}_${Math.random().toString(36).slice(2,5)}`;
+          const awb = allocateAwbNumber();
+          db.prepare(`
+            INSERT INTO shipments
+              (id, awb_number, order_id, courier_id, zone_id, weight_kg, courier_cost,
+               customer_paid_shipping, customer_paid_cod, status,
+               expected_delivery_date, shipment_type, is_test)
+            VALUES (?,?,?,?,?,?,?,?,?, 'ready', ?, 'outbound', ?)
+          `).run(
+            shipId, awb, cur.id, autoShipCourier.id, zone ? zone.id : null, weight,
+            Number(quote.fee) || 0,
+            customerPaidShipping, customerPaidCod,
+            expectedDate,
+            cur.is_test ? 1 : 0,
+          );
+          logShipmentHistory({
+            shipment_id: shipId, from_status: null, to_status: 'ready',
+            notes: 'تم إنشاء الشحنة تلقائياً عند تأكيد الطلب',
+            actor_id: actor.id, actor_name: actor.name,
+          });
+          txResult.autoShipment = { id: shipId, awb_number: awb, courier_id: autoShipCourier.id, zone_id: zone ? zone.id : null, weight_kg: weight, expected_delivery_date: expectedDate };
+        } else if (isConfirmTransition && autoShipCourier && autoShipCourier._existingShipment) {
+          txResult.autoShipment = { reused: true, ...autoShipCourier._existingShipment };
         }
       })();
     } catch (e) {
@@ -2158,7 +2251,7 @@ app.patch('/api/orders/:id', (req, res) => {
         actor_id, actor_name);
       recategorizeOne(cur.userEmail);
     }
-    res.json({ ok: true, order: hydrateOrder(fresh) });
+    res.json({ ok: true, order: hydrateOrder(fresh), auto_shipment: txResult.autoShipment || null });
   } catch (e) { console.error('PATCH /api/orders error:', e); res.status(500).json({ error: e.message }); }
 });
 
