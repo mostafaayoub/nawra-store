@@ -367,12 +367,10 @@ ensureColumn('returns',   'received_at_warehouse_at',  'DATETIME');             
 ensureColumn('returns',   'refunded_at',               'DATETIME');              // stage 5: refund fully issued (distinct from legacy processed_at)
 ensureColumn('returns',   'return_courier_cost',       'REAL DEFAULT 0');        // cost of the return-leg waybill (store always pays courier; who-it's-deducted-from is below)
 ensureColumn('returns',   'return_shipping_paid_by',   "TEXT DEFAULT 'store'");   // store | customer — derived from return_reasons.shipping_paid_by on approval
-ensureColumn('return_reasons', 'shipping_paid_by',     "TEXT DEFAULT 'store'");   // ADJ 1: per-reason rule for who eats the return-leg shipping cost
-
-// One-shot backfill: the seeded "changed_mind" reason should make the
-// customer pay return shipping (Part E "غيرت رأيي" rule). Other seeds
-// stay 'store' (the column default).
-try { db.prepare("UPDATE return_reasons SET shipping_paid_by = 'customer' WHERE id = 'rr_def_changed_mind' AND shipping_paid_by = 'store'").run(); } catch {}
+// NOTE: ensureColumn for return_reasons.shipping_paid_by + the seed-
+// backfill UPDATE are placed AFTER the return_reasons CREATE TABLE +
+// seeder IIFE (below at line ~487). Otherwise this would run before the
+// table exists on a fresh DB and silently fail.
 
 // pending_refunds — Balance Sheet liability bucket (Part I). One row per
 // approved-but-not-yet-paid refund. Cleared on refund issuance (status =
@@ -485,6 +483,14 @@ db.exec(`
   `);
   seeds.forEach((s, i) => ins.run(`rr_def_${s.key}`, s.name_ar, s.name_en, i + 1));
 })();
+
+// Order Lifecycle Integration — return_reasons.shipping_paid_by column
+// + one-shot backfill so the seeded 'changed_mind' reason makes the
+// customer pay return shipping (Part E "غيرت رأيي" rule). Runs AFTER
+// the CREATE TABLE + seeder above so the column add + UPDATE both find
+// their target. Idempotent across reboots.
+ensureColumn('return_reasons', 'shipping_paid_by', "TEXT DEFAULT 'store'");
+try { db.prepare("UPDATE return_reasons SET shipping_paid_by = 'customer' WHERE id = 'rr_def_changed_mind' AND shipping_paid_by = 'store'").run(); } catch {}
 
 db.exec(`
   CREATE TABLE IF NOT EXISTS return_attachments (
