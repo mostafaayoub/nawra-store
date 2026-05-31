@@ -4295,7 +4295,7 @@ app.get('/api/stock-changes', (_req, res) => {
 // settings.shipping JSON for the cart's free-shipping calc — that switch
 // happens in Phase 2 alongside the new admin pages.
 
-const SHIPMENT_STATUSES = new Set(['ready','shipped','delivered','returned','cancelled']);
+const SHIPMENT_STATUSES = new Set(['ready','shipped','delivered','returned','cancelled','refused']);
 
 // Sequential AWB allocator wrapped in a txn so two simultaneous POSTs can't
 // pick the same number. Starts at 1 in a fresh DB. Outbound waybills use
@@ -5039,6 +5039,130 @@ app.patch('/api/shipments/:key', (req, res) => {
     const fresh = db.prepare('SELECT * FROM shipments WHERE id = ?').get(cur.id);
     res.json(hydrateShipment(fresh));
   } catch (e) { console.error('PATCH /api/shipments', e); res.status(500).json({ error: e.message }); }
+});
+
+// POST /api/shipments/:awb/customer-refused (Phase 1 slice 1.8, Part F) ────
+// Admin marks an outbound shipment as refused-at-the-door. Atomic effects:
+//   1. outbound shipment.status = 'refused', shipment_status_history entry
+//   2. order.status -> رفض الاستلام via applyStockTransition (stock returns
+//      to pool: reserved -= qty, available += qty)
+//   3. order.is_refused = 1 (set by applyStockTransition)
+//   4. NEW refused_return shipment row (shipment_type='refused_return',
+//      AWB-RET-XXXX, courier_cost matched to outbound for the return leg)
+//   5. customer_debts row for the original outbound shipping fee — the
+//      customer owes the store this regardless (courier still ran the
+//      trip). Reason='shipping_after_refusal'. Surfaces on Receivables.
+// is_test guard cascades from the outbound shipment.
+app.post('/api/shipments/:key/customer-refused', (req, res) => {
+  try {
+    const k = req.params.key;
+    const cur = (k.startsWith('AWB-')
+      ? db.prepare('SELECT * FROM shipments WHERE awb_number = ?').get(k)
+      : db.prepare('SELECT * FROM shipments WHERE id = ?').get(k));
+    if (!cur) return res.status(404).json({ error: 'not found' });
+    if (cur.shipment_type === 'return' || cur.shipment_type === 'refused_return') {
+      return res.status(409).json({ error: 'cannot_refuse_return_leg', message: 'هذه شحنة عودة — لا يمكن وصفها كرفض استلام' });
+    }
+    if (cur.status !== 'shipped') {
+      return res.status(409).json({ error: 'shipment_not_shipped', message: `الشحنة في حالة "${cur.status}" — رفض الاستلام متاح فقط بعد الشحن`, current: cur.status });
+    }
+    const order = db.prepare('SELECT * FROM orders WHERE id = ?').get(cur.order_id);
+    if (!order) return res.status(404).json({ error: 'parent_order_not_found' });
+
+    const b = req.body || {};
+    const actor = { id: b.actor_id || null, name: b.actor_name || null };
+    const notes = (b.notes || '').trim() || null;
+    const isTest = cur.is_test === 1;
+
+    const result = { refused_return: null, customer_debt: null };
+    try {
+      db.transaction(() => {
+        // 1. Mark outbound as refused.
+        db.prepare("UPDATE shipments SET status = 'refused', updated_at = datetime('now') WHERE id = ?").run(cur.id);
+        logShipmentHistory({
+          shipment_id: cur.id, from_status: cur.status, to_status: 'refused',
+          notes: notes || 'رفض الاستلام عند التسليم',
+          actor_id: actor.id, actor_name: actor.name,
+        });
+
+        // 2 + 3. Order transition. applyStockTransition handles the stock
+        // release back to the pool + activity_log + is_refused flag.
+        db.prepare("UPDATE orders SET status = 'رفض الاستلام' WHERE id = ?").run(cur.order_id);
+        applyStockTransition({
+          orderId: cur.order_id,
+          fromStatus: order.status,
+          toStatus: 'رفض الاستلام',
+          actor,
+        });
+
+        // 4. Refused-return shipment (the actual physical trip back to store).
+        const zone = cur.zone_id ? db.prepare('SELECT * FROM shipping_zones WHERE id = ?').get(cur.zone_id) : null;
+        const shipId = `sh_${Date.now().toString(36)}_${Math.random().toString(36).slice(2,5)}`;
+        const awb = allocateReturnAwbNumber();
+        // Return-leg cost = same as outbound (courier same trip, just reversed).
+        // Store pays both legs in a refusal scenario; customer-paid_shipping=0
+        // since the customer never accepted.
+        db.prepare(`
+          INSERT INTO shipments
+            (id, awb_number, order_id, courier_id, zone_id, weight_kg, courier_cost,
+             customer_paid_shipping, customer_paid_cod, status,
+             shipment_type, parent_shipment_id, is_test)
+          VALUES (?,?,?,?,?,?,?, 0, 0, 'ready', 'refused_return', ?, ?)
+        `).run(
+          shipId, awb, cur.order_id, cur.courier_id, zone ? zone.id : null,
+          Number(cur.weight_kg) || 0,
+          Number(cur.courier_cost) || 0,
+          cur.id,
+          isTest ? 1 : 0,
+        );
+        logShipmentHistory({
+          shipment_id: shipId, from_status: null, to_status: 'ready',
+          notes: 'إنشاء شحنة عودة بعد رفض الاستلام',
+          actor_id: actor.id, actor_name: actor.name,
+        });
+        result.refused_return = { id: shipId, awb_number: awb };
+
+        // 5. Customer debt for the outbound shipping fee (what customer
+        // would have paid had they accepted delivery). Surfaces on
+        // Receivables. Skip if the order had no shipping cost (free shipping).
+        const debtAmount = Number(cur.customer_paid_shipping) || Number(order.shipping_cost) || 0;
+        if (debtAmount > 0) {
+          const debtId = `dbt_${Date.now().toString(36)}_${Math.random().toString(36).slice(2,5)}`;
+          db.prepare(`
+            INSERT INTO customer_debts
+              (id, customer_id, customer_name, customer_phone, amount, reason,
+               status, reference_order_id, is_test)
+            VALUES (?, ?, ?, ?, ?, 'shipping_after_refusal', 'pending', ?, ?)
+          `).run(
+            debtId, order.userEmail || null, order.name || null, order.phone || null,
+            debtAmount, cur.order_id, isTest ? 1 : 0,
+          );
+          result.customer_debt = { id: debtId, amount: debtAmount, reason: 'shipping_after_refusal' };
+        }
+      })();
+    } catch (e) {
+      console.error('[refused-delivery] tx failed:', e);
+      return res.status(500).json({ error: e.message });
+    }
+
+    // Notify the super admin (skip on test rows — messages table has no is_test).
+    if (!isTest) {
+      try {
+        sendMessage({
+          from_user_id: actor.id,
+          from_user_name: actor.name || 'الإدارة',
+          to_user_id: SUPER_ADMIN_FALLBACK,
+          type: 'info',
+          subject: `رفض الاستلام — ${cur.awb_number}`,
+          body: `العميل ${order.name || ''} رفض استلام الشحنة ${cur.awb_number}. تم إنشاء شحنة عودة ${result.refused_return ? result.refused_return.awb_number : ''} و تسجيل دين العميل لتكلفة الشحن.`,
+          metadata: { kind: 'customer_refused', awb: cur.awb_number, order_id: cur.order_id, refused_return: result.refused_return, customer_debt: result.customer_debt, requires_action: false },
+        });
+      } catch {}
+    }
+
+    const fresh = db.prepare('SELECT * FROM shipments WHERE id = ?').get(cur.id);
+    res.json({ ok: true, shipment: hydrateShipment(fresh), ...result });
+  } catch (e) { console.error('POST /api/shipments/:awb/customer-refused error:', e); res.status(500).json({ error: e.message }); }
 });
 
 // POST /api/shipments/:key/notes — append to internal_notes (timestamped).
